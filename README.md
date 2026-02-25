@@ -14,9 +14,42 @@ This folder contains Soroban smart contracts written in Rust.
 ## Build & test
 
 ```bash
+cd contracts
+
+# 1) Run unit tests
 cargo test
-cargo build --release
+
+# 2) Build the deployable contract WASM (recommended)
+# Produces an optimized .wasm under each contract crate's `target/` directory.
+stellar contract build
+
+# 3) Build the deployable contract WASM (cargo-only alternative)
+rustup target add wasm32-unknown-unknown
+cargo build --release --target wasm32-unknown-unknown -p rent_wallet
 ```
+
+The `cargo build --release` (native) build is not the deployable artifact for Soroban.
+
+## Troubleshooting
+
+- **Tooling versions**
+  - `rustc --version` should be stable.
+  - `stellar --version` should be recent enough to support `stellar contract build`.
+  - This repo uses `soroban-sdk = 22.0.7` (see `rent_wallet/Cargo.toml`).
+
+- **`error: toolchain ... does not support target 'wasm32-unknown-unknown'`**
+  - Install the target:
+    - `rustup target add wasm32-unknown-unknown`
+
+- **`stellar: command not found` / `stellar contract: unknown command`**
+  - Install/upgrade the Stellar CLI with Soroban support and verify:
+    - `stellar --version`
+    - `stellar contract --help`
+
+- **Build succeeds but you can’t find the `.wasm`**
+  - If you used `stellar contract build`, look under the relevant contract crate’s `target/` directory.
+  - If you used the cargo-only build, look under:
+    - `contracts/target/wasm32-unknown-unknown/release/`
 
 ## Deploy (example)
 
