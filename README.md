@@ -77,3 +77,25 @@ Recommended contributor expectations for deployment-related issues:
 - `debit(user: Address, amount: i128)` (admin-auth)
 - `balance(user: Address) -> i128`
 - `set_admin(new_admin: Address)` (admin-auth)
+
+### Events
+
+The `rent_wallet` contract emits Soroban events to support indexing and auditability.
+
+- **`credit`**
+  - **Topic**
+    - `("credit", user: Address)`
+  - **Data**
+    - `(amount: i128, new_balance: i128)`
+
+- **`debit`**
+  - **Topic**
+    - `("debit", user: Address)`
+  - **Data**
+    - `(amount: i128, new_balance: i128)`
+
+For both events:
+
+- **`user`** is the address whose balance was modified.
+- **`amount`** is the delta applied (always positive).
+- **`new_balance`** is the resulting balance after applying the delta.

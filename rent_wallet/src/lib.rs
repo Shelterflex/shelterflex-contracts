@@ -54,11 +54,12 @@ impl RentWallet {
 
         let mut b = balances(&env);
         let cur = b.get(user.clone()).unwrap_or(0);
-        b.set(user.clone(), cur + amount);
+        let new_balance = cur + amount;
+        b.set(user.clone(), new_balance);
         put_balances(&env, b);
 
         env.events()
-            .publish((Symbol::new(&env, "credit"), user), amount);
+            .publish((Symbol::new(&env, "credit"), user), (amount, new_balance));
     }
 
     pub fn debit(env: Env, user: Address, amount: i128) {
@@ -72,11 +73,12 @@ impl RentWallet {
         if cur < amount {
             panic!("insufficient balance")
         }
-        b.set(user.clone(), cur - amount);
+        let new_balance = cur - amount;
+        b.set(user.clone(), new_balance);
         put_balances(&env, b);
 
         env.events()
-            .publish((Symbol::new(&env, "debit"), user), amount);
+            .publish((Symbol::new(&env, "debit"), user), (amount, new_balance));
     }
 
     pub fn balance(env: Env, user: Address) -> i128 {
