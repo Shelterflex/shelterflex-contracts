@@ -91,3 +91,80 @@ impl RentWallet {
             .publish((Symbol::new(&env, "set_admin"),), new_admin);
     }
 }
+
+#[cfg(test)]
+mod test {
+    extern crate std;
+
+    use super::{RentWallet, RentWalletClient};
+    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+    use soroban_sdk::{Address, Env, IntoVal};
+
+    fn setup(env: &Env) -> (soroban_sdk::Address, RentWalletClient<'_>, Address, Address, Address) {
+        let contract_id = env.register_contract(None, RentWallet);
+        let client = RentWalletClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let user = Address::generate(env);
+        let non_admin = Address::generate(env);
+        client.init(&admin);
+        (contract_id, client, admin, user, non_admin)
+    }
+
+    #[test]
+    #[should_panic]
+    fn non_admin_cannot_credit() {
+        let env = Env::default();
+        let (contract_id, client, _admin, user, non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (user.clone(), 100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.credit(&user, &100i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn non_admin_cannot_debit() {
+        let env = Env::default();
+        let (contract_id, client, _admin, user, non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "debit",
+                args: (user.clone(), 1i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.debit(&user, &1i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn non_admin_cannot_set_admin() {
+        let env = Env::default();
+        let (contract_id, client, _admin, _user, non_admin) = setup(&env);
+        let new_admin = Address::generate(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.set_admin(&new_admin);
+    }
+}
