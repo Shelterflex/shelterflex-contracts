@@ -7,6 +7,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, Symbo
 pub enum DataKey {
     Admin,
     Balances,
+    Paused,
 }
 
 #[contract]
@@ -32,6 +33,19 @@ fn require_admin(env: &Env) {
     admin.require_auth();
 }
 
+fn get_paused_state(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get::<_, bool>(&DataKey::Paused)
+        .unwrap_or(false)
+}
+
+fn require_not_paused(env: &Env) {
+    if get_paused_state(env) {
+        panic!("contract is paused")
+    }
+}
+
 #[contractimpl]
 impl RentWallet {
     pub fn init(env: Env, admin: Address) {
@@ -48,6 +62,7 @@ impl RentWallet {
 
     pub fn credit(env: Env, user: Address, amount: i128) {
         require_admin(&env);
+        require_not_paused(&env);
         if amount <= 0 {
             panic!("amount must be positive")
         }
@@ -64,6 +79,7 @@ impl RentWallet {
 
     pub fn debit(env: Env, user: Address, amount: i128) {
         require_admin(&env);
+        require_not_paused(&env);
         if amount <= 0 {
             panic!("amount must be positive")
         }
@@ -91,6 +107,22 @@ impl RentWallet {
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.events()
             .publish((Symbol::new(&env, "set_admin"),), new_admin);
+    }
+
+    pub fn pause(env: Env) {
+        require_admin(&env);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((Symbol::new(&env, "pause"),), ());
+    }
+
+    pub fn unpause(env: Env) {
+        require_admin(&env);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((Symbol::new(&env, "unpause"),), ());
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        get_paused_state(&env)
     }
 }
 
@@ -168,5 +200,224 @@ mod test {
         }]);
 
         client.set_admin(&new_admin);
+    }
+
+    #[test]
+    fn admin_can_pause() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.pause();
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    fn admin_can_unpause() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _non_admin) = setup(&env);
+
+        // First pause
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
+        assert!(client.is_paused());
+
+        // Then unpause
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unpause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.unpause();
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    #[should_panic]
+    fn non_admin_cannot_pause() {
+        let env = Env::default();
+        let (contract_id, client, _admin, _user, non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.pause();
+    }
+
+    #[test]
+    #[should_panic]
+    fn non_admin_cannot_unpause() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, non_admin) = setup(&env);
+
+        // First pause as admin
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
+
+        // Try to unpause as non-admin
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unpause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.unpause();
+    }
+
+    #[test]
+    #[should_panic]
+    fn credit_fails_when_paused() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        // Pause the contract
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
+
+        // Try to credit while paused
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (user.clone(), 100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.credit(&user, &100i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn debit_fails_when_paused() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        // First credit some balance
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (user.clone(), 100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.credit(&user, &100i128);
+
+        // Pause the contract
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
+
+        // Try to debit while paused
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "debit",
+                args: (user.clone(), 50i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.debit(&user, &50i128);
+    }
+
+    #[test]
+    fn balance_works_when_paused() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        // Credit some balance
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (user.clone(), 100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.credit(&user, &100i128);
+        assert_eq!(client.balance(&user), 100i128);
+
+        // Pause the contract
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
+
+        // Balance should still be readable
+        assert_eq!(client.balance(&user), 100i128);
+    }
+
+    #[test]
+    fn is_paused_returns_false_initially() {
+        let env = Env::default();
+        let (_contract_id, client, _admin, _user, _non_admin) = setup(&env);
+        assert!(!client.is_paused());
     }
 }
