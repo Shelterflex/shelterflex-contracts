@@ -77,6 +77,9 @@ Recommended contributor expectations for deployment-related issues:
 - `debit(user: Address, amount: i128)` (admin-auth)
 - `balance(user: Address) -> i128`
 - `set_admin(new_admin: Address)` (admin-auth)
+- `pause()` (admin-auth)
+- `unpause()` (admin-auth)
+- `is_paused() -> bool`
 
 ### Events
 
@@ -99,3 +102,30 @@ For both events:
 - **`user`** is the address whose balance was modified.
 - **`amount`** is the delta applied (always positive).
 - **`new_balance`** is the resulting balance after applying the delta.
+
+- **`pause`**
+  - **Topic**
+    - `("pause",)`
+  - **Data**
+    - `()`
+  - Emitted when the contract is paused by the admin.
+
+- **`unpause`**
+  - **Topic**
+    - `("unpause",)`
+  - **Data**
+    - `()`
+  - Emitted when the contract is unpaused by the admin.
+
+### Pause Functionality
+
+The contract includes a pause mechanism for emergency stops:
+
+- **`pause()`**: Pauses the contract. Only the admin can call this function.
+- **`unpause()`**: Unpauses the contract. Only the admin can call this function.
+- **`is_paused()`**: Returns `true` if the contract is paused, `false` otherwise.
+
+**Behavior when paused:**
+- `credit()` and `debit()` operations will fail with a panic if called while the contract is paused.
+- `balance()` and other read-only operations continue to work normally when paused.
+- Only the admin can pause or unpause the contract.
