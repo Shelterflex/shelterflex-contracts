@@ -10,6 +10,7 @@ This folder contains Soroban smart contracts written in Rust.
 ## Workspace
 
 - `rent_wallet/` - Minimal reference contract for wallet-like credit/debit flows
+- `rent_payments/` - Contract for managing deals and receipts with paginated queries
 
 ## Build & test
 
@@ -129,3 +130,58 @@ The contract includes a pause mechanism for emergency stops:
 - `credit()` and `debit()` operations will fail with a panic if called while the contract is paused.
 - `balance()` and other read-only operations continue to work normally when paused.
 - Only the admin can pause or unpause the contract.
+
+### `rent_payments`
+
+- `init(admin: Address)`
+- `create_receipt(deal_id: DealId, amount: i128, payer: Address) -> Receipt` (admin-auth)
+- `list_receipts_by_deal(deal_id: DealId, limit: u32, cursor: Option<Cursor>) -> ReceiptPage`
+- `receipt_count(deal_id: DealId) -> u64`
+
+#### Cursor-Based Pagination
+
+The `list_receipts_by_deal` function implements cursor-based pagination for efficient retrieval of receipts.
+
+**Cursor Format:**
+- The cursor is a struct containing:
+  - `timestamp: Timestamp` (u64) - The timestamp of the last receipt in the previous page
+  - `tx_id: TxId` (BytesN<32>) - The transaction ID of the last receipt in the previous page
+
+**Ordering:**
+Receipts are ordered by a stable, deterministic ordering:
+1. Primary: `timestamp` (ascending)
+2. Secondary: `tx_id` (ascending, byte-wise comparison)
+
+This ensures:
+- Consistent pagination results even if multiple receipts share the same timestamp
+- No skipping or duplication of receipts across pages
+- Deterministic ordering that remains stable over time
+
+**Usage:**
+- First page: Pass `None` as the cursor
+- Subsequent pages: Use `next_cursor` from the previous `ReceiptPage`
+- Check `has_next` to determine if more pages are available
+
+**Example:**
+```rust
+// First page
+let page1 = client.list_receipts_by_deal(&deal_id, &10u32, &None);
+
+// Next page (if available)
+if page1.has_next {
+    let page2 = client.list_receipts_by_deal(&deal_id, &10u32, &Some(page1.next_cursor));
+}
+```
+
+**Limits:**
+- `limit` must be between 1 and 100 (inclusive)
+- The function will panic if an invalid limit is provided
+
+#### Events
+
+- **`receipt_created`**
+  - **Topic**
+    - `("receipt_created", deal_id: DealId)`
+  - **Data**
+    - `(receipt_id: ReceiptId, amount: i128, payer: Address)`
+  - Emitted when a new receipt is created for a deal.
