@@ -131,8 +131,8 @@ mod test {
     extern crate std;
 
     use super::{RentWallet, RentWalletClient};
-    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
-    use soroban_sdk::{Address, Env, IntoVal};
+    use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
+    use soroban_sdk::{Address, Env, IntoVal, Symbol, TryIntoVal};
 
     fn setup(env: &Env) -> (soroban_sdk::Address, RentWalletClient<'_>, Address, Address, Address) {
         let contract_id = env.register_contract(None, RentWallet);
@@ -832,5 +832,85 @@ mod test {
         let env = Env::default();
         let (_contract_id, client, _admin, _user, _non_admin) = setup(&env);
         assert!(!client.is_paused());
+    }
+
+    // ============================================================================
+    // Event Tests
+    // ============================================================================
+
+    #[test]
+    fn credit_emits_event() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (user.clone(), 100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.credit(&user, &100i128);
+
+        let events = env.events().all();
+        let event = events.last().unwrap();
+
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = event.1.clone();
+        assert_eq!(topics.len(), 2);
+        
+        let event_name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(event_name, Symbol::new(&env, "credit"));
+        
+        let event_user: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(event_user, user);
+
+        let data: (i128, i128) = event.2.try_into_val(&env).unwrap();
+        assert_eq!(data, (100i128, 100i128));
+    }
+
+    #[test]
+    fn debit_emits_event() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (user.clone(), 200i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.credit(&user, &200i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "debit",
+                args: (user.clone(), 50i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.debit(&user, &50i128);
+
+        let events = env.events().all();
+        let event = events.last().unwrap();
+
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = event.1.clone();
+        assert_eq!(topics.len(), 2);
+        
+        let event_name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(event_name, Symbol::new(&env, "debit"));
+        
+        let event_user: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(event_user, user);
+
+        let data: (i128, i128) = event.2.try_into_val(&env).unwrap();
+        assert_eq!(data, (50i128, 150i128));
     }
 }
