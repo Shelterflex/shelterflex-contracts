@@ -3,4 +3,5 @@ resolver = "2"
 members = [
   "rent_wallet",
   "rent_payments",
+  "transaction-receipt-contract",
 ]
