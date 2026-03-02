@@ -227,11 +227,8 @@ mod test {
 
 
     use super::{RentWallet, RentWalletClient};
-
-    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
-
-    use soroban_sdk::{Address, Env, IntoVal};
-
+    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke, Events};
+    use soroban_sdk::{Address, Env, IntoVal, Symbol, TryIntoVal};
 
 
     fn setup(env: &Env) -> (soroban_sdk::Address, RentWalletClient<'_>, Address, Address, Address) {
@@ -1034,8 +1031,8 @@ mod test {
         let event_user: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
         assert_eq!(event_user, user);
 
-        let data: (i128, i128) = event.2.try_into_val(&env).unwrap();
-        assert_eq!(data, (100i128, 100i128));
+        let data: i128 = event.2.try_into_val(&env).unwrap();
+        assert_eq!(data, 100i128);
     }
 
     #[test]
@@ -1077,8 +1074,8 @@ mod test {
         let event_user: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
         assert_eq!(event_user, user);
 
-        let data: (i128, i128) = event.2.try_into_val(&env).unwrap();
-        assert_eq!(data, (50i128, 150i128));
+        let data: i128 = event.2.try_into_val(&env).unwrap();
+        assert_eq!(data, 50i128);
     }
 }
 
