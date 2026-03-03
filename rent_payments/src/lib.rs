@@ -1,8 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, vec, Address, Env, Symbol, Vec, BytesN,
-};
+use soroban_sdk::{contract, contractimpl, contracttype, vec, Address, BytesN, Env, Symbol, Vec};
 
 /// Deal ID type - using u64 for simplicity
 pub type DealId = u64;
@@ -42,7 +40,7 @@ pub struct Receipt {
 #[derive(Clone, Debug)]
 pub struct ReceiptPage {
     pub receipts: Vec<Receipt>,
-    pub has_next: bool, // True if there are more receipts
+    pub has_next: bool,      // True if there are more receipts
     pub next_cursor: Cursor, // Cursor for next page (only valid if has_next is true)
 }
 
@@ -105,11 +103,12 @@ fn get_tx_id(env: &Env) -> TxId {
     // For now, we'll use a combination of timestamp and sequence number
     let ledger_info = env.ledger();
     let timestamp = ledger_info.timestamp();
-    
+
     // Get a global counter from storage to ensure uniqueness across all receipts
     // Use a special deal_id (u64::MAX) as the key for the global counter
     let global_counter_key = DataKey::ReceiptCount(u64::MAX);
-    let counter: u64 = env.storage()
+    let counter: u64 = env
+        .storage()
         .persistent()
         .get(&global_counter_key)
         .unwrap_or(0);
@@ -117,30 +116,30 @@ fn get_tx_id(env: &Env) -> TxId {
     env.storage()
         .persistent()
         .set(&global_counter_key, &new_counter);
-    
+
     // Create a deterministic tx_id from timestamp and counter
     // In a real implementation, you'd get this from the actual transaction hash
     let mut bytes = [0u8; 32];
-    
+
     // Convert timestamp (u64) to bytes manually
     let mut ts = timestamp;
     for i in (0..8).rev() {
         bytes[i] = (ts & 0xFF) as u8;
         ts >>= 8;
     }
-    
-    // Convert counter (u64) to bytes manually  
+
+    // Convert counter (u64) to bytes manually
     let mut cnt = new_counter;
     for i in (8..16).rev() {
         bytes[i] = (cnt & 0xFF) as u8;
         cnt >>= 8;
     }
-    
+
     // Fill remaining bytes with a pattern for uniqueness
     for i in 16..32 {
         bytes[i] = (timestamp as u8).wrapping_add(i as u8);
     }
-    
+
     BytesN::from_array(env, &bytes)
 }
 
@@ -156,14 +155,9 @@ impl RentPayments {
 
     /// Create a new receipt for a deal
     /// This function records a monthly payment receipt
-    pub fn create_receipt(
-        env: Env,
-        deal_id: DealId,
-        amount: i128,
-        payer: Address,
-    ) -> Receipt {
+    pub fn create_receipt(env: Env, deal_id: DealId, amount: i128, payer: Address) -> Receipt {
         require_admin(&env);
-        
+
         if amount <= 0 {
             panic!("amount must be positive");
         }
@@ -195,23 +189,23 @@ impl RentPayments {
     }
 
     /// List receipts for a deal with cursor-based pagination
-    /// 
+    ///
     /// # Arguments
     /// * `deal_id` - The deal ID to list receipts for
     /// * `limit` - Maximum number of receipts to return (must be > 0 and <= 100)
     /// * `cursor` - Optional cursor for pagination. If None, starts from the beginning.
     ///              Cursor format: (timestamp, tx_id) tuple
-    /// 
+    ///
     /// # Returns
     /// * `ReceiptPage` containing:
     ///   - `receipts`: Vec of receipts ordered by (timestamp ASC, tx_id ASC)
     ///   - `next_cursor`: Optional cursor for the next page, None if this is the last page
-    /// 
+    ///
     /// # Ordering
     /// Receipts are ordered by:
     /// 1. `timestamp` (ascending)
     /// 2. `tx_id` (ascending, as bytes comparison)
-    /// 
+    ///
     /// This ensures stable, deterministic ordering even if multiple receipts have the same timestamp.
     pub fn list_receipts_by_deal(
         env: Env,
@@ -229,7 +223,7 @@ impl RentPayments {
         // Convert to a sortable format - we'll need to collect into a Vec for sorting
         // Since Soroban Vec doesn't support sort_by directly, we'll build a sorted Vec
         let mut sorted_receipts = vec![&env];
-        
+
         // Collect all receipts into the sorted Vec
         for i in 0..receipts_len {
             sorted_receipts.push_back(receipts.get(i).unwrap());
@@ -246,15 +240,13 @@ impl RentPayments {
                 for i in 0..(len - 1) {
                     let a = sorted_receipts.get(i).unwrap();
                     let b = sorted_receipts.get(i + 1).unwrap();
-                    
+
                     let should_swap = match a.timestamp.cmp(&b.timestamp) {
                         core::cmp::Ordering::Greater => true,
-                        core::cmp::Ordering::Equal => {
-                            a.tx_id.to_array() > b.tx_id.to_array()
-                        }
+                        core::cmp::Ordering::Equal => a.tx_id.to_array() > b.tx_id.to_array(),
                         core::cmp::Ordering::Less => false,
                     };
-                    
+
                     if should_swap {
                         sorted_receipts.set(i, b.clone());
                         sorted_receipts.set(i + 1, a.clone());
@@ -268,14 +260,13 @@ impl RentPayments {
         let mut start_index = 0u32;
         if let Some(cursor) = cursor {
             let cursor_tx_id_array = cursor.tx_id.to_array();
-            
+
             // Find the first receipt with (timestamp, tx_id) > cursor
             for i in 0..sorted_receipts.len() {
                 let r = sorted_receipts.get(i).unwrap();
                 let r_tx_id_array = r.tx_id.to_array();
                 if r.timestamp > cursor.timestamp
-                    || (r.timestamp == cursor.timestamp
-                        && r_tx_id_array > cursor_tx_id_array)
+                    || (r.timestamp == cursor.timestamp && r_tx_id_array > cursor_tx_id_array)
                 {
                     start_index = i;
                     break;
@@ -320,23 +311,32 @@ impl RentPayments {
                 0
             };
             if let Some(last_receipt) = page_receipts.get(last_index) {
-                (true, Cursor {
-                    timestamp: last_receipt.timestamp,
-                    tx_id: last_receipt.tx_id.clone(),
-                })
+                (
+                    true,
+                    Cursor {
+                        timestamp: last_receipt.timestamp,
+                        tx_id: last_receipt.tx_id.clone(),
+                    },
+                )
             } else {
                 // Fallback: create empty cursor
-                (false, Cursor {
-                    timestamp: 0,
-                    tx_id: empty_tx_id,
-                })
+                (
+                    false,
+                    Cursor {
+                        timestamp: 0,
+                        tx_id: empty_tx_id,
+                    },
+                )
             }
         } else {
             // No more receipts
-            (false, Cursor {
-                timestamp: 0,
-                tx_id: empty_tx_id,
-            })
+            (
+                false,
+                Cursor {
+                    timestamp: 0,
+                    tx_id: empty_tx_id,
+                },
+            )
         };
 
         ReceiptPage {
@@ -370,7 +370,6 @@ mod test {
         client.init(&admin);
         (admin, client, contract_id)
     }
-
 
     #[test]
     fn test_list_receipts_by_deal_empty() {
@@ -442,16 +441,8 @@ mod test {
         assert!(!page2.has_next);
 
         // Verify no duplicates between pages
-        let page1_ids: std::vec::Vec<u64> = page1
-            .receipts
-            .iter()
-            .map(|r| r.id)
-            .collect();
-        let page2_ids: std::vec::Vec<u64> = page2
-            .receipts
-            .iter()
-            .map(|r| r.id)
-            .collect();
+        let page1_ids: std::vec::Vec<u64> = page1.receipts.iter().map(|r| r.id).collect();
+        let page2_ids: std::vec::Vec<u64> = page2.receipts.iter().map(|r| r.id).collect();
 
         for id in &page1_ids {
             assert!(!page2_ids.contains(id), "Duplicate receipt found: {}", id);
@@ -498,7 +489,7 @@ mod test {
 
         // Verify we got exactly 25 receipts (no skipping)
         assert_eq!(all_receipt_ids.len(), 25);
-        
+
         // Verify all IDs are unique (no duplicates)
         let mut sorted_ids = all_receipt_ids.clone();
         sorted_ids.sort();
@@ -529,7 +520,7 @@ mod test {
 
         // Get all receipts in one call
         let all_page = client.list_receipts_by_deal(&deal_id, &100u32, &None);
-        
+
         // Get receipts in pages and verify ordering is consistent
         let mut cursor = None;
         let mut prev_timestamp = 0u64;
@@ -537,14 +528,14 @@ mod test {
 
         loop {
             let page = client.list_receipts_by_deal(&deal_id, &3u32, &cursor);
-            
+
             for receipt in page.receipts.iter() {
                 // Verify ordering: timestamp should be >= previous
                 assert!(
                     receipt.timestamp >= prev_timestamp,
                     "Receipts not in ascending timestamp order"
                 );
-                
+
                 // If timestamp is equal, tx_id should be >= previous
                 if receipt.timestamp == prev_timestamp {
                     if let Some(ref prev) = prev_tx_id {
@@ -556,7 +547,7 @@ mod test {
                         );
                     }
                 }
-                
+
                 prev_timestamp = receipt.timestamp;
                 prev_tx_id = Some(receipt.tx_id.clone());
             }
@@ -582,7 +573,10 @@ mod test {
         }
 
         let all_ids: std::vec::Vec<u64> = all_page.receipts.iter().map(|r| r.id).collect();
-        assert_eq!(paginated_ids, all_ids, "Paginated results don't match full results");
+        assert_eq!(
+            paginated_ids, all_ids,
+            "Paginated results don't match full results"
+        );
     }
 
     #[test]
