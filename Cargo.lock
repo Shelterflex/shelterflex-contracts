@@ -1578,6 +1578,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "staking_pool"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "staking_rewards"
 version = "0.1.0"
 dependencies = [
