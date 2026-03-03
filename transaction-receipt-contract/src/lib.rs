@@ -9,7 +9,9 @@
 
 extern crate alloc;
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, BytesN, String, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, String, Symbol,
+};
 
 /// Allowed external reference sources for transaction ID generation
 pub const ALLOWED_SOURCES: [&str; 7] = [
@@ -137,48 +139,54 @@ pub struct TransactionReceiptContract;
 #[contractimpl]
 impl TransactionReceiptContract {
     /// Initialize the contract with admin and operator addresses
-    /// 
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `admin` - The admin address (can manage operator and pause state)
     /// * `operator` - The operator address (can record receipts)
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` - If initialization succeeds
     /// * `Err(ContractError::AlreadyInitialized)` - If contract is already initialized
-    /// 
+    ///
     /// # Requirements
     /// * Can only be called once (Requirements 1.3)
     /// * Stores admin and operator addresses (Requirements 1.1, 1.2)
     /// * Initializes paused state to false
-    pub fn init(env: soroban_sdk::Env, admin: Address, operator: Address) -> Result<(), ContractError> {
+    pub fn init(
+        env: soroban_sdk::Env,
+        admin: Address,
+        operator: Address,
+    ) -> Result<(), ContractError> {
         // Check if already initialized by checking if Admin key exists
         if env.storage().instance().has(&StorageKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
-        
+
         // Store admin address
         env.storage().instance().set(&StorageKey::Admin, &admin);
-        
+
         // Store operator address
-        env.storage().instance().set(&StorageKey::Operator, &operator);
-        
+        env.storage()
+            .instance()
+            .set(&StorageKey::Operator, &operator);
+
         // Initialize paused state to false
         env.storage().instance().set(&StorageKey::Paused, &false);
-        
+
         Ok(())
     }
 
     /// Pause the contract to prevent receipt recording
-    /// 
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `admin` - The admin address attempting to pause
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` - If pause succeeds
     /// * `Err(ContractError::NotAuthorized)` - If caller is not admin
-    /// 
+    ///
     /// # Requirements
     /// * Only admin can pause (Requirement 5.3)
     /// * Updates paused state to true (Requirement 6.1)
@@ -186,26 +194,26 @@ impl TransactionReceiptContract {
     pub fn pause(env: soroban_sdk::Env, admin: Address) -> Result<(), ContractError> {
         // Require authentication from the admin
         admin.require_auth();
-        
+
         // Verify caller is admin
         require_admin(&env, &admin)?;
-        
+
         // Set paused state to true (idempotent - no error if already paused)
         env.storage().instance().set(&StorageKey::Paused, &true);
-        
+
         Ok(())
     }
 
     /// Unpause the contract to allow receipt recording
-    /// 
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `admin` - The admin address attempting to unpause
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` - If unpause succeeds
     /// * `Err(ContractError::NotAuthorized)` - If caller is not admin
-    /// 
+    ///
     /// # Requirements
     /// * Only admin can unpause (Requirement 5.4)
     /// * Updates paused state to false (Requirement 6.1)
@@ -213,55 +221,61 @@ impl TransactionReceiptContract {
     pub fn unpause(env: soroban_sdk::Env, admin: Address) -> Result<(), ContractError> {
         // Require authentication from the admin
         admin.require_auth();
-        
+
         // Verify caller is admin
         require_admin(&env, &admin)?;
-        
+
         // Set paused state to false (idempotent - no error if already unpaused)
         env.storage().instance().set(&StorageKey::Paused, &false);
-        
+
         Ok(())
     }
 
     /// Set a new operator address
-    /// 
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `admin` - The admin address attempting to set operator
     /// * `new_operator` - The new operator address
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` - If operator update succeeds
     /// * `Err(ContractError::NotAuthorized)` - If caller is not admin
-    /// 
+    ///
     /// # Requirements
     /// * Only admin can set operator (Requirement 5.2, 7.2)
     /// * Updates operator address in storage (Requirement 7.1)
     /// * Accepts any valid Soroban Address (Requirement 7.3)
-    pub fn set_operator(env: soroban_sdk::Env, admin: Address, new_operator: Address) -> Result<(), ContractError> {
+    pub fn set_operator(
+        env: soroban_sdk::Env,
+        admin: Address,
+        new_operator: Address,
+    ) -> Result<(), ContractError> {
         // Require authentication from the admin
         admin.require_auth();
-        
+
         // Verify caller is admin
         require_admin(&env, &admin)?;
-        
+
         // Update operator address in storage
-        env.storage().instance().set(&StorageKey::Operator, &new_operator);
-        
+        env.storage()
+            .instance()
+            .set(&StorageKey::Operator, &new_operator);
+
         Ok(())
     }
 
     /// Record a new transaction receipt
-    /// 
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `operator` - The operator address attempting to record
     /// * `input` - Receipt input parameters (ReceiptInput struct)
-    /// 
+    ///
     /// # Returns
     /// * `Ok(BytesN<32>)` - The generated tx_id
     /// * `Err(ContractError)` - If validation fails or duplicate detected
-    /// 
+    ///
     /// # Requirements
     /// * Only operator can record (Requirement 5.1)
     /// * Contract must not be paused (Requirement 6.2)
@@ -275,29 +289,33 @@ impl TransactionReceiptContract {
     ) -> Result<BytesN<32>, ContractError> {
         // Require authentication from the operator
         operator.require_auth();
-        
+
         // Verify caller is operator
         require_operator(&env, &operator)?;
-        
+
         // Verify contract is not paused
         require_not_paused(&env)?;
-        
+
         // Validate amount_usdc is positive
         if input.amount_usdc <= 0 {
             return Err(ContractError::InvalidAmount);
         }
-        
+
         // Generate tx_id from canonical external reference
         let tx_id = generate_tx_id(&env, &input.external_ref_source, &input.external_ref)?;
-        
+
         // Check for duplicate tx_id
-        if env.storage().persistent().has(&StorageKey::Receipt(tx_id.clone())) {
+        if env
+            .storage()
+            .persistent()
+            .has(&StorageKey::Receipt(tx_id.clone()))
+        {
             return Err(ContractError::DuplicateTransaction);
         }
-        
+
         // Get current ledger timestamp
         let timestamp = env.ledger().timestamp();
-        
+
         // Create Receipt struct
         let receipt = Receipt {
             tx_id: tx_id.clone(),
@@ -315,37 +333,41 @@ impl TransactionReceiptContract {
             metadata_hash: input.metadata_hash,
             timestamp,
         };
-        
+
         // Store receipt in persistent storage
-        env.storage().persistent().set(&StorageKey::Receipt(tx_id.clone()), &receipt);
-        
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Receipt(tx_id.clone()), &receipt);
+
         // Update deal index
         let deal_count_key = StorageKey::DealCount(input.deal_id.clone());
         let current_count: u32 = env.storage().persistent().get(&deal_count_key).unwrap_or(0);
-        
+
         // Store tx_id in deal index
         let deal_index_key = StorageKey::DealIndex(input.deal_id.clone(), current_count);
         env.storage().persistent().set(&deal_index_key, &tx_id);
-        
+
         // Increment deal count
-        env.storage().persistent().set(&deal_count_key, &(current_count + 1));
-        
+        env.storage()
+            .persistent()
+            .set(&deal_count_key, &(current_count + 1));
+
         // Emit event with topic ("receipt", tx_id) and receipt payload
         env.events().publish(("receipt", tx_id.clone()), receipt);
-        
+
         Ok(tx_id)
     }
 
     /// Retrieve a receipt by transaction ID
-    /// 
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `tx_id` - The transaction ID to look up
-    /// 
+    ///
     /// # Returns
     /// * `Some(Receipt)` - If the receipt exists
     /// * `None` - If the receipt does not exist
-    /// 
+    ///
     /// # Requirements
     /// * Returns complete receipt if exists (Requirement 8.1, 8.3)
     /// * Returns None for non-existent tx_id (Requirement 8.2)
@@ -355,16 +377,16 @@ impl TransactionReceiptContract {
     }
 
     /// List all receipts for a specific deal with pagination
-    /// 
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `deal_id` - The deal identifier to query
     /// * `limit` - Maximum number of receipts to return
     /// * `cursor` - Optional starting index for pagination (default: 0)
-    /// 
+    ///
     /// # Returns
     /// * `Vec<Receipt>` - Vector of receipts matching the deal_id
-    /// 
+    ///
     /// # Requirements
     /// * Returns receipts matching deal_id (Requirement 9.1)
     /// * Supports pagination (Requirements 9.2, 9.4, 9.5)
@@ -377,42 +399,50 @@ impl TransactionReceiptContract {
         cursor: Option<u32>,
     ) -> soroban_sdk::Vec<Receipt> {
         use soroban_sdk::Vec;
-        
+
         let mut results = Vec::new(&env);
-        
+
         // Get total count of receipts for this deal
         let deal_count_key = StorageKey::DealCount(deal_id.clone());
         let total_count: u32 = env.storage().persistent().get(&deal_count_key).unwrap_or(0);
-        
+
         // Calculate start index from cursor (default 0)
         let start_index = cursor.unwrap_or(0);
-        
+
         // Calculate end index (start + limit, capped at total_count)
         let end_index = core::cmp::min(start_index + limit, total_count);
-        
+
         // Iterate through deal index to load receipts
         for index in start_index..end_index {
             let deal_index_key = StorageKey::DealIndex(deal_id.clone(), index);
-            
+
             // Load tx_id from deal index
-            if let Some(tx_id) = env.storage().persistent().get::<StorageKey, BytesN<32>>(&deal_index_key) {
+            if let Some(tx_id) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, BytesN<32>>(&deal_index_key)
+            {
                 // Load receipt for this tx_id
-                if let Some(receipt) = env.storage().persistent().get::<StorageKey, Receipt>(&StorageKey::Receipt(tx_id)) {
+                if let Some(receipt) = env
+                    .storage()
+                    .persistent()
+                    .get::<StorageKey, Receipt>(&StorageKey::Receipt(tx_id))
+                {
                     results.push_back(receipt);
                 }
             }
         }
-        
+
         results
     }
 }
 
 /// Helper function to verify that the caller is the admin
-/// 
+///
 /// # Arguments
 /// * `env` - The Soroban environment
 /// * `caller` - The address attempting the operation
-/// 
+///
 /// # Returns
 /// * `Ok(())` - If the caller is the admin
 /// * `Err(ContractError::NotAuthorized)` - If the caller is not the admin
@@ -423,21 +453,21 @@ fn require_admin(env: &soroban_sdk::Env, caller: &Address) -> Result<(), Contrac
         .instance()
         .get(&StorageKey::Admin)
         .unwrap_or_else(|| panic!("Admin not initialized"));
-    
+
     // Verify caller is admin
     if caller != &admin {
         return Err(ContractError::NotAuthorized);
     }
-    
+
     Ok(())
 }
 
 /// Helper function to verify that the caller is the operator
-/// 
+///
 /// # Arguments
 /// * `env` - The Soroban environment
 /// * `caller` - The address attempting the operation
-/// 
+///
 /// # Returns
 /// * `Ok(())` - If the caller is the operator
 /// * `Err(ContractError::NotAuthorized)` - If the caller is not the operator
@@ -448,20 +478,20 @@ fn require_operator(env: &soroban_sdk::Env, caller: &Address) -> Result<(), Cont
         .instance()
         .get(&StorageKey::Operator)
         .unwrap_or_else(|| panic!("Operator not initialized"));
-    
+
     // Verify caller is operator
     if caller != &operator {
         return Err(ContractError::NotAuthorized);
     }
-    
+
     Ok(())
 }
 
 /// Helper function to verify that the contract is not paused
-/// 
+///
 /// # Arguments
 /// * `env` - The Soroban environment
-/// 
+///
 /// # Returns
 /// * `Ok(())` - If the contract is not paused
 /// * `Err(ContractError::ContractPaused)` - If the contract is paused
@@ -472,32 +502,32 @@ fn require_not_paused(env: &soroban_sdk::Env) -> Result<(), ContractError> {
         .instance()
         .get(&StorageKey::Paused)
         .unwrap_or(false);
-    
+
     // Return error if contract is paused
     if paused {
         return Err(ContractError::ContractPaused);
     }
-    
+
     Ok(())
 }
 
 /// Helper function to generate a deterministic transaction ID from external payment references
-/// 
+///
 /// # Arguments
 /// * `env` - The Soroban environment
 /// * `external_ref_source` - The payment source (must be in ALLOWED_SOURCES)
 /// * `external_ref` - The external payment reference string
-/// 
+///
 /// # Returns
 /// * `Ok(BytesN<32>)` - SHA-256 hash of the canonical external reference string
 /// * `Err(ContractError)` - If validation fails
-/// 
+///
 /// # Validation Rules
 /// * external_ref_source must be in ALLOWED_SOURCES (case-insensitive)
 /// * external_ref must not be empty after trimming
 /// * external_ref must not contain pipe character (|)
 /// * external_ref must not exceed 256 characters
-/// 
+///
 /// # Canonical Format
 /// The canonical string format is: "v1|source=<lowercased_trimmed_source>|ref=<trimmed_ref>"
 fn generate_tx_id(
@@ -506,53 +536,53 @@ fn generate_tx_id(
     external_ref: &String,
 ) -> Result<BytesN<32>, ContractError> {
     use soroban_sdk::Bytes;
-    
+
     // Convert Symbol to string for validation
     // We need to use the alloc feature for string manipulation
     extern crate alloc;
-    use alloc::string::ToString;
     use alloc::string::String as StdString;
-    
+    use alloc::string::ToString;
+
     let source_str: StdString = external_ref_source.to_string();
     let source_trimmed = source_str.trim();
     let source_lower = source_trimmed.to_lowercase();
-    
+
     // Validate external_ref_source against ALLOWED_SOURCES
     if !ALLOWED_SOURCES.contains(&source_lower.as_str()) {
         return Err(ContractError::InvalidExternalRefSource);
     }
-    
+
     // Get the external_ref as a string and trim it
     let ref_str: StdString = external_ref.to_string();
     let ref_trimmed = ref_str.trim();
-    
+
     // Validate external_ref is not empty after trimming
     if ref_trimmed.is_empty() {
         return Err(ContractError::InvalidExternalRef);
     }
-    
+
     // Validate external_ref does not contain pipe character
     if ref_trimmed.contains('|') {
         return Err(ContractError::InvalidExternalRef);
     }
-    
+
     // Validate external_ref does not exceed 256 characters
     if ref_trimmed.len() > 256 {
         return Err(ContractError::InvalidExternalRef);
     }
-    
+
     // Construct canonical string: "v1|source=<lowercased_trimmed_source>|ref=<trimmed_ref>"
     use alloc::format;
     let canonical = format!("v1|source={}|ref={}", source_lower, ref_trimmed);
-    
+
     // Convert to Bytes for hashing
     let canonical_bytes = Bytes::from_slice(env, canonical.as_bytes());
-    
+
     // Compute SHA-256 hash using Soroban's crypto module
     let hash = env.crypto().sha256(&canonical_bytes);
-    
+
     Ok(hash.into())
 }
 
-mod test;
 mod integration_tests;
+mod test;
