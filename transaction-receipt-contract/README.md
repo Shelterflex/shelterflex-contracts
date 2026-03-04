@@ -40,6 +40,19 @@ Validation rules:
 
 The canonical string is SHA-256 hashed to produce a 32-byte `tx_id` (type `BytesN<32>`).
 
+## Transaction type validation
+
+The contract enforces strict validation on transaction types to ensure indexer consistency. Only the following transaction types are allowed for MVP:
+
+- `TENANT_REPAYMENT` - Tenant rent payments
+- `LANDLORD_PAYOUT` - Landlord payouts  
+- `WHISTLEBLOWER_REWARD` - Whistleblower rewards
+- `STAKE` - Staking operations
+- `UNSTAKE` - Unstaking operations
+- `STAKE_REWARD_CLAIM` - Staking reward claims
+
+Any transaction type not in this list will be rejected with `InvalidTxType` error (error code 9). Transaction types are case-sensitive and must match exactly.
+
 ## Metadata hash
 
 `metadata_hash` is optional and expected to be the SHA-256 hash of the canonical receipt payload (v1). The contract stores it as `BytesN<32>` if provided; generation of this hash is the caller's responsibility.
@@ -56,6 +69,7 @@ The contract exposes the following `ContractError` variants (numeric values show
 - `InvalidExternalRefSource` (6)
 - `InvalidExternalRef` (7)
 - `InvalidTimestamp` (8)
+- `InvalidTxType` (9) - Transaction type not in allowed list
 
 ## Events
 

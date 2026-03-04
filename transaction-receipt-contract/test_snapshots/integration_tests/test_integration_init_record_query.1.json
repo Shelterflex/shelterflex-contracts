@@ -110,7 +110,7 @@
                         "symbol": "tx_type"
                       },
                       "val": {
-                        "symbol": "rent_payment"
+                        "symbol": "TENANT_REPAYMENT"
                       }
                     }
                   ]
@@ -226,7 +226,7 @@
                         "symbol": "tx_type"
                       },
                       "val": {
-                        "symbol": "rent_payment"
+                        "symbol": "LANDLORD_PAYOUT"
                       }
                     }
                   ]
@@ -342,7 +342,7 @@
                         "symbol": "tx_type"
                       },
                       "val": {
-                        "symbol": "rent_payment"
+                        "symbol": "WHISTLEBLOWER_REWARD"
                       }
                     }
                   ]
@@ -748,7 +748,7 @@
                         "symbol": "tx_type"
                       },
                       "val": {
-                        "symbol": "rent_payment"
+                        "symbol": "TENANT_REPAYMENT"
                       }
                     }
                   ]
@@ -895,7 +895,7 @@
                         "symbol": "tx_type"
                       },
                       "val": {
-                        "symbol": "rent_payment"
+                        "symbol": "WHISTLEBLOWER_REWARD"
                       }
                     }
                   ]
@@ -1042,7 +1042,7 @@
                         "symbol": "tx_type"
                       },
                       "val": {
-                        "symbol": "rent_payment"
+                        "symbol": "LANDLORD_PAYOUT"
                       }
                     }
                   ]

@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use crate::{generate_tx_id, ContractError, Receipt, StorageKey, ALLOWED_SOURCES};
+use crate::{generate_tx_id, validate_tx_type, ContractError, Receipt, StorageKey, ALLOWED_SOURCES, ALLOWED_TX_TYPES};
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Symbol, Vec};
 
 // Golden test vectors - shared with backend tests
@@ -34,6 +34,7 @@ fn test_contract_error_codes() {
     assert_eq!(ContractError::InvalidExternalRefSource as u32, 6);
     assert_eq!(ContractError::InvalidExternalRef as u32, 7);
     assert_eq!(ContractError::InvalidTimestamp as u32, 8);
+    assert_eq!(ContractError::InvalidTxType as u32, 9);
 }
 
 #[test]
@@ -652,5 +653,63 @@ fn test_golden_vectors() {
         let result = generate_tx_id(&env, &source, &reference);
         assert!(result.is_err(), "Test vector 3 should fail");
         assert_eq!(result.unwrap_err(), ContractError::InvalidExternalRef);
+    }
+}
+
+#[test]
+fn test_allowed_tx_types_constant() {
+    // Verify ALLOWED_TX_TYPES contains expected values
+    assert_eq!(ALLOWED_TX_TYPES.len(), 6);
+    assert!(ALLOWED_TX_TYPES.contains(&"TENANT_REPAYMENT"));
+    assert!(ALLOWED_TX_TYPES.contains(&"LANDLORD_PAYOUT"));
+    assert!(ALLOWED_TX_TYPES.contains(&"WHISTLEBLOWER_REWARD"));
+    assert!(ALLOWED_TX_TYPES.contains(&"STAKE"));
+    assert!(ALLOWED_TX_TYPES.contains(&"UNSTAKE"));
+    assert!(ALLOWED_TX_TYPES.contains(&"STAKE_REWARD_CLAIM"));
+}
+
+#[test]
+fn test_validate_tx_type_valid_types() {
+    let env = Env::default();
+    
+    // Test all valid transaction types
+    let valid_types = [
+        "TENANT_REPAYMENT",
+        "LANDLORD_PAYOUT", 
+        "WHISTLEBLOWER_REWARD",
+        "STAKE",
+        "UNSTAKE",
+        "STAKE_REWARD_CLAIM",
+    ];
+    
+    for tx_type_str in valid_types.iter() {
+        let tx_type = Symbol::new(&env, tx_type_str);
+        let result = validate_tx_type(&tx_type);
+        assert!(result.is_ok(), "Transaction type '{}' should be valid", tx_type_str);
+    }
+}
+
+#[test]
+fn test_validate_tx_type_invalid_types() {
+    let env = Env::default();
+    
+    // Test invalid transaction types
+    let invalid_types = [
+        "rent_payment",
+        "deposit",
+        "refund",
+        "UNKNOWN_TYPE",
+        "invalid",
+        "",
+        "TENANTREPAYMENT",  // Missing underscore
+        "tenant_repayment", // lowercase
+        "Stake",           // mixed case
+    ];
+    
+    for tx_type_str in invalid_types.iter() {
+        let tx_type = Symbol::new(&env, tx_type_str);
+        let result = validate_tx_type(&tx_type);
+        assert!(result.is_err(), "Transaction type '{}' should be invalid", tx_type_str);
+        assert_eq!(result.unwrap_err(), ContractError::InvalidTxType);
     }
 }
