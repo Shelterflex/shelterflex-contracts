@@ -230,29 +230,33 @@ impl RentPayments {
         }
 
         // Sort receipts by (timestamp, tx_id) in ascending order
-        // We'll use a simple bubble sort since we can't use sort_by in no_std easily
-        // For production, consider using a more efficient algorithm or storing sorted
+        // Using insertion sort for better performance than bubble sort
         if sorted_receipts.len() > 1 {
-            let mut swapped = true;
-            while swapped {
-                swapped = false;
-                let len = sorted_receipts.len();
-                for i in 0..(len - 1) {
-                    let a = sorted_receipts.get(i).unwrap();
-                    let b = sorted_receipts.get(i + 1).unwrap();
-
-                    let should_swap = match a.timestamp.cmp(&b.timestamp) {
-                        core::cmp::Ordering::Greater => true,
-                        core::cmp::Ordering::Equal => a.tx_id.to_array() > b.tx_id.to_array(),
-                        core::cmp::Ordering::Less => false,
+            let len = sorted_receipts.len();
+            for i in 1..len {
+                let key = sorted_receipts.get(i).unwrap().clone();
+                let mut j = i;
+                
+                while j > 0 {
+                    let prev = sorted_receipts.get(j - 1).unwrap();
+                    let should_swap = match key.timestamp.cmp(&prev.timestamp) {
+                        core::cmp::Ordering::Less => true,
+                        core::cmp::Ordering::Equal => {
+                            let key_tx_id_array = key.tx_id.to_array();
+                            let prev_tx_id_array = prev.tx_id.to_array();
+                            key_tx_id_array < prev_tx_id_array
+                        },
+                        core::cmp::Ordering::Greater => false,
                     };
-
+                    
                     if should_swap {
-                        sorted_receipts.set(i, b.clone());
-                        sorted_receipts.set(i + 1, a.clone());
-                        swapped = true;
+                        sorted_receipts.set(j, prev.clone());
+                        j -= 1;
+                    } else {
+                        break;
                     }
                 }
+                sorted_receipts.set(j, key);
             }
         }
 
@@ -272,7 +276,7 @@ impl RentPayments {
                     break;
                 }
             }
-            // If no receipt found, start_index remains at end
+            // If no receipt found that is > cursor, we're at the end
             if start_index == 0 && sorted_receipts.len() > 0 {
                 let first = sorted_receipts.get(0).unwrap();
                 let first_tx_id_array = first.tx_id.to_array();
@@ -358,7 +362,7 @@ mod test {
 
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        testutils::{Address as _, MockAuth, MockAuthInvoke, Ledger},
         Address, BytesN, Env, IntoVal,
     };
 
@@ -577,6 +581,88 @@ mod test {
             paginated_ids, all_ids,
             "Paginated results don't match full results"
         );
+    }
+
+    #[test]
+    fn test_list_receipts_by_deal_same_timestamp() {
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let deal_id = 1u64;
+        let payer = Address::generate(&env);
+
+        // Set a fixed timestamp for all receipts to test same-timestamp ordering
+        let fixed_timestamp = 12345u64;
+        env.ledger().set_timestamp(fixed_timestamp);
+
+        // Create multiple receipts with the same timestamp
+        for i in 1..=5 {
+            env.mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_receipt",
+                    args: (deal_id, (i * 1000) as i128, payer.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }]);
+            client.create_receipt(&deal_id, &(i * 1000), &payer);
+        }
+
+        // Get all receipts and verify they are ordered by tx_id when timestamps are equal
+        let all_page = client.list_receipts_by_deal(&deal_id, &100u32, &None);
+        assert_eq!(all_page.receipts.len(), 5);
+
+        // Verify all receipts have the same timestamp
+        for receipt in all_page.receipts.iter() {
+            assert_eq!(receipt.timestamp, fixed_timestamp);
+        }
+
+        // Verify tx_id ordering is strictly increasing
+        let mut prev_tx_id: Option<BytesN<32>> = None;
+        for receipt in all_page.receipts.iter() {
+            if let Some(ref prev) = prev_tx_id {
+                let receipt_array = receipt.tx_id.to_array();
+                let prev_array = prev.to_array();
+                assert!(
+                    receipt_array > prev_array,
+                    "Receipts with same timestamp not in ascending tx_id order"
+                );
+            }
+            prev_tx_id = Some(receipt.tx_id.clone());
+        }
+
+        // Test pagination with same timestamp
+        let page1 = client.list_receipts_by_deal(&deal_id, &2u32, &None);
+        assert_eq!(page1.receipts.len(), 2);
+        assert!(page1.has_next);
+
+        let cursor1 = page1.next_cursor.clone();
+        let page2 = client.list_receipts_by_deal(&deal_id, &2u32, &Some(cursor1));
+        assert_eq!(page2.receipts.len(), 2);
+        assert!(page2.has_next);
+
+        let cursor2 = page2.next_cursor.clone();
+        let page3 = client.list_receipts_by_deal(&deal_id, &2u32, &Some(cursor2));
+        assert_eq!(page3.receipts.len(), 1);
+        assert!(!page3.has_next);
+
+        // Verify no duplicates across pages
+        let mut all_tx_ids = std::vec::Vec::new();
+        for receipt in page1.receipts.iter() {
+            all_tx_ids.push(receipt.tx_id.clone());
+        }
+        for receipt in page2.receipts.iter() {
+            all_tx_ids.push(receipt.tx_id.clone());
+        }
+        for receipt in page3.receipts.iter() {
+            all_tx_ids.push(receipt.tx_id.clone());
+        }
+
+        // All tx_ids should be unique
+        let mut sorted_tx_ids = all_tx_ids.clone();
+        sorted_tx_ids.sort_by(|a, b| a.to_array().cmp(&b.to_array()));
+        sorted_tx_ids.dedup();
+        assert_eq!(sorted_tx_ids.len(), 5, "Found duplicate tx_ids across pages");
     }
 
     #[test]
