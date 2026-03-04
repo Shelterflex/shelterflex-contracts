@@ -31,7 +31,7 @@ fn test_integration_init_record_query() {
     let input_a1 = ReceiptInput {
         external_ref_source: Symbol::new(&env, "manual_admin"),
         external_ref: String::from_str(&env, "a_ref_1"),
-        tx_type: Symbol::new(&env, "rent_payment"),
+        tx_type: Symbol::new(&env, "TENANT_REPAYMENT"),
         amount_usdc: 1_000_0000000i128,
         token: token.clone(),
         deal_id: deal_a.clone(),
@@ -47,7 +47,7 @@ fn test_integration_init_record_query() {
     let input_a2 = ReceiptInput {
         external_ref_source: Symbol::new(&env, "manual_admin"),
         external_ref: String::from_str(&env, "a_ref_2"),
-        tx_type: Symbol::new(&env, "rent_payment"),
+        tx_type: Symbol::new(&env, "LANDLORD_PAYOUT"),
         amount_usdc: 2_000_0000000i128,
         token: token.clone(),
         deal_id: deal_a.clone(),
@@ -63,7 +63,7 @@ fn test_integration_init_record_query() {
     let input_b1 = ReceiptInput {
         external_ref_source: Symbol::new(&env, "manual_admin"),
         external_ref: String::from_str(&env, "b_ref_1"),
-        tx_type: Symbol::new(&env, "rent_payment"),
+        tx_type: Symbol::new(&env, "WHISTLEBLOWER_REWARD"),
         amount_usdc: 3_000_0000000i128,
         token: token.clone(),
         deal_id: deal_b.clone(),
@@ -136,7 +136,7 @@ fn test_integration_authorization_flow() {
     let input = ReceiptInput {
         external_ref_source: Symbol::new(&env, "manual_admin"),
         external_ref: String::from_str(&env, "auth_ref"),
-        tx_type: Symbol::new(&env, "rent_payment"),
+        tx_type: Symbol::new(&env, "STAKE"),
         amount_usdc: 5_000_0000000i128,
         token: token.clone(),
         deal_id: deal.clone(),
@@ -185,7 +185,7 @@ fn test_integration_pause_flow() {
     let input = ReceiptInput {
         external_ref_source: Symbol::new(&env, "manual_admin"),
         external_ref: String::from_str(&env, "pause_ref"),
-        tx_type: Symbol::new(&env, "rent_payment"),
+        tx_type: Symbol::new(&env, "STAKE"),
         amount_usdc: 10_000_0000000i128,
         token: token.clone(),
         deal_id: deal.clone(),
@@ -248,7 +248,7 @@ fn test_integration_deal_queries_and_pagination() {
         let input = ReceiptInput {
             external_ref_source: Symbol::new(&env, "manual_admin"),
             external_ref: String::from_str(&env, &ext),
-            tx_type: Symbol::new(&env, "rent_payment"),
+            tx_type: Symbol::new(&env, "STAKE"),
             amount_usdc: 1_000_0000000i128 + (i as i128),
             token: token.clone(),
             deal_id: deal.clone(),

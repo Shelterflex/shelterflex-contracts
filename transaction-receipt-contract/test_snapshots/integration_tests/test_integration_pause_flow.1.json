@@ -110,7 +110,7 @@
                         "symbol": "tx_type"
                       },
                       "val": {
-                        "symbol": "rent_payment"
+                        "symbol": "STAKE"
                       }
                     }
                   ]
@@ -265,7 +265,7 @@
                         "symbol": "tx_type"
                       },
                       "val": {
-                        "symbol": "rent_payment"
+                        "symbol": "STAKE"
                       }
                     }
                   ]
@@ -570,7 +570,7 @@
                         "symbol": "tx_type"
                       },
                       "val": {
-                        "symbol": "rent_payment"
+                        "symbol": "STAKE"
                       }
                     }
                   ]
@@ -717,7 +717,7 @@
                         "symbol": "tx_type"
                       },
                       "val": {
-                        "symbol": "rent_payment"
+                        "symbol": "STAKE"
                       }
                     }
                   ]
@@ -1069,7 +1069,7 @@
                     "symbol": "tx_type"
                   },
                   "val": {
-                    "symbol": "rent_payment"
+                    "symbol": "STAKE"
                   }
                 }
               ]
