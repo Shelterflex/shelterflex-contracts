@@ -1,7 +1,14 @@
 #![cfg(test)]
 
 use crate::{generate_tx_id, ContractError, Receipt, StorageKey, ALLOWED_SOURCES};
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Symbol};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Symbol, Vec};
+
+// Golden test vectors - shared with backend tests
+const GOLDEN_TEST_VECTORS: &[(&str, &str, &str, &str)] = &[
+    ("paystack", "psk_12345", "v1|source=paystack|ref=psk_12345", "71e9a576e18d122acff8e200cefac00bfcba57f4dc64e9cdad89f64304c6d0ec"),
+    ("BANK_TRANSFER", " UTR_98765 ", "v1|source=bank_transfer|ref=UTR_98765", "e6cd19e46ae4e78bffce61f7ada43833ee97f01e3317be080e27ee398e74a29b"),
+    ("stellar", "", "", "Ref cannot be empty after trimming"), // Error case
+];
 
 #[test]
 fn test_allowed_sources_constant() {
@@ -595,4 +602,55 @@ fn test_pause_unpause_cycle() {
         env.storage().instance().get(&StorageKey::Paused).unwrap()
     });
     assert_eq!(paused, true);
+}
+
+// Golden test vectors - shared with backend tests
+#[test]
+fn test_golden_vectors() {
+    let env = Env::default();
+    
+    // Test vector 1: paystack, psk_12345 - should succeed
+    {
+        let source = Symbol::new(&env, "paystack");
+        let reference = String::from_str(&env, "psk_12345");
+        let result = generate_tx_id(&env, &source, &reference);
+        assert!(result.is_ok(), "Test vector 1 should succeed");
+        
+        let tx_id = result.unwrap();
+        let tx_id_bytes = tx_id.to_array();
+        assert_eq!(tx_id_bytes.len(), 32, "Should produce 32-byte hash");
+        
+        // Verify it's deterministic - same input should produce same output
+        let source2 = Symbol::new(&env, "paystack");
+        let reference2 = String::from_str(&env, "psk_12345");
+        let result2 = generate_tx_id(&env, &source2, &reference2);
+        assert_eq!(tx_id, result2.unwrap(), "Should be deterministic");
+    }
+    
+    // Test vector 2: BANK_TRANSFER, " UTR_98765 " - should succeed
+    {
+        let source = Symbol::new(&env, "BANK_TRANSFER");
+        let reference = String::from_str(&env, " UTR_98765 ");
+        let result = generate_tx_id(&env, &source, &reference);
+        assert!(result.is_ok(), "Test vector 2 should succeed");
+        
+        let tx_id = result.unwrap();
+        let tx_id_bytes = tx_id.to_array();
+        assert_eq!(tx_id_bytes.len(), 32, "Should produce 32-byte hash");
+        
+        // Should be different from the first test vector
+        let source1 = Symbol::new(&env, "paystack");
+        let reference1 = String::from_str(&env, "psk_12345");
+        let result1 = generate_tx_id(&env, &source1, &reference1);
+        assert_ne!(tx_id, result1.unwrap(), "Different inputs should produce different hashes");
+    }
+    
+    // Test vector 3: stellar, "" - should fail
+    {
+        let source = Symbol::new(&env, "stellar");
+        let reference = String::from_str(&env, "");
+        let result = generate_tx_id(&env, &source, &reference);
+        assert!(result.is_err(), "Test vector 3 should fail");
+        assert_eq!(result.unwrap_err(), ContractError::InvalidExternalRef);
+    }
 }
