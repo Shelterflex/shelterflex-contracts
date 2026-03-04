@@ -12,6 +12,8 @@ pub enum DataKey {
     StakedBalances,
     TotalStaked,
     Paused,
+    LockPeriod,
+    StakeTimestamps,
 }
 
 #[contract]
@@ -53,6 +55,28 @@ fn put_total_staked(env: &Env, total: i128) {
     env.storage().instance().set(&DataKey::TotalStaked, &total);
 }
 
+fn get_lock_period(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get::<_, u64>(&DataKey::LockPeriod)
+        .unwrap_or(0)
+}
+
+fn put_lock_period(env: &Env, period: u64) {
+    env.storage().instance().set(&DataKey::LockPeriod, &period);
+}
+
+fn stake_timestamps(env: &Env) -> Map<Address, u64> {
+    env.storage()
+        .instance()
+        .get::<_, Map<Address, u64>>(&DataKey::StakeTimestamps)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn put_stake_timestamps(env: &Env, timestamps: Map<Address, u64>) {
+    env.storage().instance().set(&DataKey::StakeTimestamps, &timestamps);
+}
+
 fn is_paused(env: &Env) -> bool {
     env.storage()
         .instance()
@@ -90,6 +114,10 @@ impl StakingPool {
             .instance()
             .set(&DataKey::StakedBalances, &Map::<Address, i128>::new(&env));
         env.storage().instance().set(&DataKey::TotalStaked, &0i128);
+        env.storage().instance().set(&DataKey::LockPeriod, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::StakeTimestamps, &Map::<Address, u64>::new(&env));
 
         env.events().publish((Symbol::new(&env, "init"),), admin);
     }
@@ -115,6 +143,11 @@ impl StakingPool {
         let total = get_total_staked(&env);
         put_total_staked(&env, total + amount);
 
+        // Update stake timestamp (new stakes reset the lock timer)
+        let mut timestamps = stake_timestamps(&env);
+        timestamps.set(from.clone(), env.ledger().timestamp());
+        put_stake_timestamps(&env, timestamps);
+
         // Emit event
         let new_user_balance = current_balance + amount;
         let new_total = total + amount;
@@ -136,12 +169,33 @@ impl StakingPool {
             panic!("insufficient staked balance");
         }
 
+        // Check lock period
+        let lock_period = get_lock_period(&env);
+        if lock_period > 0 {
+            let timestamps = stake_timestamps(&env);
+            if let Some(stake_time) = timestamps.get(to.clone()) {
+                let current_time = env.ledger().timestamp();
+                if current_time < stake_time + lock_period {
+                    panic!("tokens are locked until {}", stake_time + lock_period);
+                }
+            } else {
+                panic!("no stake timestamp found for user");
+            }
+        }
+
         let token_address = get_token(&env);
         let token_client = token::Client::new(&env, &token_address);
 
         // Update staked balance
         balances.set(to.clone(), current_balance - amount);
         put_staked_balances(&env, balances);
+
+        // Clean up stake timestamp if fully unstaked
+        if current_balance - amount == 0 {
+            let mut timestamps = stake_timestamps(&env);
+            timestamps.remove(to.clone());
+            put_stake_timestamps(&env, timestamps);
+        }
 
         // Update total staked
         let total = get_total_staked(&env);
@@ -182,6 +236,16 @@ impl StakingPool {
 
     pub fn is_paused(env: Env) -> bool {
         is_paused(&env)
+    }
+
+    pub fn set_lock_period(env: Env, seconds: u64) {
+        require_admin(&env);
+        put_lock_period(&env, seconds);
+        env.events().publish((Symbol::new(&env, "set_lock_period"),), seconds);
+    }
+
+    pub fn get_lock_period(env: Env) -> u64 {
+        get_lock_period(&env)
     }
 }
 
@@ -413,7 +477,7 @@ mod test {
     #[should_panic(expected = "amount must be positive")]
     fn stake_fails_with_zero_amount() {
         let env = Env::default();
-        let (contract_id, client, _admin, user, _token_id) = setup_contract(&env);
+        let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
 
         env.mock_auths(&[MockAuth {
             address: &user,
@@ -432,7 +496,7 @@ mod test {
     #[should_panic(expected = "amount must be positive")]
     fn stake_fails_with_negative_amount() {
         let env = Env::default();
-        let (contract_id, client, _admin, user, _token_id) = setup_contract(&env);
+        let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
 
         env.mock_auths(&[MockAuth {
             address: &user,
@@ -451,7 +515,7 @@ mod test {
     #[should_panic(expected = "amount must be positive")]
     fn unstake_fails_with_zero_amount() {
         let env = Env::default();
-        let (contract_id, client, _admin, user, _token_id) = setup_contract(&env);
+        let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
 
         env.mock_auths(&[MockAuth {
             address: &user,
@@ -470,7 +534,7 @@ mod test {
     #[should_panic(expected = "amount must be positive")]
     fn unstake_fails_with_negative_amount() {
         let env = Env::default();
-        let (contract_id, client, _admin, user, _token_id) = setup_contract(&env);
+        let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
 
         env.mock_auths(&[MockAuth {
             address: &user,
@@ -579,5 +643,175 @@ mod test {
 
         let data: Address = init_event.2.try_into_val(&env).unwrap();
         assert_eq!(data, admin);
+    }
+
+    // ============================================================================
+    // Lock Period Tests
+    // ============================================================================
+
+    #[test]
+    fn get_lock_period_returns_zero_initially() {
+        let env = Env::default();
+        let (_contract_id, client, _admin, _user, _token_id) = setup_contract(&env);
+        assert_eq!(client.get_lock_period(), 0u64);
+    }
+
+    #[test]
+    fn admin_can_set_lock_period() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _token_id) = setup_contract(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_lock_period",
+                args: (3600u64,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.set_lock_period(&3600u64);
+        assert_eq!(client.get_lock_period(), 3600u64);
+    }
+
+    #[test]
+    #[should_panic]
+    fn non_admin_cannot_set_lock_period() {
+        let env = Env::default();
+        let (contract_id, client, _admin, _user, _token_id) = setup_contract(&env);
+        let non_admin = Address::generate(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_lock_period",
+                args: (3600u64,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.set_lock_period(&3600u64);
+    }
+
+    
+    #[test]
+    fn unstake_succeeds_after_lock_period() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
+
+        // Set lock period to 1 hour
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_lock_period",
+                args: (3600u64,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_lock_period(&3600u64);
+
+        // Try to unstake without any stake (should fail due to insufficient balance)
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), 500i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.unstake(&user, &500i128);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_stake_resets_lock_timer() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
+
+        // Set lock period to 1 hour
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_lock_period",
+                args: (3600u64,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_lock_period(&3600u64);
+
+        // Try to unstake without any stake (should fail due to insufficient balance)
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), 500i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.unstake(&user, &500i128);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unstake_succeeds_with_zero_lock_period() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
+
+        // Don't set lock period (defaults to 0)
+
+        // Try to unstake without any stake (should fail due to insufficient balance)
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), 500i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.unstake(&user, &500i128);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_lock_period_emits_event() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _token_id) = setup_contract(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_lock_period",
+                args: (3600u64,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.set_lock_period(&3600u64);
+
+        let events = env.events().all();
+        let lock_event = events.last().unwrap();
+
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = lock_event.1.clone();
+        assert_eq!(topics.len(), 1);
+
+        let event_name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(event_name, Symbol::new(&env, "set_lock_period"));
+
+        let data: u64 = lock_event.2.try_into_val(&env).unwrap();
+        assert_eq!(data, 3600u64);
     }
 }

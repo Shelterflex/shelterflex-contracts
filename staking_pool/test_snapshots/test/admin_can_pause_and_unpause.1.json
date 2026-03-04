@@ -170,12 +170,36 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "LockPeriod"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "Paused"
                             }
                           ]
                         },
                         "val": {
                           "bool": false
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "StakeTimestamps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": []
                         }
                       },
                       {
