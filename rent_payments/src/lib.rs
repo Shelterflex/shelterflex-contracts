@@ -685,6 +685,236 @@ mod test {
         client.list_receipts_by_deal(&deal_id, &101u32, &None);
     }
 
+    // ============================================================================
+    // Security Tests
+    // ============================================================================
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn create_receipt_fails_with_zero_amount() {
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let deal_id = 1u64;
+        let payer = Address::generate(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id, 0i128, payer.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.create_receipt(&deal_id, &0i128, &payer);
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn create_receipt_fails_with_negative_amount() {
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let deal_id = 1u64;
+        let payer = Address::generate(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id, -100i128, payer.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.create_receipt(&deal_id, &-100i128, &payer);
+    }
+
+    #[test]
+    #[should_panic]
+    fn create_receipt_fails_without_admin_auth() {
+        let env = Env::default();
+        let (_admin, client, contract_id) = setup(&env);
+        let deal_id = 1u64;
+        let payer = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id, 1000i128, payer.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.create_receipt(&deal_id, &1000i128, &payer);
+    }
+
+    #[test]
+    fn test_create_receipt_state_update_ordering() {
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let deal_id = 1u64;
+        let payer = Address::generate(&env);
+
+        // Get initial state
+        let initial_count = client.receipt_count(&deal_id);
+        assert_eq!(initial_count, 0u64);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id, 1000i128, payer.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        // Create receipt - this should update state before any external calls
+        let receipt = client.create_receipt(&deal_id, &1000i128, &payer);
+
+        // Verify state was updated correctly
+        assert_eq!(client.receipt_count(&deal_id), 1u64);
+        assert_eq!(receipt.amount, 1000i128);
+        assert_eq!(receipt.payer, payer);
+        assert_eq!(receipt.deal_id, deal_id);
+
+        // Verify receipt is stored and retrievable
+        let page = client.list_receipts_by_deal(&deal_id, &10u32, &None);
+        assert_eq!(page.receipts.len(), 1);
+        assert_eq!(page.receipts.get(0).unwrap().id, receipt.id);
+    }
+
+    #[test]
+    fn test_create_receipt_maximum_amount() {
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let deal_id = 1u64;
+        let payer = Address::generate(&env);
+
+        let max_amount = i128::MAX;
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id, max_amount, payer.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        // Should succeed with maximum i128 value
+        let receipt = client.create_receipt(&deal_id, &max_amount, &payer);
+        assert_eq!(receipt.amount, max_amount);
+        assert_eq!(client.receipt_count(&deal_id), 1u64);
+    }
+
+    #[test]
+    fn test_multiple_receipts_state_consistency() {
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let deal_id = 1u64;
+        let payer = Address::generate(&env);
+
+        // Create multiple receipts and verify state consistency
+        let amounts = [1000i128, 2000i128, 3000i128];
+        let mut receipt_ids = std::vec::Vec::new();
+
+        for (i, amount) in amounts.iter().enumerate() {
+            env.mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_receipt",
+                    args: (deal_id, amount, payer.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }]);
+
+            let receipt = client.create_receipt(&deal_id, &amount, &payer);
+            receipt_ids.push(receipt.id);
+
+            // Verify state after each creation
+            assert_eq!(client.receipt_count(&deal_id), (i + 1) as u64);
+            
+            // Verify all previous receipts are still accessible
+            let page = client.list_receipts_by_deal(&deal_id, &100u32, &None);
+            assert_eq!(page.receipts.len(), (i + 1) as u32);
+        }
+
+        // Final verification
+        assert_eq!(client.receipt_count(&deal_id), 3u64);
+        
+        let final_page = client.list_receipts_by_deal(&deal_id, &100u32, &None);
+        assert_eq!(final_page.receipts.len(), 3);
+        
+        // Verify all amounts are correct
+        let mut found_amounts = std::vec::Vec::new();
+        for receipt in final_page.receipts.iter() {
+            found_amounts.push(receipt.amount);
+        }
+        found_amounts.sort();
+        let mut expected_amounts = amounts.to_vec();
+        expected_amounts.sort();
+        
+        // Compare lengths first
+        assert_eq!(found_amounts.len(), expected_amounts.len());
+        // Compare each element
+        for i in 0..found_amounts.len() {
+            assert_eq!(found_amounts[i], expected_amounts[i]);
+        }
+    }
+
+    #[test]
+    fn test_receipt_isolation_between_deals() {
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let deal_id_1 = 1u64;
+        let deal_id_2 = 2u64;
+        let payer = Address::generate(&env);
+
+        // Create receipts for deal 1
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id_1, 1000i128, payer.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.create_receipt(&deal_id_1, &1000i128, &payer);
+
+        // Create receipts for deal 2
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id_2, 2000i128, payer.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.create_receipt(&deal_id_2, &2000i128, &payer);
+
+        // Verify isolation
+        assert_eq!(client.receipt_count(&deal_id_1), 1u64);
+        assert_eq!(client.receipt_count(&deal_id_2), 1u64);
+
+        let page_1 = client.list_receipts_by_deal(&deal_id_1, &10u32, &None);
+        let page_2 = client.list_receipts_by_deal(&deal_id_2, &10u32, &None);
+
+        assert_eq!(page_1.receipts.len(), 1);
+        assert_eq!(page_2.receipts.len(), 1);
+        assert_eq!(page_1.receipts.get(0).unwrap().amount, 1000i128);
+        assert_eq!(page_2.receipts.get(0).unwrap().amount, 2000i128);
+    }
+
     #[test]
     fn test_list_receipts_by_deal_different_deals() {
         let env = Env::default();

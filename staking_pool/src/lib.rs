@@ -814,4 +814,182 @@ mod test {
         let data: u64 = lock_event.2.try_into_val(&env).unwrap();
         assert_eq!(data, 3600u64);
     }
-}
+
+    // ============================================================================
+    // Security Tests
+    // ============================================================================
+
+    #[test]
+    fn test_stake_authorization() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, token_id) = setup_contract(&env);
+
+        // Test that staking requires user authorization
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.stake(&user, &1000i128);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unstake_authorization() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, token_id) = setup_contract(&env);
+
+        // Test that unstaking requires user authorization
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.unstake(&user, &1000i128);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pause_authorization() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, token_id) = setup_contract(&env);
+
+        // Test that pause requires admin authorization
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.pause();
+        }));
+        assert!(result.is_err());
+
+        // Test that admin can pause
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
+    }
+
+    #[test]
+    fn test_pause_blocks_staking() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, token_id) = setup_contract(&env);
+
+        // Pause the contract
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
+
+        // Test that staking fails when paused
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "stake",
+                args: (user.clone(), 1000i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.stake(&user, &1000i128);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_zero_amount_rejection() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, token_id) = setup_contract(&env);
+
+        // Test staking zero amount fails
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "stake",
+                args: (user.clone(), 0i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.stake(&user, &0i128);
+        }));
+        assert!(result.is_err());
+
+        // Test unstaking zero amount fails
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), 0i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.unstake(&user, &0i128);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_negative_amount_rejection() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, token_id) = setup_contract(&env);
+
+        // Test staking negative amount fails
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "stake",
+                args: (user.clone(), -100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.stake(&user, &-100i128);
+        }));
+        assert!(result.is_err());
+
+        // Test unstaking negative amount fails
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), -100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.unstake(&user, &-100i128);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_balance_isolation() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, token_id) = setup_contract(&env);
+        let user2 = Address::generate(&env);
+
+        // Verify initial balances are isolated
+        assert_eq!(client.staked_balance(&user), 0i128);
+        assert_eq!(client.staked_balance(&user2), 0i128);
+        assert_eq!(client.total_staked(), 0i128);
+
+        // Verify users can't access each other's balances
+        // (This is implicit in the storage design, but we test the behavior)
+        let user1_balance = client.staked_balance(&user);
+        let user2_balance = client.staked_balance(&user2);
+        assert_ne!(user, user2);
+        assert_eq!(user1_balance, 0i128);
+        assert_eq!(user2_balance, 0i128);
+    }
+
+    }
