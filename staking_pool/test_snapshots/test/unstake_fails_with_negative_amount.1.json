@@ -138,6 +138,30 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "LockPeriod"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "StakeTimestamps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": []
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "StakedBalances"
                             }
                           ]
