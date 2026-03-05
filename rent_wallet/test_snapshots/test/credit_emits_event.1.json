@@ -17,6 +17,9 @@
               "function_name": "credit",
               "args": [
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
@@ -209,6 +212,9 @@
         "body": {
           "v0": {
             "topics": [
+              {
+                "symbol": "rent_wallet"
+              },
               {
                 "symbol": "credit"
               },

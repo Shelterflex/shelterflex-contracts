@@ -2,6 +2,8 @@
 
 This Soroban smart contract records immutable transaction receipts keyed by a deterministic transaction ID derived from an external payment reference.
 
+See `docs/specs/contracts/CONVENTIONS.md` for shared conventions (errors, events, init patterns).
+
 ## Purpose
 
 - Record canonical transaction receipts for on-chain indexing and audit.
@@ -63,7 +65,7 @@ The contract exposes the following `ContractError` variants (numeric values show
 
 - `AlreadyInitialized` (1)
 - `NotAuthorized` (2)
-- `ContractPaused` (3)
+- `Paused` (3)
 - `DuplicateTransaction` (4)
 - `InvalidAmount` (5)
 - `InvalidExternalRefSource` (6)
@@ -73,7 +75,7 @@ The contract exposes the following `ContractError` variants (numeric values show
 
 ## Events
 
-On successful `record_receipt`, the contract emits an event with topic `("receipt", tx_id)` and the `Receipt` payload.
+On successful `record_receipt`, the contract emits an event with topic `(transaction_receipt, receipt_recorded, tx_id)` and the `Receipt` payload.
 
 ## Usage examples (testing harness)
 

@@ -963,7 +963,10 @@
           "v0": {
             "topics": [
               {
-                "string": "receipt"
+                "symbol": "transaction_receipt"
+              },
+              {
+                "symbol": "receipt_recorded"
               },
               {
                 "bytes": "36d47119443a73f8c0fd40cf2861d787b15aa54a5db1a887283e716ed9ae51f7"

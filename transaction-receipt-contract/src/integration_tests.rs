@@ -214,7 +214,7 @@ fn test_integration_pause_flow() {
     };
     let res = client.try_record_receipt(&operator, &input2);
     assert!(res.is_err());
-    assert_eq!(res.unwrap_err().unwrap(), ContractError::ContractPaused);
+    assert_eq!(res.unwrap_err().unwrap(), ContractError::Paused);
 
     // Unpause
     client.try_unpause(&admin).unwrap();
