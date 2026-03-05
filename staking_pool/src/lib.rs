@@ -588,6 +588,7 @@ mod test {
         }]);
         client.pause();
 
+        
         // Try to unstake while paused
         env.mock_auths(&[MockAuth {
             address: &user,
