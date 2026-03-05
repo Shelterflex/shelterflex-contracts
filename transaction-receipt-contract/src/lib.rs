@@ -128,7 +128,7 @@ pub enum ContractError {
     /// Caller is not authorized for this operation
     NotAuthorized = 2,
     /// Contract is currently paused
-    ContractPaused = 3,
+    Paused = 3,
     /// Transaction ID already exists (duplicate)
     DuplicateTransaction = 4,
     /// Amount is invalid (zero or negative)
@@ -368,7 +368,14 @@ impl TransactionReceiptContract {
             .set(&deal_count_key, &(current_count + 1));
 
         // Emit event with topic ("receipt", tx_id) and receipt payload
-        env.events().publish(("receipt", tx_id.clone()), receipt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "transaction_receipt"),
+                Symbol::new(&env, "receipt_recorded"),
+                tx_id.clone(),
+            ),
+            receipt,
+        );
 
         Ok(tx_id)
     }
@@ -509,7 +516,7 @@ fn require_operator(env: &soroban_sdk::Env, caller: &Address) -> Result<(), Cont
 ///
 /// # Returns
 /// * `Ok(())` - If the contract is not paused
-/// * `Err(ContractError::ContractPaused)` - If the contract is paused
+/// * `Err(ContractError::Paused)` - If the contract is paused
 fn require_not_paused(env: &soroban_sdk::Env) -> Result<(), ContractError> {
     // Load paused state from storage (defaults to false if not set)
     let paused: bool = env
@@ -520,7 +527,7 @@ fn require_not_paused(env: &soroban_sdk::Env) -> Result<(), ContractError> {
 
     // Return error if contract is paused
     if paused {
-        return Err(ContractError::ContractPaused);
+        return Err(ContractError::Paused);
     }
 
     Ok(())
