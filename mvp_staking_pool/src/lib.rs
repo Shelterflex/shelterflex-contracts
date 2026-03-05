@@ -4,6 +4,8 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, token::Client as TokenClient, Address, Env, Map, Symbol,
 };
 
+const REWARD_INDEX_SCALE: i128 = 1_000_000_000_000;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -12,6 +14,9 @@ pub enum DataKey {
     StakedBalances,
     TotalStaked,
     Paused,
+    GlobalRewardIndex,
+    UserRewardIndex,
+    ClaimableRewards,
 }
 
 #[contract]
@@ -53,6 +58,43 @@ fn put_total_staked(env: &Env, total: i128) {
     env.storage().instance().set(&DataKey::TotalStaked, &total);
 }
 
+fn get_global_reward_index(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get::<_, i128>(&DataKey::GlobalRewardIndex)
+        .unwrap_or(0)
+}
+
+fn put_global_reward_index(env: &Env, idx: i128) {
+    env.storage()
+        .instance()
+        .set(&DataKey::GlobalRewardIndex, &idx);
+}
+
+fn user_reward_index(env: &Env) -> Map<Address, i128> {
+    env.storage()
+        .instance()
+        .get::<_, Map<Address, i128>>(&DataKey::UserRewardIndex)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn put_user_reward_index(env: &Env, idxs: Map<Address, i128>) {
+    env.storage().instance().set(&DataKey::UserRewardIndex, &idxs);
+}
+
+fn claimable_rewards(env: &Env) -> Map<Address, i128> {
+    env.storage()
+        .instance()
+        .get::<_, Map<Address, i128>>(&DataKey::ClaimableRewards)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn put_claimable_rewards(env: &Env, rewards: Map<Address, i128>) {
+    env.storage()
+        .instance()
+        .set(&DataKey::ClaimableRewards, &rewards);
+}
+
 fn is_paused(env: &Env) -> bool {
     env.storage()
         .instance()
@@ -77,6 +119,35 @@ fn require_positive_amount(amount: i128) {
     }
 }
 
+fn accrue_user_rewards(env: &Env, user: &Address) {
+    let global_idx = get_global_reward_index(env);
+
+    let mut user_idxs = user_reward_index(env);
+    let user_idx = user_idxs.get(user.clone()).unwrap_or(0);
+
+    if global_idx <= user_idx {
+        return;
+    }
+
+    let balances = staked_balances(env);
+    let staked = balances.get(user.clone()).unwrap_or(0);
+
+    if staked > 0 {
+        let delta = global_idx - user_idx;
+        let accrued = (staked * delta) / REWARD_INDEX_SCALE;
+
+        if accrued > 0 {
+            let mut rewards = claimable_rewards(env);
+            let current = rewards.get(user.clone()).unwrap_or(0);
+            rewards.set(user.clone(), current + accrued);
+            put_claimable_rewards(env, rewards);
+        }
+    }
+
+    user_idxs.set(user.clone(), global_idx);
+    put_user_reward_index(env, user_idxs);
+}
+
 #[contractimpl]
 impl StakingPool {
     pub fn init(env: Env, admin: Address, token: Address) {
@@ -90,12 +161,23 @@ impl StakingPool {
             .instance()
             .set(&DataKey::StakedBalances, &Map::<Address, i128>::new(&env));
         env.storage().instance().set(&DataKey::TotalStaked, &0i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalRewardIndex, &0i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::UserRewardIndex, &Map::<Address, i128>::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::ClaimableRewards, &Map::<Address, i128>::new(&env));
     }
 
     pub fn stake(env: Env, user: Address, amount: i128) {
         user.require_auth();
         require_not_paused(&env);
         require_positive_amount(amount);
+
+        accrue_user_rewards(&env, &user);
 
         let token_address = get_token(&env);
         let token_client = TokenClient::new(&env, &token_address);
@@ -124,6 +206,8 @@ impl StakingPool {
         user.require_auth();
         require_not_paused(&env);
         require_positive_amount(amount);
+
+        accrue_user_rewards(&env, &user);
 
         // Check sufficient staked balance
         let mut balances = staked_balances(&env);
@@ -162,6 +246,64 @@ impl StakingPool {
         get_total_staked(&env)
     }
 
+    pub fn fund_rewards(env: Env, from: Address, amount: i128) {
+        require_admin(&env);
+        require_not_paused(&env);
+        require_positive_amount(amount);
+
+        let admin = get_admin(&env);
+        if from != admin {
+            panic!("from must be admin");
+        }
+
+        let total = get_total_staked(&env);
+        if total <= 0 {
+            panic!("no stakers");
+        }
+
+        let token_address = get_token(&env);
+        let token_client = TokenClient::new(&env, &token_address);
+        token_client.transfer(&from, &env.current_contract_address(), &amount);
+
+        let increment = (amount * REWARD_INDEX_SCALE) / total;
+        let new_idx = get_global_reward_index(&env) + increment;
+        put_global_reward_index(&env, new_idx);
+
+        env.events().publish(
+            (Symbol::new(&env, "fund_rewards"), from.clone()),
+            amount,
+        );
+    }
+
+    pub fn claimable(env: Env, user: Address) -> i128 {
+        accrue_user_rewards(&env, &user);
+        let rewards = claimable_rewards(&env);
+        rewards.get(user).unwrap_or(0)
+    }
+
+    pub fn claim(env: Env, to: Address) -> i128 {
+        to.require_auth();
+        require_not_paused(&env);
+
+        accrue_user_rewards(&env, &to);
+
+        let mut rewards = claimable_rewards(&env);
+        let amount = rewards.get(to.clone()).unwrap_or(0);
+        if amount <= 0 {
+            return 0;
+        }
+
+        rewards.set(to.clone(), 0);
+        put_claimable_rewards(&env, rewards);
+
+        let token_address = get_token(&env);
+        let token_client = TokenClient::new(&env, &token_address);
+        token_client.transfer(&env.current_contract_address(), &to, &amount);
+
+        env.events().publish((Symbol::new(&env, "claim"), to.clone()), amount);
+        amount
+    }
+
     pub fn pause(env: Env) {
         require_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -177,10 +319,10 @@ impl StakingPool {
 mod test {
     extern crate std;
 
-    use super::{StakingPool, StakingPoolClient, TokenClient};
+    use super::{StakingPool, StakingPoolClient};
     use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
     use soroban_sdk::{
-        Address, Env, IntoVal, Symbol, TryIntoVal,
+        token::StellarAssetClient, Address, Env, IntoVal, Symbol, TryIntoVal,
     };
 
     fn setup_contract(env: &Env) -> (Address, StakingPoolClient<'_>, Address, Address, Address) {
@@ -199,6 +341,50 @@ mod test {
         client.init(&admin, &token_contract_id);
 
         (contract_id, client, admin, user, token_contract_id)
+    }
+
+    #[test]
+    fn rewards_accrue_and_can_be_claimed_without_iteration() {
+        let env = Env::default();
+        let (contract_id, client, admin, user_a, token_id) = setup_contract(&env);
+        let user_b = Address::generate(&env);
+
+        env.mock_all_auths();
+
+        let asset = StellarAssetClient::new(&env, &token_id);
+        asset.mint(&admin, &1_000i128);
+        asset.mint(&user_a, &1_000i128);
+        asset.mint(&user_b, &1_000i128);
+
+        client.stake(&user_a, &100i128);
+        client.fund_rewards(&admin, &50i128);
+        assert!(client.claimable(&user_a) > 0);
+
+        client.stake(&user_b, &100i128);
+        client.fund_rewards(&admin, &100i128);
+
+        let claimable_a = client.claimable(&user_a);
+        let claimable_b = client.claimable(&user_b);
+        assert_eq!(claimable_a, 100i128);
+        assert_eq!(claimable_b, 50i128);
+
+        let claimed = client.claim(&user_a);
+        assert_eq!(claimed, 100i128);
+
+        let claimed_again = client.claim(&user_a);
+        assert_eq!(claimed_again, 0i128);
+
+        // Sanity: contract still callable and has not iterated through user maps for distribution.
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
     }
 
     // ============================================================================

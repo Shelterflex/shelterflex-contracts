@@ -138,6 +138,33 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "ClaimableRewards"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": []
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "GlobalRewardIndex"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 0
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "StakedBalances"
                             }
                           ]
@@ -171,6 +198,18 @@
                             "hi": 0,
                             "lo": 0
                           }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "UserRewardIndex"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": []
                         }
                       }
                     ]
