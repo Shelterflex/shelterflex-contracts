@@ -7,4 +7,5 @@ members = [
   "staking_rewards",
   "staking_pool",
   "mvp_staking_pool",
+  "whistleblower_rewards",
 ]
