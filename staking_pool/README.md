@@ -1,10 +1,10 @@
 # Staking Pool Contract
 
-A Soroban smart contract for staking USDC tokens with pause functionality for emergencies.
+A Soroban smart contract for staking USDC tokens with pause functionality for emergencies and metadata hash support for receipt verification.
 
 ## Overview
 
-The Staking Pool contract allows users to stake and unstake USDC tokens while providing administrators with emergency pause capabilities. This is an MVP implementation focused on core staking functionality without reward distribution.
+The Staking Pool contract allows users to stake and unstake USDC tokens while providing administrators with emergency pause capabilities. This is an MVP implementation focused on core staking functionality without reward distribution, now enhanced with canonical metadata hash computation for transaction receipt verification.
 
 ## Features
 
@@ -14,6 +14,7 @@ The Staking Pool contract allows users to stake and unstake USDC tokens while pr
 - **Emergency Controls**: Admin can pause/unpause the contract
 - **Token Integration**: Uses Soroban token interface for secure transfers
 - **Event Emission**: Comprehensive events for indexers and monitoring
+- **Metadata Hash**: Canonical payload serialization and SHA-256 hashing for receipt verification
 
 ## Contract Interface
 
@@ -106,6 +107,39 @@ is_paused() -> bool
 ```
 - Returns: Current pause state of the contract
 
+### Metadata Hash Functions
+
+#### compute_metadata_hash
+```rust
+compute_metadata_hash(input: ReceiptInput) -> BytesN<32>
+```
+- `input`: ReceiptInput struct containing transaction data
+- Returns: SHA-256 hash of canonical payload v1
+- Requires: `amount_usdc` must be positive
+- Uses deterministic serialization rules (see Canonical Payload Format v1 below)
+
+#### verify_metadata_hash
+```rust
+verify_metadata_hash(input: ReceiptInput, expected_hash: BytesN<32>) -> bool
+```
+- `input`: ReceiptInput struct containing transaction data
+- `expected_hash`: Expected SHA-256 hash to verify against
+- Returns: `true` if hash matches, `false` otherwise
+
+#### ReceiptInput Struct
+```rust
+pub struct ReceiptInput {
+    pub tx_type: Symbol,           // Transaction type (e.g., "stake", "unstake")
+    pub amount_usdc: i128,        // Transaction amount in USDC (must be positive)
+    pub token: Address,           // USDC token contract address
+    pub user: Address,            // User address performing the transaction
+    pub timestamp: Option<u64>,   // Optional timestamp (uses current ledger time if None)
+    pub deal_id: Option<String>,  // Optional deal identifier
+    pub listing_id: Option<String>, // Optional listing identifier
+    pub metadata: Option<Map<Symbol, String>>, // Optional metadata fields
+}
+```
+
 ## Event Shapes
 
 ### Stake Event
@@ -142,6 +176,97 @@ Data: [admin_address]
 ```
 Topics: ["set_lock_period"]
 Data: [lock_period_seconds]
+```
+
+## Canonical Payload Format v1
+
+The `compute_metadata_hash` function uses a deterministic serialization format to ensure consistent hashing across different implementations.
+
+### Serialization Rules
+
+**Field Order**: Fields are serialized in the exact order listed below:
+
+1. **tx_type** (Symbol, 32 bytes max)
+   - Serialized as Symbol value
+   - Empty string if None
+
+2. **amount_usdc** (i128, 16 bytes big-endian)
+   - Always positive (validated before hashing)
+   - Serialized as i128 value
+
+3. **token** (Address, 32 bytes)
+   - Serialized as Address value
+
+4. **user** (Address, 32 bytes)
+   - Serialized as Address value
+
+5. **timestamp** (u64, 8 bytes)
+   - Uses current ledger timestamp if None
+   - Serialized as u64 value
+
+6. **deal_id** (String, variable length with length prefix)
+   - Empty string if None
+   - Length prefix indicates string length
+
+7. **listing_id** (String, variable length with length prefix)
+   - Empty string if None
+   - Length prefix indicates string length
+
+8. **metadata** (Map<Symbol, String>, sorted by key)
+   - Empty marker if None
+   - Key-value pairs sorted by Symbol key (lexicographic)
+   - Each pair: key followed by value
+
+### Deterministic Properties
+
+- **Fixed Ordering**: Fields are always serialized in the same order
+- **Optional Fields**: None values are serialized as empty values
+- **Metadata Sorting**: Map entries are sorted by key to ensure deterministic ordering
+- **No Delimiters**: Fields are concatenated directly without separators
+- **Hash Algorithm**: SHA-256 is used for final hash computation
+
+### Example Serialization
+
+```rust
+// Input
+ReceiptInput {
+    tx_type: "stake",
+    amount_usdc: 1000000,
+    token: 0x1234...,
+    user: 0x5678...,
+    timestamp: Some(1620000000),
+    deal_id: None,
+    listing_id: Some("LIST001"),
+    metadata: Some({"category": "rent_payment"})
+}
+
+// Serialized bytes (simplified representation)
+// ["stake"][1000000][0x1234...][0x5678...][1620000000]["""LIST001"]["category"]["rent_payment"]
+
+// Final SHA-256 hash
+// 0xa1b2c3... (32 bytes)
+```
+
+### Usage Examples
+
+```rust
+// Compute hash for a stake transaction
+let input = ReceiptInput {
+    tx_type: Symbol::new(&env, "stake"),
+    amount_usdc: 1000000i128,
+    token: usdc_token_address,
+    user: user_address,
+    timestamp: Some(1620000000u64),
+    deal_id: Some(String::from_str(&env, "DEAL001")),
+    listing_id: None,
+    metadata: None,
+};
+
+let hash = staking_pool.compute_metadata_hash(&input);
+
+// Verify hash
+let is_valid = staking_pool.verify_metadata_hash(&input, &expected_hash);
+assert!(is_valid);
 ```
 
 ## Security Features
@@ -207,6 +332,45 @@ Test coverage includes:
 - Authorization controls
 - Event emission verification
 - Edge cases and error conditions
+- **Metadata hash computation and verification**
+- **Golden test vectors for deterministic hashing**
+- **Deterministic serialization validation**
+
+### Metadata Hash Tests
+
+The test suite includes comprehensive tests for the metadata hash functionality:
+
+- **Basic hash computation**: Tests with minimal required fields
+- **Optional fields**: Tests with all optional fields populated
+- **Verification**: Tests both successful and failed hash verification
+- **Determinism**: Ensures same input always produces same hash
+- **Uniqueness**: Ensures different inputs produce different hashes
+- **Input validation**: Rejects zero or negative amounts
+- **Golden test vectors**: Fixed test cases for regression testing
+
+### Golden Test Vectors
+
+Golden test vectors provide deterministic test cases that can be used across different implementations:
+
+```rust
+// Golden Vector 1: Basic stake
+let input = ReceiptInput {
+    tx_type: "stake",
+    amount_usdc: 1000000, // 1 USDC
+    timestamp: 1620000000,
+    // ... other fields
+};
+// Expected hash: deterministic based on canonical serialization
+
+// Golden Vector 2: Unstake with metadata
+let input = ReceiptInput {
+    tx_type: "unstake",
+    amount_usdc: 500000, // 0.5 USDC
+    metadata: {"source": "bank_transfer", "reference": "TX123456789"},
+    // ... other fields
+};
+// Expected hash: deterministic based on canonical serialization
+```
 
 ## Requirements
 
