@@ -11,6 +11,7 @@ This is a minimal viable product (MVP) staking pool contract that provides the e
 - **Token Staking**: Users can stake USDC tokens into the pool
 - **Token Unstaking**: Users can unstake their tokens from the pool
 - **Balance Tracking**: Individual user balances and total pool balance
+- **Reward Accrual (Index-Based)**: Rewards accrue per-user via a global reward index (no iteration over stakers)
 - **Admin Controls**: Admin can pause/unpause the contract
 - **Event Emission**: Standardized events for stake/unstake operations
 - **Input Validation**: Positive amount requirements and authorization checks
@@ -24,11 +25,35 @@ This is a minimal viable product (MVP) staking pool contract that provides the e
 - `unstake(user: Address, amount: i128)` - Unstake tokens from the pool
 - `staked_balance(user: Address) -> i128` - Get user's staked balance
 - `total_staked() -> i128` - Get total tokens staked in pool
+- `claimable(user: Address) -> i128` - Get current claimable rewards for a user
+- `claim(to: Address) -> i128` - Claim accrued rewards to `to`
 
 ### Admin Functions
 
 - `pause()` - Pause the contract (admin only)
 - `unpause()` - Unpause the contract (admin only)
+- `fund_rewards(from: Address, amount: i128)` - Fund rewards and update the global reward index (admin only)
+
+## Reward Accrual Model
+
+Rewards are distributed using an index-based accrual model to avoid O(n) iteration over all stakers.
+
+State:
+
+- `global_reward_index` (fixed-point `i128`)
+- per-user `user_reward_index`
+- per-user `claimable_rewards`
+
+Fixed-point:
+
+- Scale: `REWARD_INDEX_SCALE = 1_000_000_000_000` (1e12)
+- Rounding: reward accrual uses integer division and rounds down toward zero
+
+Accrual rule (conceptual): when `fund_rewards(amount)` is called, the global index is incremented by:
+
+`(amount * REWARD_INDEX_SCALE) / total_staked`
+
+Each user accrues rewards lazily when they interact (stake/unstake/claim/claimable) based on the difference between `global_reward_index` and their `user_reward_index`.
 
 ## Event Topics
 
