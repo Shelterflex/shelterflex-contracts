@@ -25,6 +25,7 @@ Attempting to `init` a second time returns `AlreadyInitialized`.
 - `record_receipt(env, operator, input: ReceiptInput) -> Result<BytesN<32>, ContractError>`: record a transaction receipt (operator only, rejects duplicates or invalid input).
 - `get_receipt(env, tx_id: BytesN<32>) -> Option<Receipt>`: fetch a receipt by tx_id.
 - `list_receipts_by_deal(env, deal_id: String, limit: u32, cursor: Option<u32>) -> Vec<Receipt>`: list receipts for a deal with pagination.
+- `list_receipts_by_user(env, user: Address, limit: u32, cursor: Option<u32>) -> Vec<Receipt>`: list receipts for a user (from or to) with pagination.
 
 ## ReceiptInput and Receipt
 
@@ -52,12 +53,35 @@ The contract enforces strict validation on transaction types to ensure indexer c
 - `STAKE` - Staking operations
 - `UNSTAKE` - Unstaking operations
 - `STAKE_REWARD_CLAIM` - Staking reward claims
+- `CONVERSION` - NGN to USDC conversions (for staking flows)
 
 Any transaction type not in this list will be rejected with `InvalidTxType` error (error code 9). Transaction types are case-sensitive and must match exactly.
 
 ## Metadata hash
 
 `metadata_hash` is optional and expected to be the SHA-256 hash of the canonical receipt payload (v1). The contract stores it as `BytesN<32>` if provided; generation of this hash is the caller's responsibility.
+
+## Conversion receipts
+
+Conversion receipts (`tx_type: CONVERSION`) record NGN to USDC conversions for full auditability in staking flows. These receipts support:
+
+- `amount_usdc` - The resulting USDC amount (canonical)
+- `amount_ngn` - The source NGN amount (metadata)
+- `fx_rate_ngn_per_usdc` - The exchange rate used (metadata)
+- `fx_provider` - The conversion provider name (metadata)
+- `external_ref` - Provider's conversion reference (for idempotency)
+
+Conversion receipts follow the same idempotency rules as other transaction types, using the canonical external reference to prevent duplicates.
+
+## Indexing strategy
+
+The contract maintains three indexing strategies for efficient queries:
+
+1. **By transaction ID** - Direct lookup via `get_receipt(tx_id)`
+2. **By deal** - Query all receipts for a deal via `list_receipts_by_deal(deal_id, limit, cursor)`
+3. **By user** - Query all receipts where a user is sender or recipient via `list_receipts_by_user(user, limit, cursor)`
+
+When a receipt is recorded with `from` and/or `to` addresses, the contract automatically indexes it under both users. This enables efficient queries for user transaction history without scanning all receipts.
 
 ## Error codes
 
