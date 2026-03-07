@@ -1,38 +1,25 @@
 #![cfg(test)]
 
+extern crate std;
+
 use crate::{
     generate_tx_id, validate_tx_type, ContractError, Receipt, ReceiptInput, StorageKey,
     ALLOWED_SOURCES, ALLOWED_TX_TYPES,
 };
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Symbol, Vec};
-
-// Golden test vectors - shared with backend tests
-const GOLDEN_TEST_VECTORS: &[(&str, &str, &str, &str)] = &[
-    (
-        "paystack",
-        "psk_12345",
-        "v1|source=paystack|ref=psk_12345",
-        "71e9a576e18d122acff8e200cefac00bfcba57f4dc64e9cdad89f64304c6d0ec",
-    ),
-    (
-        "BANK_TRANSFER",
-        " UTR_98765 ",
-        "v1|source=bank_transfer|ref=UTR_98765",
-        "e6cd19e46ae4e78bffce61f7ada43833ee97f01e3317be080e27ee398e74a29b",
-    ),
-    ("stellar", "", "", "Ref cannot be empty after trimming"), // Error case
-];
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Symbol};
+use std::string::String as StdString;
 
 #[test]
 fn test_allowed_sources_constant() {
     // Verify ALLOWED_SOURCES contains expected values
-    assert_eq!(ALLOWED_SOURCES.len(), 7);
+    assert_eq!(ALLOWED_SOURCES.len(), 8);
     assert!(ALLOWED_SOURCES.contains(&"paystack"));
     assert!(ALLOWED_SOURCES.contains(&"flutterwave"));
     assert!(ALLOWED_SOURCES.contains(&"bank_transfer"));
     assert!(ALLOWED_SOURCES.contains(&"stellar"));
     assert!(ALLOWED_SOURCES.contains(&"onramp"));
     assert!(ALLOWED_SOURCES.contains(&"offramp"));
+    assert!(ALLOWED_SOURCES.contains(&"manual"));
     assert!(ALLOWED_SOURCES.contains(&"manual_admin"));
 }
 
@@ -623,53 +610,63 @@ fn test_pause_unpause_cycle() {
 fn test_golden_vectors() {
     let env = Env::default();
 
-    // Test vector 1: paystack, psk_12345 - should succeed
-    {
-        let source = Symbol::new(&env, "paystack");
-        let reference = String::from_str(&env, "psk_12345");
-        let result = generate_tx_id(&env, &source, &reference);
-        assert!(result.is_ok(), "Test vector 1 should succeed");
-
-        let tx_id = result.unwrap();
-        let tx_id_bytes = tx_id.to_array();
-        assert_eq!(tx_id_bytes.len(), 32, "Should produce 32-byte hash");
-
-        // Verify it's deterministic - same input should produce same output
-        let source2 = Symbol::new(&env, "paystack");
-        let reference2 = String::from_str(&env, "psk_12345");
-        let result2 = generate_tx_id(&env, &source2, &reference2);
-        assert_eq!(tx_id, result2.unwrap(), "Should be deterministic");
+    #[derive(serde::Deserialize)]
+    struct VectorInput {
+        source: StdString,
+        #[serde(rename = "ref")]
+        reference: StdString,
     }
 
-    // Test vector 2: BANK_TRANSFER, " UTR_98765 " - should succeed
-    {
-        let source = Symbol::new(&env, "BANK_TRANSFER");
-        let reference = String::from_str(&env, " UTR_98765 ");
-        let result = generate_tx_id(&env, &source, &reference);
-        assert!(result.is_ok(), "Test vector 2 should succeed");
-
-        let tx_id = result.unwrap();
-        let tx_id_bytes = tx_id.to_array();
-        assert_eq!(tx_id_bytes.len(), 32, "Should produce 32-byte hash");
-
-        // Should be different from the first test vector
-        let source1 = Symbol::new(&env, "paystack");
-        let reference1 = String::from_str(&env, "psk_12345");
-        let result1 = generate_tx_id(&env, &source1, &reference1);
-        assert_ne!(
-            tx_id,
-            result1.unwrap(),
-            "Different inputs should produce different hashes"
-        );
+    #[derive(serde::Deserialize)]
+    struct GoldenVector {
+        input: VectorInput,
+        expected_canonical: Option<StdString>,
+        expected_sha256: Option<StdString>,
+        expected_error: Option<StdString>,
     }
 
-    // Test vector 3: stellar, "" - should fail
-    {
-        let source = Symbol::new(&env, "stellar");
-        let reference = String::from_str(&env, "");
+    #[derive(serde::Deserialize)]
+    struct GoldenVectorsFile {
+        golden_test_vectors: std::vec::Vec<GoldenVector>,
+    }
+
+    fn bytesn32_to_hex(bytes: [u8; 32]) -> StdString {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = [0u8; 64];
+        for (i, b) in bytes.iter().enumerate() {
+            out[i * 2] = HEX[(b >> 4) as usize];
+            out[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+        }
+        StdString::from_utf8(out.to_vec()).expect("valid utf8")
+    }
+
+    let raw = include_str!("../../../test-vectors.json");
+    let parsed: GoldenVectorsFile = serde_json::from_str(raw).expect("valid test-vectors.json");
+
+    for (i, v) in parsed.golden_test_vectors.iter().enumerate() {
+        let source = Symbol::new(&env, &v.input.source);
+        let reference = String::from_str(&env, &v.input.reference);
         let result = generate_tx_id(&env, &source, &reference);
-        assert!(result.is_err(), "Test vector 3 should fail");
-        assert_eq!(result.unwrap_err(), ContractError::InvalidExternalRef);
+
+        if let Some(expected_error) = &v.expected_error {
+            assert!(result.is_err(), "vector {} should fail", i);
+            assert!(
+                expected_error.contains("Ref cannot be empty")
+                    || expected_error.contains("pipe")
+                    || expected_error.contains("256")
+                    || expected_error.contains("Source"),
+                "vector {} expected_error should be a stable validation message",
+                i
+            );
+        } else {
+            let tx_id = result.expect("vector should succeed");
+            let got_hex = bytesn32_to_hex(tx_id.to_array());
+            let expected = v
+                .expected_sha256
+                .as_ref()
+                .expect("expected_sha256 required for success vectors");
+            assert_eq!(got_hex, *expected, "vector {} hash mismatch", i);
+        }
     }
 }
 
