@@ -7,7 +7,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec as StdVec;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Map, Symbol, String, IntoVal,
+    contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Map, Symbol, String,
 };
 
 #[contracttype]
