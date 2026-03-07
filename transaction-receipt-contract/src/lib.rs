@@ -14,13 +14,14 @@ use soroban_sdk::{
 };
 
 /// Allowed external reference sources for transaction ID generation
-pub const ALLOWED_SOURCES: [&str; 7] = [
+pub const ALLOWED_SOURCES: [&str; 8] = [
     "paystack",
     "flutterwave",
     "bank_transfer",
     "stellar",
     "onramp",
     "offramp",
+    "manual",
     "manual_admin",
 ];
 

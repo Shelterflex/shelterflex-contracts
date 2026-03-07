@@ -392,6 +392,25 @@ mod test {
         Address, Env, IntoVal, Symbol, TryIntoVal, Map, BytesN, String,
     };
 
+    fn hex_to_bytes32(hex: &str) -> [u8; 32] {
+        fn hex_val(b: u8) -> u8 {
+            match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => 10 + (b - b'a'),
+                b'A'..=b'F' => 10 + (b - b'A'),
+                _ => panic!("invalid hex"),
+            }
+        }
+
+        let bytes = hex.as_bytes();
+        assert_eq!(bytes.len(), 64, "expected 64-char hex");
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[i] = (hex_val(bytes[i * 2]) << 4) | hex_val(bytes[i * 2 + 1]);
+        }
+        out
+    }
+
     fn setup_contract(env: &Env) -> (Address, StakingPoolClient<'_>, Address, Address, Address) {
         let contract_id = env.register(StakingPool, ());
         let client = StakingPoolClient::new(env, &contract_id);
@@ -1147,6 +1166,20 @@ mod test {
         };
 
         let hash = client.compute_metadata_hash(&input);
+
+        #[cfg(test)]
+        {
+            extern crate std;
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let bytes = hash.to_array();
+            let mut out = [0u8; 64];
+            for (i, b) in bytes.iter().enumerate() {
+                out[i * 2] = HEX[(b >> 4) as usize];
+                out[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+            }
+            let hex = std::string::String::from_utf8(out.to_vec()).expect("valid utf8");
+            std::println!("golden_metadata_hash.basic_stake={}", hex);
+        }
         
         // Verify hash is non-zero
         let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
@@ -1344,11 +1377,13 @@ mod test {
 
         let hash = client.compute_metadata_hash(&input);
         
-        // This is a golden test vector - the hash should be deterministic
-        // In a real implementation, we'd store the expected hash
-        // For now, we just verify it's consistent
-        let hash_again = client.compute_metadata_hash(&input);
-        assert_eq!(hash, hash_again);
+        let expected = BytesN::from_array(
+            &env,
+            &hex_to_bytes32(
+                "c420b6abfa2b233108918399c8cb0059b951cdd2f1c3562bf38c183a0ff96713",
+            ),
+        );
+        assert_eq!(hash, expected);
     }
 
     #[test]
@@ -1375,9 +1410,13 @@ mod test {
 
         let hash = client.compute_metadata_hash(&input);
         
-        // Golden test vector - verify consistency
-        let hash_again = client.compute_metadata_hash(&input);
-        assert_eq!(hash, hash_again);
+        let expected = BytesN::from_array(
+            &env,
+            &hex_to_bytes32(
+                "348091ff408ec28120067b9708aee87b147834307a57c23b36821ffced58e5a0",
+            ),
+        );
+        assert_eq!(hash, expected);
     }
 
     }
