@@ -25,13 +25,14 @@ pub const ALLOWED_SOURCES: [&str; 7] = [
 ];
 
 /// Allowed transaction types for MVP
-pub const ALLOWED_TX_TYPES: [&str; 6] = [
+pub const ALLOWED_TX_TYPES: [&str; 7] = [
     "TENANT_REPAYMENT",
-    "LANDLORD_PAYOUT", 
+    "LANDLORD_PAYOUT",
     "WHISTLEBLOWER_REWARD",
     "STAKE",
     "UNSTAKE",
     "STAKE_REWARD_CLAIM",
+    "CONVERSION",
 ];
 
 /// Input parameters for recording a receipt (to avoid 10-parameter limit)
@@ -116,6 +117,10 @@ pub enum StorageKey {
     DealIndex(String, u32),
     /// Deal count: deal_id → count
     DealCount(String),
+    /// User index: (user_address, index) → tx_id
+    UserIndex(Address, u32),
+    /// User count: user_address → count
+    UserCount(Address),
 }
 
 /// Contract error types
@@ -367,6 +372,30 @@ impl TransactionReceiptContract {
             .persistent()
             .set(&deal_count_key, &(current_count + 1));
 
+        // Update user indices for from and to addresses
+        if let Some(ref from_addr) = receipt.from {
+            let user_count_key = StorageKey::UserCount(from_addr.clone());
+            let user_count: u32 = env.storage().persistent().get(&user_count_key).unwrap_or(0);
+            env.storage().persistent().set(
+                &StorageKey::UserIndex(from_addr.clone(), user_count),
+                &tx_id,
+            );
+            env.storage()
+                .persistent()
+                .set(&user_count_key, &(user_count + 1));
+        }
+
+        if let Some(ref to_addr) = receipt.to {
+            let user_count_key = StorageKey::UserCount(to_addr.clone());
+            let user_count: u32 = env.storage().persistent().get(&user_count_key).unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&StorageKey::UserIndex(to_addr.clone(), user_count), &tx_id);
+            env.storage()
+                .persistent()
+                .set(&user_count_key, &(user_count + 1));
+        }
+
         // Emit event with topic ("receipt", tx_id) and receipt payload
         env.events().publish(
             (
@@ -445,6 +474,53 @@ impl TransactionReceiptContract {
                 .get::<StorageKey, BytesN<32>>(&deal_index_key)
             {
                 // Load receipt for this tx_id
+                if let Some(receipt) = env
+                    .storage()
+                    .persistent()
+                    .get::<StorageKey, Receipt>(&StorageKey::Receipt(tx_id))
+                {
+                    results.push_back(receipt);
+                }
+            }
+        }
+
+        results
+    }
+
+    /// List receipts for a specific user with pagination
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user address (from or to)
+    /// * `limit` - Maximum number of receipts to return
+    /// * `cursor` - Optional starting index for pagination
+    ///
+    /// # Returns
+    /// A vector of receipts for the user, starting from cursor (or 0) up to limit
+    pub fn list_receipts_by_user(
+        env: soroban_sdk::Env,
+        user: Address,
+        limit: u32,
+        cursor: Option<u32>,
+    ) -> soroban_sdk::Vec<Receipt> {
+        use soroban_sdk::Vec;
+
+        let mut results = Vec::new(&env);
+
+        let user_count_key = StorageKey::UserCount(user.clone());
+        let total_count: u32 = env.storage().persistent().get(&user_count_key).unwrap_or(0);
+
+        let start_index = cursor.unwrap_or(0);
+        let end_index = core::cmp::min(start_index + limit, total_count);
+
+        for index in start_index..end_index {
+            let user_index_key = StorageKey::UserIndex(user.clone(), index);
+
+            if let Some(tx_id) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, BytesN<32>>(&user_index_key)
+            {
                 if let Some(receipt) = env
                     .storage()
                     .persistent()
@@ -543,13 +619,13 @@ fn require_not_paused(env: &soroban_sdk::Env) -> Result<(), ContractError> {
 /// * `Err(ContractError::InvalidTxType)` - If the transaction type is not in allowed list
 fn validate_tx_type(tx_type: &Symbol) -> Result<(), ContractError> {
     use alloc::string::ToString;
-    
+
     let tx_type_str = tx_type.to_string();
-    
+
     if !ALLOWED_TX_TYPES.contains(&tx_type_str.as_str()) {
         return Err(ContractError::InvalidTxType);
     }
-    
+
     Ok(())
 }
 
