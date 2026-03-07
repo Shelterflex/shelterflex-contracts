@@ -27,7 +27,7 @@ pub const ALLOWED_SOURCES: [&str; 7] = [
 /// Allowed transaction types for MVP
 pub const ALLOWED_TX_TYPES: [&str; 7] = [
     "TENANT_REPAYMENT",
-    "LANDLORD_PAYOUT", 
+    "LANDLORD_PAYOUT",
     "WHISTLEBLOWER_REWARD",
     "STAKE",
     "UNSTAKE",
@@ -376,15 +376,24 @@ impl TransactionReceiptContract {
         if let Some(ref from_addr) = receipt.from {
             let user_count_key = StorageKey::UserCount(from_addr.clone());
             let user_count: u32 = env.storage().persistent().get(&user_count_key).unwrap_or(0);
-            env.storage().persistent().set(&StorageKey::UserIndex(from_addr.clone(), user_count), &tx_id);
-            env.storage().persistent().set(&user_count_key, &(user_count + 1));
+            env.storage().persistent().set(
+                &StorageKey::UserIndex(from_addr.clone(), user_count),
+                &tx_id,
+            );
+            env.storage()
+                .persistent()
+                .set(&user_count_key, &(user_count + 1));
         }
 
         if let Some(ref to_addr) = receipt.to {
             let user_count_key = StorageKey::UserCount(to_addr.clone());
             let user_count: u32 = env.storage().persistent().get(&user_count_key).unwrap_or(0);
-            env.storage().persistent().set(&StorageKey::UserIndex(to_addr.clone(), user_count), &tx_id);
-            env.storage().persistent().set(&user_count_key, &(user_count + 1));
+            env.storage()
+                .persistent()
+                .set(&StorageKey::UserIndex(to_addr.clone(), user_count), &tx_id);
+            env.storage()
+                .persistent()
+                .set(&user_count_key, &(user_count + 1));
         }
 
         // Emit event with topic ("receipt", tx_id) and receipt payload
@@ -610,13 +619,13 @@ fn require_not_paused(env: &soroban_sdk::Env) -> Result<(), ContractError> {
 /// * `Err(ContractError::InvalidTxType)` - If the transaction type is not in allowed list
 fn validate_tx_type(tx_type: &Symbol) -> Result<(), ContractError> {
     use alloc::string::ToString;
-    
+
     let tx_type_str = tx_type.to_string();
-    
+
     if !ALLOWED_TX_TYPES.contains(&tx_type_str.as_str()) {
         return Err(ContractError::InvalidTxType);
     }
-    
+
     Ok(())
 }
 

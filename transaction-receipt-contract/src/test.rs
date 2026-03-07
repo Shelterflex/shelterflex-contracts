@@ -1,12 +1,25 @@
 #![cfg(test)]
 
-use crate::{generate_tx_id, validate_tx_type, ContractError, Receipt, ReceiptInput, StorageKey, ALLOWED_SOURCES, ALLOWED_TX_TYPES};
+use crate::{
+    generate_tx_id, validate_tx_type, ContractError, Receipt, ReceiptInput, StorageKey,
+    ALLOWED_SOURCES, ALLOWED_TX_TYPES,
+};
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Symbol, Vec};
 
 // Golden test vectors - shared with backend tests
 const GOLDEN_TEST_VECTORS: &[(&str, &str, &str, &str)] = &[
-    ("paystack", "psk_12345", "v1|source=paystack|ref=psk_12345", "71e9a576e18d122acff8e200cefac00bfcba57f4dc64e9cdad89f64304c6d0ec"),
-    ("BANK_TRANSFER", " UTR_98765 ", "v1|source=bank_transfer|ref=UTR_98765", "e6cd19e46ae4e78bffce61f7ada43833ee97f01e3317be080e27ee398e74a29b"),
+    (
+        "paystack",
+        "psk_12345",
+        "v1|source=paystack|ref=psk_12345",
+        "71e9a576e18d122acff8e200cefac00bfcba57f4dc64e9cdad89f64304c6d0ec",
+    ),
+    (
+        "BANK_TRANSFER",
+        " UTR_98765 ",
+        "v1|source=bank_transfer|ref=UTR_98765",
+        "e6cd19e46ae4e78bffce61f7ada43833ee97f01e3317be080e27ee398e74a29b",
+    ),
     ("stellar", "", "", "Ref cannot be empty after trimming"), // Error case
 ];
 
@@ -609,43 +622,47 @@ fn test_pause_unpause_cycle() {
 #[test]
 fn test_golden_vectors() {
     let env = Env::default();
-    
+
     // Test vector 1: paystack, psk_12345 - should succeed
     {
         let source = Symbol::new(&env, "paystack");
         let reference = String::from_str(&env, "psk_12345");
         let result = generate_tx_id(&env, &source, &reference);
         assert!(result.is_ok(), "Test vector 1 should succeed");
-        
+
         let tx_id = result.unwrap();
         let tx_id_bytes = tx_id.to_array();
         assert_eq!(tx_id_bytes.len(), 32, "Should produce 32-byte hash");
-        
+
         // Verify it's deterministic - same input should produce same output
         let source2 = Symbol::new(&env, "paystack");
         let reference2 = String::from_str(&env, "psk_12345");
         let result2 = generate_tx_id(&env, &source2, &reference2);
         assert_eq!(tx_id, result2.unwrap(), "Should be deterministic");
     }
-    
+
     // Test vector 2: BANK_TRANSFER, " UTR_98765 " - should succeed
     {
         let source = Symbol::new(&env, "BANK_TRANSFER");
         let reference = String::from_str(&env, " UTR_98765 ");
         let result = generate_tx_id(&env, &source, &reference);
         assert!(result.is_ok(), "Test vector 2 should succeed");
-        
+
         let tx_id = result.unwrap();
         let tx_id_bytes = tx_id.to_array();
         assert_eq!(tx_id_bytes.len(), 32, "Should produce 32-byte hash");
-        
+
         // Should be different from the first test vector
         let source1 = Symbol::new(&env, "paystack");
         let reference1 = String::from_str(&env, "psk_12345");
         let result1 = generate_tx_id(&env, &source1, &reference1);
-        assert_ne!(tx_id, result1.unwrap(), "Different inputs should produce different hashes");
+        assert_ne!(
+            tx_id,
+            result1.unwrap(),
+            "Different inputs should produce different hashes"
+        );
     }
-    
+
     // Test vector 3: stellar, "" - should fail
     {
         let source = Symbol::new(&env, "stellar");
@@ -672,28 +689,32 @@ fn test_allowed_tx_types_constant() {
 #[test]
 fn test_validate_tx_type_valid_types() {
     let env = Env::default();
-    
+
     // Test all valid transaction types
     let valid_types = [
         "TENANT_REPAYMENT",
-        "LANDLORD_PAYOUT", 
+        "LANDLORD_PAYOUT",
         "WHISTLEBLOWER_REWARD",
         "STAKE",
         "UNSTAKE",
         "STAKE_REWARD_CLAIM",
     ];
-    
+
     for tx_type_str in valid_types.iter() {
         let tx_type = Symbol::new(&env, tx_type_str);
         let result = validate_tx_type(&tx_type);
-        assert!(result.is_ok(), "Transaction type '{}' should be valid", tx_type_str);
+        assert!(
+            result.is_ok(),
+            "Transaction type '{}' should be valid",
+            tx_type_str
+        );
     }
 }
 
 #[test]
 fn test_validate_tx_type_invalid_types() {
     let env = Env::default();
-    
+
     // Test invalid transaction types
     let invalid_types = [
         "rent_payment",
@@ -704,13 +725,17 @@ fn test_validate_tx_type_invalid_types() {
         "",
         "TENANTREPAYMENT",  // Missing underscore
         "tenant_repayment", // lowercase
-        "Stake",           // mixed case
+        "Stake",            // mixed case
     ];
-    
+
     for tx_type_str in invalid_types.iter() {
         let tx_type = Symbol::new(&env, tx_type_str);
         let result = validate_tx_type(&tx_type);
-        assert!(result.is_err(), "Transaction type '{}' should be invalid", tx_type_str);
+        assert!(
+            result.is_err(),
+            "Transaction type '{}' should be invalid",
+            tx_type_str
+        );
         assert_eq!(result.unwrap_err(), ContractError::InvalidTxType);
     }
 }
@@ -754,7 +779,10 @@ fn test_conversion_receipt_with_metadata() {
     assert_eq!(receipt.amount_usdc, 1_000_000);
     assert_eq!(receipt.amount_ngn, Some(1_500_000_000));
     assert_eq!(receipt.fx_rate_ngn_per_usdc, Some(1_500));
-    assert_eq!(receipt.fx_provider, Some(String::from_str(&env, "provider_x")));
+    assert_eq!(
+        receipt.fx_provider,
+        Some(String::from_str(&env, "provider_x"))
+    );
 }
 
 #[test]
