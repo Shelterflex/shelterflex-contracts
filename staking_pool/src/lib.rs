@@ -13,6 +13,7 @@ use soroban_sdk::{
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
+    ContractVersion,
     Admin,
     Token,
     StakedBalances,
@@ -204,6 +205,9 @@ impl StakingPool {
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage()
             .instance()
+            .set(&DataKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
             .set(&DataKey::StakedBalances, &Map::<Address, i128>::new(&env));
         env.storage().instance().set(&DataKey::TotalStaked, &0i128);
         env.storage().instance().set(&DataKey::LockPeriod, &0u64);
@@ -212,6 +216,13 @@ impl StakingPool {
             .set(&DataKey::StakeTimestamps, &Map::<Address, u64>::new(&env));
 
         env.events().publish((Symbol::new(&env, "init"),), admin);
+    }
+
+    pub fn contract_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<_, u32>(&DataKey::ContractVersion)
+            .unwrap_or(0u32)
     }
 
     pub fn stake(env: Env, from: Address, amount: i128) {
@@ -445,6 +456,8 @@ mod test {
         let token_contract_id = token_contract.address();
 
         client.init(&admin, &token_contract_id);
+
+        assert_eq!(client.contract_version(), 1u32);
 
         // Verify admin can pause
         env.mock_auths(&[MockAuth {
