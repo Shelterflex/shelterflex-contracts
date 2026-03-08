@@ -15,6 +15,7 @@ use soroban_sdk::{
 pub enum DataKey {
     ContractVersion,
     Admin,
+    Operator,
     Token,
     StakedBalances,
     TotalStaked,
@@ -60,6 +61,18 @@ fn get_token(env: &Env) -> Address {
         .instance()
         .get(&DataKey::Token)
         .expect("token not set")
+}
+
+fn get_operator(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::Operator)
+}
+
+fn is_operator(env: &Env, addr: &Address) -> bool {
+    if let Some(op) = get_operator(env) {
+        &op == addr
+    } else {
+        false
+    }
 }
 
 fn staked_balances(env: &Env) -> Map<Address, i128> {
@@ -116,6 +129,25 @@ fn is_paused(env: &Env) -> bool {
 fn require_admin(env: &Env) {
     let admin = get_admin(env);
     admin.require_auth();
+}
+
+fn require_user_or_operator(env: &Env, user: &Address) -> Address {
+    // Primary rule: the *user* can always authorize.
+    // If an operator is configured, it can authorize stake/unstake on behalf of the user.
+    // Operator does not get to redirect funds since stake/unstake always move tokens
+    // from/to the `user` address passed in.
+    // Strict rule (safe-by-construction):
+    // - If an operator is configured, ONLY the operator may authorize stake/unstake.
+    // - If no operator is configured, ONLY the user may authorize stake/unstake.
+    //
+    // Returns the authorized spender address used for token `transfer`.
+    if let Some(op) = get_operator(env) {
+        op.require_auth();
+        op
+    } else {
+        user.require_auth();
+        user.clone()
+    }
 }
 
 fn require_not_paused(env: &Env) {
@@ -225,8 +257,24 @@ impl StakingPool {
             .unwrap_or(0u32)
     }
 
+    pub fn set_operator(env: Env, new_operator: Option<Address>) {
+        require_admin(&env);
+
+        let old_operator: Option<Address> = get_operator(&env);
+        env.storage().instance().set(&DataKey::Operator, &new_operator);
+
+        env.events().publish(
+            (Symbol::new(&env, "set_operator"),),
+            (old_operator, new_operator),
+        );
+    }
+
+    pub fn is_operator(env: Env, addr: Address) -> bool {
+        is_operator(&env, &addr)
+    }
+
     pub fn stake(env: Env, from: Address, amount: i128) {
-        from.require_auth();
+        let _spender = require_user_or_operator(&env, &from);
         require_not_paused(&env);
         require_positive_amount(amount);
 
@@ -261,7 +309,7 @@ impl StakingPool {
     }
 
     pub fn unstake(env: Env, to: Address, amount: i128) {
-        to.require_auth();
+        let _spender = require_user_or_operator(&env, &to);
         require_not_paused(&env);
         require_positive_amount(amount);
 
@@ -566,6 +614,47 @@ mod test {
         client.pause();
     }
 
+    #[test]
+    #[should_panic]
+    fn non_admin_cannot_set_operator() {
+        let env = Env::default();
+        let (contract_id, client, _admin, _user, _token_id) = setup_contract(&env);
+        let non_admin = Address::generate(&env);
+        let operator = Address::generate(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_operator",
+                args: (Some(operator.clone()),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.set_operator(&Some(operator));
+    }
+
+    #[test]
+    fn admin_can_set_operator_and_query() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _token_id) = setup_contract(&env);
+        let operator = Address::generate(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_operator",
+                args: (Some(operator.clone()),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.set_operator(&Some(operator.clone()));
+        assert!(client.is_operator(&operator));
+    }
+
     // ============================================================================
     // Pause Behavior Tests
     // ============================================================================
@@ -591,6 +680,51 @@ mod test {
         // Try to stake while paused
         env.mock_auths(&[MockAuth {
             address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "stake",
+                args: (user.clone(), 100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.stake(&user, &100i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn operator_stake_fails_when_paused() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
+        let operator = Address::generate(&env);
+
+        // Set operator
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_operator",
+                args: (Some(operator.clone()),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_operator(&Some(operator.clone()));
+
+        // Pause the contract
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
+
+        // Operator attempts to stake for user
+        env.mock_auths(&[MockAuth {
+            address: &operator,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "stake",
@@ -893,6 +1027,67 @@ mod test {
             client.unstake(&user, &500i128);
         }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn operator_can_authorize_stake_and_unstake_calls() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, token_id) = setup_contract(&env);
+        let operator = Address::generate(&env);
+
+        // Set operator
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_operator",
+                args: (Some(operator.clone()),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_operator(&Some(operator.clone()));
+
+        // Fund user
+        let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_id);
+        env.mock_all_auths();
+        token_client.mint(&user, &1000i128);
+
+        // Stake authorized by operator
+        env.mock_auths(&[
+            MockAuth {
+                address: &operator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "stake",
+                    args: (user.clone(), 500i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+            MockAuth {
+                address: &user,
+                invoke: &MockAuthInvoke {
+                    contract: &token_id,
+                    fn_name: "transfer",
+                    args: (user.clone(), contract_id.clone(), 500i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+        ]);
+        client.stake(&user, &500i128);
+        assert_eq!(client.staked_balance(&user), 500i128);
+
+        // Unstake authorized by operator
+        env.mock_auths(&[MockAuth {
+            address: &operator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), 200i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.unstake(&user, &200i128);
+        assert_eq!(client.staked_balance(&user), 300i128);
     }
 
     #[test]

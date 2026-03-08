@@ -5,6 +5,7 @@
 //! canonicalized external payment reference (the `tx_id`). The contract enforces
 //! validation rules on external references, prevents duplicates, and supports
 //! admin/operator authorization and pause control.
+//! 
 #![no_std]
 
 extern crate alloc;
