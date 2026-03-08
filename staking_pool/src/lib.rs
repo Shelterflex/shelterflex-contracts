@@ -131,21 +131,22 @@ fn require_admin(env: &Env) {
     admin.require_auth();
 }
 
-fn require_user_or_operator(env: &Env, user: &Address) {
+fn require_user_or_operator(env: &Env, user: &Address) -> Address {
     // Primary rule: the *user* can always authorize.
     // If an operator is configured, it can authorize stake/unstake on behalf of the user.
     // Operator does not get to redirect funds since stake/unstake always move tokens
     // from/to the `user` address passed in.
     // Strict rule (safe-by-construction):
-    // - If an operator is configured, the operator must authorize stake/unstake calls.
-    // - Otherwise, the user must authorize.
+    // - If an operator is configured, ONLY the operator may authorize stake/unstake.
+    // - If no operator is configured, ONLY the user may authorize stake/unstake.
     //
-    // This avoids trying to probe auth (no catch_unwind in no_std) and provides
-    // deterministic expectations for clients.
+    // Returns the authorized spender address used for token `transfer`.
     if let Some(op) = get_operator(env) {
         op.require_auth();
+        op
     } else {
         user.require_auth();
+        user.clone()
     }
 }
 
@@ -273,7 +274,7 @@ impl StakingPool {
     }
 
     pub fn stake(env: Env, from: Address, amount: i128) {
-        require_user_or_operator(&env, &from);
+        let _spender = require_user_or_operator(&env, &from);
         require_not_paused(&env);
         require_positive_amount(amount);
 
@@ -308,7 +309,7 @@ impl StakingPool {
     }
 
     pub fn unstake(env: Env, to: Address, amount: i128) {
-        require_user_or_operator(&env, &to);
+        let _spender = require_user_or_operator(&env, &to);
         require_not_paused(&env);
         require_positive_amount(amount);
 
@@ -1047,23 +1048,31 @@ mod test {
         client.set_operator(&Some(operator.clone()));
 
         // Fund user
-        let token_admin = Address::generate(&env);
-        let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-        let token_contract_id = token_contract.address();
-        let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_contract_id);
+        let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_id);
         env.mock_all_auths();
         token_client.mint(&user, &1000i128);
 
         // Stake authorized by operator
-        env.mock_auths(&[MockAuth {
-            address: &operator,
-            invoke: &MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "stake",
-                args: (user.clone(), 500i128).into_val(&env),
-                sub_invokes: &[],
+        env.mock_auths(&[
+            MockAuth {
+                address: &operator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "stake",
+                    args: (user.clone(), 500i128).into_val(&env),
+                    sub_invokes: &[],
+                },
             },
-        }]);
+            MockAuth {
+                address: &user,
+                invoke: &MockAuthInvoke {
+                    contract: &token_id,
+                    fn_name: "transfer",
+                    args: (user.clone(), contract_id.clone(), 500i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+        ]);
         client.stake(&user, &500i128);
         assert_eq!(client.staked_balance(&user), 500i128);
 
