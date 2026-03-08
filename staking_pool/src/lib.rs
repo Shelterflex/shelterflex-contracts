@@ -7,7 +7,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec as StdVec;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Map, Symbol, String,
+    contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Map, String, Symbol,
 };
 
 #[contracttype]
@@ -83,7 +83,9 @@ fn staked_balances(env: &Env) -> Map<Address, i128> {
 }
 
 fn put_staked_balances(env: &Env, balances: Map<Address, i128>) {
-    env.storage().instance().set(&DataKey::StakedBalances, &balances);
+    env.storage()
+        .instance()
+        .set(&DataKey::StakedBalances, &balances);
 }
 
 fn get_total_staked(env: &Env) -> i128 {
@@ -116,7 +118,9 @@ fn stake_timestamps(env: &Env) -> Map<Address, u64> {
 }
 
 fn put_stake_timestamps(env: &Env, timestamps: Map<Address, u64>) {
-    env.storage().instance().set(&DataKey::StakeTimestamps, &timestamps);
+    env.storage()
+        .instance()
+        .set(&DataKey::StakeTimestamps, &timestamps);
 }
 
 fn is_paused(env: &Env) -> bool {
@@ -261,7 +265,9 @@ impl StakingPool {
         require_admin(&env);
 
         let old_operator: Option<Address> = get_operator(&env);
-        env.storage().instance().set(&DataKey::Operator, &new_operator);
+        env.storage()
+            .instance()
+            .set(&DataKey::Operator, &new_operator);
 
         env.events().publish(
             (Symbol::new(&env, "set_operator"),),
@@ -392,7 +398,8 @@ impl StakingPool {
     pub fn set_lock_period(env: Env, seconds: u64) {
         require_admin(&env);
         put_lock_period(&env, seconds);
-        env.events().publish((Symbol::new(&env, "set_lock_period"),), seconds);
+        env.events()
+            .publish((Symbol::new(&env, "set_lock_period"),), seconds);
     }
 
     pub fn get_lock_period(env: Env) -> u64 {
@@ -400,13 +407,13 @@ impl StakingPool {
     }
 
     /// Computes metadata hash for receipt input using canonical payload v1
-    /// 
+    ///
     /// # Arguments
     /// * `input` - ReceiptInput struct containing transaction data
-    /// 
+    ///
     /// # Returns
     /// BytesN<32> - SHA-256 hash of canonical payload v1
-    /// 
+    ///
     /// # Canonical Payload Format v1
     /// Deterministic serialization with fixed ordering:
     /// 1. tx_type (Symbol, 32 bytes max)
@@ -417,22 +424,22 @@ impl StakingPool {
     /// 6. deal_id (String, variable length with length prefix, empty if None)
     /// 7. listing_id (String, variable length with length prefix, empty if None)
     /// 8. metadata (Map<Symbol, String>, sorted by key, empty marker if None)
-    /// 
+    ///
     /// All fields are concatenated in order with no delimiters.
     /// Optional fields use empty values when None.
     pub fn compute_metadata_hash(env: Env, input: ReceiptInput) -> BytesN<32> {
         require_positive_amount(input.amount_usdc);
-        
+
         let payload = create_canonical_payload_v1(&env, &input);
         compute_canonical_hash(&env, &payload)
     }
 
     /// Verifies that a metadata hash matches the computed hash for given input
-    /// 
+    ///
     /// # Arguments
     /// * `input` - ReceiptInput struct containing transaction data
     /// * `expected_hash` - Expected SHA-256 hash to verify against
-    /// 
+    ///
     /// # Returns
     /// bool - true if hash matches, false otherwise
     pub fn verify_metadata_hash(env: Env, input: ReceiptInput, expected_hash: BytesN<32>) -> bool {
@@ -445,11 +452,9 @@ impl StakingPool {
 mod test {
     extern crate std;
 
-    use super::{StakingPool, StakingPoolClient, ReceiptInput};
+    use super::{ReceiptInput, StakingPool, StakingPoolClient};
     use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
-    use soroban_sdk::{
-        Address, Env, IntoVal, Symbol, TryIntoVal, Map, BytesN, String,
-    };
+    use soroban_sdk::{Address, BytesN, Env, IntoVal, Map, String, Symbol, TryIntoVal};
 
     fn hex_to_bytes32(hex: &str) -> [u8; 32] {
         fn hex_val(b: u8) -> u8 {
@@ -473,7 +478,7 @@ mod test {
     fn setup_contract(env: &Env) -> (Address, StakingPoolClient<'_>, Address, Address, Address) {
         let contract_id = env.register(StakingPool, ());
         let client = StakingPoolClient::new(env, &contract_id);
-        
+
         let admin = Address::generate(env);
         let user = Address::generate(env);
         let token_admin = Address::generate(env);
@@ -497,7 +502,7 @@ mod test {
         let env = Env::default();
         let contract_id = env.register(StakingPool, ());
         let client = StakingPoolClient::new(&env, &contract_id);
-        
+
         let admin = Address::generate(&env);
         let token_admin = Address::generate(&env);
         let token_contract = env.register_stellar_asset_contract_v2(token_admin);
@@ -527,7 +532,7 @@ mod test {
         let env = Env::default();
         let contract_id = env.register(StakingPool, ());
         let client = StakingPoolClient::new(&env, &contract_id);
-        
+
         let admin = Address::generate(&env);
         let token_admin = Address::generate(&env);
         let token_contract = env.register_stellar_asset_contract_v2(token_admin);
@@ -754,7 +759,6 @@ mod test {
         }]);
         client.pause();
 
-        
         // Try to unstake while paused
         env.mock_auths(&[MockAuth {
             address: &user,
@@ -924,7 +928,7 @@ mod test {
         let env = Env::default();
         let contract_id = env.register(StakingPool, ());
         let client = StakingPoolClient::new(&env, &contract_id);
-        
+
         let admin = Address::generate(&env);
         let token_admin = Address::generate(&env);
         let token_contract = env.register_stellar_asset_contract_v2(token_admin);
@@ -995,7 +999,6 @@ mod test {
         client.set_lock_period(&3600u64);
     }
 
-    
     #[test]
     fn unstake_succeeds_after_lock_period() {
         let env = Env::default();
@@ -1388,7 +1391,7 @@ mod test {
             let hex = std::string::String::from_utf8(out.to_vec()).expect("valid utf8");
             std::println!("golden_metadata_hash.basic_stake={}", hex);
         }
-        
+
         // Verify hash is non-zero
         let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
         assert_ne!(hash, zero_hash);
@@ -1400,8 +1403,14 @@ mod test {
         let (_contract_id, client, _admin, user, token_id) = setup_contract(&env);
 
         let mut metadata = Map::new(&env);
-        metadata.set(Symbol::new(&env, "category"), String::from_str(&env, "rent_payment"));
-        metadata.set(Symbol::new(&env, "priority"), String::from_str(&env, "high"));
+        metadata.set(
+            Symbol::new(&env, "category"),
+            String::from_str(&env, "rent_payment"),
+        );
+        metadata.set(
+            Symbol::new(&env, "priority"),
+            String::from_str(&env, "high"),
+        );
 
         let input = ReceiptInput {
             tx_type: Symbol::new(&env, "unstake"),
@@ -1415,7 +1424,7 @@ mod test {
         };
 
         let hash = client.compute_metadata_hash(&input);
-        
+
         // Verify hash is non-zero
         let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
         assert_ne!(hash, zero_hash);
@@ -1439,7 +1448,7 @@ mod test {
 
         let expected_hash = client.compute_metadata_hash(&input);
         let is_valid = client.verify_metadata_hash(&input, &expected_hash);
-        
+
         assert!(is_valid);
     }
 
@@ -1461,7 +1470,7 @@ mod test {
 
         let wrong_hash = BytesN::from_array(&env, &[1u8; 32]);
         let is_valid = client.verify_metadata_hash(&input, &wrong_hash);
-        
+
         assert!(!is_valid);
     }
 
@@ -1483,7 +1492,7 @@ mod test {
 
         let hash1 = client.compute_metadata_hash(&input.clone());
         let hash2 = client.compute_metadata_hash(&input);
-        
+
         assert_eq!(hash1, hash2);
     }
 
@@ -1516,7 +1525,7 @@ mod test {
 
         let hash1 = client.compute_metadata_hash(&input1);
         let hash2 = client.compute_metadata_hash(&input2);
-        
+
         assert_ne!(hash1, hash2);
     }
 
@@ -1571,7 +1580,7 @@ mod test {
 
         // Fixed test values for deterministic hash
         env.ledger().set_timestamp(1620000000u64);
-        
+
         let input = ReceiptInput {
             tx_type: Symbol::new(&env, "stake"),
             amount_usdc: 1000000i128, // 1 USDC with 6 decimals
@@ -1584,12 +1593,10 @@ mod test {
         };
 
         let hash = client.compute_metadata_hash(&input);
-        
+
         let expected = BytesN::from_array(
             &env,
-            &hex_to_bytes32(
-                "c420b6abfa2b233108918399c8cb0059b951cdd2f1c3562bf38c183a0ff96713",
-            ),
+            &hex_to_bytes32("c420b6abfa2b233108918399c8cb0059b951cdd2f1c3562bf38c183a0ff96713"),
         );
         assert_eq!(hash, expected);
     }
@@ -1600,10 +1607,16 @@ mod test {
         let (_contract_id, client, _admin, user, token_id) = setup_contract(&env);
 
         env.ledger().set_timestamp(1620000000u64);
-        
+
         let mut metadata = Map::new(&env);
-        metadata.set(Symbol::new(&env, "source"), String::from_str(&env, "bank_transfer"));
-        metadata.set(Symbol::new(&env, "reference"), String::from_str(&env, "TX123456789"));
+        metadata.set(
+            Symbol::new(&env, "source"),
+            String::from_str(&env, "bank_transfer"),
+        );
+        metadata.set(
+            Symbol::new(&env, "reference"),
+            String::from_str(&env, "TX123456789"),
+        );
 
         let input = ReceiptInput {
             tx_type: Symbol::new(&env, "unstake"),
@@ -1617,14 +1630,11 @@ mod test {
         };
 
         let hash = client.compute_metadata_hash(&input);
-        
+
         let expected = BytesN::from_array(
             &env,
-            &hex_to_bytes32(
-                "348091ff408ec28120067b9708aee87b147834307a57c23b36821ffced58e5a0",
-            ),
+            &hex_to_bytes32("348091ff408ec28120067b9708aee87b147834307a57c23b36821ffced58e5a0"),
         );
         assert_eq!(hash, expected);
     }
-
-    }
+}

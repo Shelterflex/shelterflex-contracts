@@ -8,8 +8,8 @@ use alloc::string::ToString;
 
 use crate::{
     generate_tx_id, validate_tx_type, ContractError, Receipt, ReceiptInput, StorageKey,
-    TransactionReceiptContract, TransactionReceiptContractClient,
-    ALLOWED_SOURCES, ALLOWED_TX_TYPES,
+    TransactionReceiptContract, TransactionReceiptContractClient, ALLOWED_SOURCES,
+    ALLOWED_TX_TYPES,
 };
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Symbol};
 use std::string::String as StdString;
@@ -88,7 +88,10 @@ fn test_metadata_hash_golden_vector_v1() {
     let mut input_with_hash = input.clone();
     input_with_hash.metadata_hash = Some(expected.clone());
 
-    let res = client.try_record_receipt(&operator, &input_with_hash).unwrap().unwrap();
+    let res = client
+        .try_record_receipt(&operator, &input_with_hash)
+        .unwrap()
+        .unwrap();
     assert_eq!(res.len(), 32);
 }
 
@@ -125,7 +128,10 @@ fn test_metadata_hash_invalid_rejected() {
         metadata_hash: Some(bad_hash),
     };
 
-    let err = client.try_record_receipt(&operator, &input).unwrap_err().unwrap();
+    let err = client
+        .try_record_receipt(&operator, &input)
+        .unwrap_err()
+        .unwrap();
     assert_eq!(err, ContractError::InvalidMetadataHash);
 }
 
