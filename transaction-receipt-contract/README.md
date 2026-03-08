@@ -4,6 +4,8 @@ This Soroban smart contract records immutable transaction receipts keyed by a de
 
 See `docs/specs/contracts/CONVENTIONS.md` for shared conventions (errors, events, init patterns).
 
+See `docs/specs/contracts/UPGRADE_STRATEGY.md` for the contract upgrade/versioning strategy.
+
 ## Purpose
 
 - Record canonical transaction receipts for on-chain indexing and audit.
