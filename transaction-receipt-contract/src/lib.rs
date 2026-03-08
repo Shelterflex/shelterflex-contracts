@@ -5,7 +5,7 @@
 //! canonicalized external payment reference (the `tx_id`). The contract enforces
 //! validation rules on external references, prevents duplicates, and supports
 //! admin/operator authorization and pause control.
-//! 
+//!
 #![no_std]
 
 extern crate alloc;
@@ -118,7 +118,10 @@ fn validate_external_ref(
 /// - If `Some`, values are rendered without extra whitespace.
 ///
 /// Ordering is fixed and MUST NOT change.
-fn canonical_metadata_payload_v1(env: &soroban_sdk::Env, input: &ReceiptInput) -> soroban_sdk::Bytes {
+fn canonical_metadata_payload_v1(
+    env: &soroban_sdk::Env,
+    input: &ReceiptInput,
+) -> soroban_sdk::Bytes {
     use soroban_sdk::Bytes;
 
     extern crate alloc;
@@ -138,12 +141,7 @@ fn canonical_metadata_payload_v1(env: &soroban_sdk::Env, input: &ReceiptInput) -
 
     let mut out: StdString = format!(
         "v1|external_ref_source={}|external_ref={}|tx_type={}|amount_usdc={}|token={}|deal_id={}",
-        source_lower,
-        ext_ref_trimmed,
-        tx_type_str,
-        input.amount_usdc,
-        token_str,
-        deal_id_str,
+        source_lower, ext_ref_trimmed, tx_type_str, input.amount_usdc, token_str, deal_id_str,
     );
 
     if let Some(ref listing_id) = input.listing_id {
@@ -230,7 +228,7 @@ pub struct Receipt {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageKey {
-     ContractVersion,
+    ContractVersion,
     /// Admin address (set during initialization, immutable)
     Admin,
     /// Operator address (can be changed by admin)
