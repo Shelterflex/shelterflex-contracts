@@ -309,6 +309,15 @@ fn test_init_success() {
         env.storage().instance().get(&StorageKey::Paused).unwrap()
     });
     assert_eq!(paused, false);
+
+    // Verify contract version is set
+    let version: u32 = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&StorageKey::ContractVersion)
+            .unwrap()
+    });
+    assert_eq!(version, 1u32);
 }
 
 #[test]

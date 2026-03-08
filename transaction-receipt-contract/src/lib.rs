@@ -106,6 +106,7 @@ pub struct Receipt {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageKey {
+     ContractVersion,
     /// Admin address (set during initialization, immutable)
     Admin,
     /// Operator address (can be changed by admin)
@@ -189,10 +190,21 @@ impl TransactionReceiptContract {
             .instance()
             .set(&StorageKey::Operator, &operator);
 
+        env.storage()
+            .instance()
+            .set(&StorageKey::ContractVersion, &1u32);
+
         // Initialize paused state to false
         env.storage().instance().set(&StorageKey::Paused, &false);
 
         Ok(())
+    }
+
+    pub fn contract_version(env: soroban_sdk::Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<_, u32>(&StorageKey::ContractVersion)
+            .unwrap_or(0u32)
     }
 
     /// Pause the contract to prevent receipt recording

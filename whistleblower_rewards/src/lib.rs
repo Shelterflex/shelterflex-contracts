@@ -9,6 +9,7 @@ use soroban_sdk::{
 #[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
+    ContractVersion,
     Admin,
     Operator,
     Token,
@@ -106,6 +107,9 @@ impl WhistleblowerRewards {
             .instance()
             .set(&StorageKey::Operator, &operator);
         env.storage().instance().set(&StorageKey::Token, &token);
+        env.storage()
+            .instance()
+            .set(&StorageKey::ContractVersion, &1u32);
         env.storage().instance().set(&StorageKey::Paused, &false);
 
         env.events().publish(
@@ -113,6 +117,13 @@ impl WhistleblowerRewards {
             (admin, operator, token),
         );
         Ok(())
+    }
+
+    pub fn contract_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<_, u32>(&StorageKey::ContractVersion)
+            .unwrap_or(0u32)
     }
 
     pub fn allocate(
@@ -232,6 +243,8 @@ mod test {
     fn init_sets_fields() {
         let env = Env::default();
         let (contract_id, client, admin, operator, token_id, _token_admin) = setup(&env);
+
+        assert_eq!(client.contract_version(), 1u32);
 
         env.mock_auths(&[MockAuth {
             address: &admin,
