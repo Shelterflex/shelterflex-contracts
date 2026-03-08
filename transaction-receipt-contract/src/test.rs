@@ -2,8 +2,13 @@
 
 extern crate std;
 
+extern crate alloc;
+use alloc::format;
+use alloc::string::ToString;
+
 use crate::{
     generate_tx_id, validate_tx_type, ContractError, Receipt, ReceiptInput, StorageKey,
+    TransactionReceiptContract, TransactionReceiptContractClient,
     ALLOWED_SOURCES, ALLOWED_TX_TYPES,
 };
 use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Symbol};
@@ -24,6 +29,107 @@ fn test_allowed_sources_constant() {
 }
 
 #[test]
+fn test_generate_tx_id_golden_vector_v1() {
+    let env = Env::default();
+    let source = Symbol::new(&env, "PAYSTACK");
+    let reference = String::from_str(&env, "  ref_12345  ");
+
+    let tx_id = generate_tx_id(&env, &source, &reference).unwrap();
+
+    let canonical = "v1|source=paystack|ref=ref_12345";
+    let expected: BytesN<32> = env
+        .crypto()
+        .sha256(&soroban_sdk::Bytes::from_slice(&env, canonical.as_bytes()))
+        .into();
+
+    assert_eq!(tx_id, expected);
+}
+
+#[test]
+fn test_metadata_hash_golden_vector_v1() {
+    let env = Env::default();
+    let contract_id = env.register(TransactionReceiptContract, ());
+    let client = TransactionReceiptContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let operator = Address::generate(&env);
+    client.try_init(&admin, &operator).unwrap();
+    env.mock_all_auths();
+
+    let token = Address::generate(&env);
+    let token_str: std::string::String = token.to_string().to_string();
+
+    let input = ReceiptInput {
+        external_ref_source: Symbol::new(&env, "PayStack"),
+        external_ref: String::from_str(&env, "  ref_12345  "),
+        tx_type: Symbol::new(&env, "CONVERSION"),
+        amount_usdc: 1_000_000i128,
+        token: token.clone(),
+        deal_id: String::from_str(&env, "deal_001"),
+        listing_id: None,
+        from: None,
+        to: None,
+        amount_ngn: Some(1_500_000_000i128),
+        fx_rate_ngn_per_usdc: Some(1500i128),
+        fx_provider: Some(String::from_str(&env, "provider_x")),
+        metadata_hash: None,
+    };
+
+    let canonical = format!(
+        "v1|external_ref_source=paystack|external_ref=ref_12345|tx_type=CONVERSION|amount_usdc=1000000|token={}|deal_id=deal_001|amount_ngn=1500000000|fx_rate_ngn_per_usdc=1500|fx_provider=provider_x",
+        token_str,
+    );
+
+    let expected: BytesN<32> = env
+        .crypto()
+        .sha256(&soroban_sdk::Bytes::from_slice(&env, canonical.as_bytes()))
+        .into();
+
+    let mut input_with_hash = input.clone();
+    input_with_hash.metadata_hash = Some(expected.clone());
+
+    let res = client.try_record_receipt(&operator, &input_with_hash).unwrap().unwrap();
+    assert_eq!(res.len(), 32);
+}
+
+#[test]
+fn test_metadata_hash_invalid_rejected() {
+    let env = Env::default();
+    let contract_id = env.register(TransactionReceiptContract, ());
+    let client = TransactionReceiptContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let operator = Address::generate(&env);
+    client.try_init(&admin, &operator).unwrap();
+    env.mock_all_auths();
+
+    let token = Address::generate(&env);
+
+    let mut bad_hash_bytes = [0u8; 32];
+    bad_hash_bytes[0] = 1u8;
+    let bad_hash = BytesN::from_array(&env, &bad_hash_bytes);
+
+    let input = ReceiptInput {
+        external_ref_source: Symbol::new(&env, "paystack"),
+        external_ref: String::from_str(&env, "ref_999"),
+        tx_type: Symbol::new(&env, "CONVERSION"),
+        amount_usdc: 1_000_000i128,
+        token: token.clone(),
+        deal_id: String::from_str(&env, "deal_002"),
+        listing_id: None,
+        from: None,
+        to: None,
+        amount_ngn: None,
+        fx_rate_ngn_per_usdc: None,
+        fx_provider: None,
+        metadata_hash: Some(bad_hash),
+    };
+
+    let err = client.try_record_receipt(&operator, &input).unwrap_err().unwrap();
+    assert_eq!(err, ContractError::InvalidMetadataHash);
+}
+
+#[test]
 fn test_contract_error_codes() {
     // Verify error codes match specification
     assert_eq!(ContractError::AlreadyInitialized as u32, 1);
@@ -35,6 +141,7 @@ fn test_contract_error_codes() {
     assert_eq!(ContractError::InvalidExternalRef as u32, 7);
     assert_eq!(ContractError::InvalidTimestamp as u32, 8);
     assert_eq!(ContractError::InvalidTxType as u32, 9);
+    assert_eq!(ContractError::InvalidMetadataHash as u32, 10);
 }
 
 #[test]
@@ -276,9 +383,6 @@ fn test_generate_tx_id_different_references_different_hashes() {
 }
 
 // Tests for init function
-
-use crate::TransactionReceiptContract;
-use crate::TransactionReceiptContractClient;
 
 #[test]
 fn test_init_success() {

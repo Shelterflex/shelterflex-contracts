@@ -68,6 +68,129 @@ pub struct ReceiptInput {
     pub metadata_hash: Option<BytesN<32>>,
 }
 
+/// Helper function to validate external reference source and external reference.
+///
+/// This enforces the same invariants as `generate_tx_id`, but can be used
+/// independently in validation flows.
+fn validate_external_ref(
+    external_ref_source: &Symbol,
+    external_ref: &String,
+) -> Result<(), ContractError> {
+    use alloc::string::ToString;
+
+    extern crate alloc;
+    use alloc::string::String as StdString;
+
+    let source_str: StdString = external_ref_source.to_string();
+    let source_trimmed = source_str.trim();
+    let source_lower = source_trimmed.to_lowercase();
+
+    if !ALLOWED_SOURCES.contains(&source_lower.as_str()) {
+        return Err(ContractError::InvalidExternalRefSource);
+    }
+
+    let ref_str: StdString = external_ref.to_string();
+    let ref_trimmed = ref_str.trim();
+
+    if ref_trimmed.is_empty() {
+        return Err(ContractError::InvalidExternalRef);
+    }
+
+    if ref_trimmed.contains('|') {
+        return Err(ContractError::InvalidExternalRef);
+    }
+
+    if ref_trimmed.len() > 256 {
+        return Err(ContractError::InvalidExternalRef);
+    }
+
+    Ok(())
+}
+
+/// Produce canonical bytes for metadata hashing (v1).
+///
+/// Canonical format:
+/// `v1|external_ref_source=<lowercased_trimmed>|external_ref=<trimmed>|tx_type=<case_sensitive>|amount_usdc=<i128>|token=<address>|deal_id=<string>|listing_id=<string>|from=<address>|to=<address>|amount_ngn=<i128>|fx_rate_ngn_per_usdc=<i128>|fx_provider=<string>`
+///
+/// Optional fields rules:
+/// - If `None`, the key is omitted entirely.
+/// - If `Some`, values are rendered without extra whitespace.
+///
+/// Ordering is fixed and MUST NOT change.
+fn canonical_metadata_payload_v1(env: &soroban_sdk::Env, input: &ReceiptInput) -> soroban_sdk::Bytes {
+    use soroban_sdk::Bytes;
+
+    extern crate alloc;
+    use alloc::format;
+    use alloc::string::String as StdString;
+    use alloc::string::ToString;
+
+    let source_str: StdString = input.external_ref_source.to_string();
+    let source_lower = source_str.trim().to_lowercase();
+
+    let ext_ref_str: StdString = input.external_ref.to_string();
+    let ext_ref_trimmed = ext_ref_str.trim();
+
+    let tx_type_str: StdString = input.tx_type.to_string();
+    let token_str: StdString = input.token.to_string().to_string();
+    let deal_id_str: StdString = input.deal_id.to_string().to_string();
+
+    let mut out: StdString = format!(
+        "v1|external_ref_source={}|external_ref={}|tx_type={}|amount_usdc={}|token={}|deal_id={}",
+        source_lower,
+        ext_ref_trimmed,
+        tx_type_str,
+        input.amount_usdc,
+        token_str,
+        deal_id_str,
+    );
+
+    if let Some(ref listing_id) = input.listing_id {
+        out.push_str("|listing_id=");
+        let s: StdString = listing_id.to_string();
+        out.push_str(s.as_str());
+    }
+
+    if let Some(ref from) = input.from {
+        out.push_str("|from=");
+        let s: StdString = from.to_string().to_string();
+        out.push_str(s.as_str());
+    }
+
+    if let Some(ref to) = input.to {
+        out.push_str("|to=");
+        let s: StdString = to.to_string().to_string();
+        out.push_str(s.as_str());
+    }
+
+    if let Some(amount_ngn) = input.amount_ngn {
+        out.push_str("|amount_ngn=");
+        out.push_str(format!("{}", amount_ngn).as_str());
+    }
+
+    if let Some(fx_rate) = input.fx_rate_ngn_per_usdc {
+        out.push_str("|fx_rate_ngn_per_usdc=");
+        out.push_str(format!("{}", fx_rate).as_str());
+    }
+
+    if let Some(ref fx_provider) = input.fx_provider {
+        out.push_str("|fx_provider=");
+        let s: StdString = fx_provider.to_string();
+        out.push_str(s.as_str());
+    }
+
+    Bytes::from_slice(env, out.as_bytes())
+}
+
+fn derive_metadata_hash(env: &soroban_sdk::Env, input: &ReceiptInput) -> BytesN<32> {
+    let payload = canonical_metadata_payload_v1(env, input);
+    env.crypto().sha256(&payload).into()
+}
+
+fn verify_metadata_hash(env: &soroban_sdk::Env, input: &ReceiptInput, hash: &BytesN<32>) -> bool {
+    derive_metadata_hash(env, input) == hash.clone()
+}
+
 /// Receipt data structure representing an immutable transaction record
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,6 +271,8 @@ pub enum ContractError {
     InvalidTimestamp = 8,
     /// Transaction type is not in allowed list
     InvalidTxType = 9,
+    /// Metadata hash is invalid (does not match canonical payload)
+    InvalidMetadataHash = 10,
 }
 
 #[contract]
@@ -334,8 +459,18 @@ impl TransactionReceiptContract {
         // Validate tx_type is in allowed list
         validate_tx_type(&input.tx_type)?;
 
+        // Validate external reference source and reference
+        validate_external_ref(&input.external_ref_source, &input.external_ref)?;
+
         // Generate tx_id from canonical external reference
         let tx_id = generate_tx_id(&env, &input.external_ref_source, &input.external_ref)?;
+
+        // If provided, validate metadata hash against canonical payload
+        if let Some(ref mh) = input.metadata_hash {
+            if !verify_metadata_hash(&env, &input, mh) {
+                return Err(ContractError::InvalidMetadataHash);
+            }
+        }
 
         // Check for duplicate tx_id
         if env
