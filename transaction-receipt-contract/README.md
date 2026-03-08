@@ -61,7 +61,18 @@ Any transaction type not in this list will be rejected with `InvalidTxType` erro
 
 ## Metadata hash
 
-`metadata_hash` is optional and expected to be the SHA-256 hash of the canonical receipt payload (v1). The contract stores it as `BytesN<32>` if provided; generation of this hash is the caller's responsibility.
+`metadata_hash` is optional and expected to be the SHA-256 hash of the canonical receipt payload (v1).
+
+Canonical payload v1 format:
+
+`v1|external_ref_source=<lowercased_trimmed>|external_ref=<trimmed>|tx_type=<case_sensitive>|amount_usdc=<i128>|token=<address>|deal_id=<string>|listing_id=<string>|from=<address>|to=<address>|amount_ngn=<i128>|fx_rate_ngn_per_usdc=<i128>|fx_provider=<string>`
+
+Rules:
+- Deterministic ordering as shown above. Ordering MUST NOT change.
+- Optional fields (`listing_id`, `from`, `to`, `amount_ngn`, `fx_rate_ngn_per_usdc`, `fx_provider`) are omitted entirely when `None` (no `|key=` segment).
+- When present, values are rendered without extra whitespace.
+
+If `metadata_hash` is provided, the contract verifies it matches the canonical payload and rejects mismatches with `InvalidMetadataHash` (error code 10).
 
 ## Conversion receipts
 

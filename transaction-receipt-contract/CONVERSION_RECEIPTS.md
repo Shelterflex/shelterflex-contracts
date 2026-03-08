@@ -112,6 +112,19 @@ let user_receipts = client.list_receipts_by_user(&user_address, &10, &None);
 let deal_receipts = client.list_receipts_by_deal(&String::from_str(&env, "deal_001"), &10, &None);
 ```
 
+## Canonical metadata_hash (v1)
+
+If you choose to supply `metadata_hash` when recording a receipt, it MUST be the SHA-256 of the canonical receipt payload (v1):
+
+`v1|external_ref_source=<lowercased_trimmed>|external_ref=<trimmed>|tx_type=<case_sensitive>|amount_usdc=<i128>|token=<address>|deal_id=<string>|listing_id=<string>|from=<address>|to=<address>|amount_ngn=<i128>|fx_rate_ngn_per_usdc=<i128>|fx_provider=<string>`
+
+Rules:
+- Deterministic ordering as shown above. Ordering MUST NOT change.
+- Optional fields are omitted entirely when `None`.
+- When present, values are rendered without extra whitespace.
+
+The contract validates a provided `metadata_hash` and rejects mismatches with `InvalidMetadataHash` (error code 10).
+
 ## Test Results
 
 All 40 tests pass, including the 3 new conversion receipt tests:
