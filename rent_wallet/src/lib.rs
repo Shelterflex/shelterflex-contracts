@@ -6,6 +6,8 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 #[derive(Clone)]
 
 pub enum DataKey {
+    ContractVersion,
+
     Admin,
 
     Balances,
@@ -81,6 +83,9 @@ impl RentWallet {
         }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &1u32);
 
         env.storage()
             .instance()
@@ -88,10 +93,17 @@ impl RentWallet {
 
         env.events().publish(
             (Symbol::new(&env, "rent_wallet"), Symbol::new(&env, "init")),
-            admin,
+            (admin, 1u32),
         );
 
         Ok(())
+    }
+
+    pub fn contract_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<_, u32>(&DataKey::ContractVersion)
+            .unwrap_or(0u32)
     }
 
     pub fn credit(
@@ -262,6 +274,8 @@ mod test {
         let admin = Address::generate(&env);
 
         client.try_init(&admin).unwrap().unwrap();
+
+        assert_eq!(client.contract_version(), 1u32);
 
         // Admin should be able to perform admin operations
         let user = Address::generate(&env);
