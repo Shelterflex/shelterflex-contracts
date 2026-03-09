@@ -103,12 +103,13 @@ The contract exposes the following `ContractError` variants (numeric values show
 - `AlreadyInitialized` (1)
 - `NotAuthorized` (2)
 - `Paused` (3)
-- `DuplicateTransaction` (4)
-- `InvalidAmount` (5)
+- `InvalidAmount` (4)
+- `DuplicateTransaction` (5)
 - `InvalidExternalRefSource` (6)
 - `InvalidExternalRef` (7)
 - `InvalidTimestamp` (8)
 - `InvalidTxType` (9) - Transaction type not in allowed list
+- `InvalidMetadataHash` (10)
 
 ## Events
 

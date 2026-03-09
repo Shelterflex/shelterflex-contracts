@@ -160,6 +160,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "Paused"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bool": false
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "StakeTimestamps"
                             }
                           ]
@@ -361,6 +373,9 @@
         "body": {
           "v0": {
             "topics": [
+              {
+                "symbol": "staking_pool"
+              },
               {
                 "symbol": "init"
               }
