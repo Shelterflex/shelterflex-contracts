@@ -1,15 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  echo "Usage: $0 [--env-file <path>] <network> <admin_identity> <operator_identity> <issuer_identity>" >&2
+  echo "Example: $0 testnet shelter_admin shelter_operator shelter_issuer" >&2
+  echo "Example: $0 --env-file backend/.env.soroban testnet shelter_admin shelter_operator shelter_issuer" >&2
+  exit 1
+}
+
+ENV_FILE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --env-file)
+      [[ $# -lt 2 ]] && usage
+      ENV_FILE="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 NETWORK="${1:-}"
 ADMIN_IDENTITY="${2:-}"
 OPERATOR_IDENTITY="${3:-}"
 ISSUER_IDENTITY="${4:-}"
 
 if [[ -z "$NETWORK" || -z "$ADMIN_IDENTITY" || -z "$OPERATOR_IDENTITY" || -z "$ISSUER_IDENTITY" ]]; then
-  echo "Usage: $0 <network> <admin_identity> <operator_identity> <issuer_identity>" >&2
-  echo "Example: $0 testnet shelter_admin shelter_operator shelter_issuer" >&2
-  exit 1
+  usage
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -100,10 +123,6 @@ invoke_init() {
 TRANSACTION_RECEIPT_ID="$(deploy_contract transaction-receipt-contract transaction_receipt)"
 STAKING_POOL_ID="$(deploy_contract staking_pool staking_pool)"
 STAKING_REWARDS_ID="$(deploy_contract staking_rewards staking_rewards)"
-DEAL_ESCROW_ID="$(deploy_contract deal_escrow deal_escrow)"
-WHISTLEBLOWER_REWARDS_ID="$(deploy_contract whistleblower_rewards whistleblower_rewards)"
-RENT_WALLET_ID="$(deploy_contract rent_wallet rent_wallet)"
-RENT_PAYMENTS_ID="$(deploy_contract rent_payments rent_payments)"
 
 echo "Initializing transaction-receipt-contract..."
 invoke_init "$TRANSACTION_RECEIPT_ID" "$ADMIN_IDENTITY" \
@@ -119,34 +138,31 @@ echo "Initializing staking_rewards..."
 invoke_init "$STAKING_REWARDS_ID" "$ADMIN_IDENTITY" \
   --admin "$ADMIN_ADDR"
 
-echo "Initializing deal_escrow..."
-invoke_init "$DEAL_ESCROW_ID" "$ADMIN_IDENTITY" \
-  --admin "$ADMIN_ADDR" \
-  --operator "$OPERATOR_ADDR" \
-  --token "$USDC_TOKEN_ID" \
-  --receipt-contract "$TRANSACTION_RECEIPT_ID"
-
-echo "Initializing whistleblower_rewards..."
-invoke_init "$WHISTLEBLOWER_REWARDS_ID" "$ADMIN_IDENTITY" \
-  --admin "$ADMIN_ADDR" \
-  --operator "$OPERATOR_ADDR" \
-  --token "$USDC_TOKEN_ID"
-
-echo "Initializing rent_wallet..."
-invoke_init "$RENT_WALLET_ID" "$ADMIN_IDENTITY" \
-  --admin "$ADMIN_ADDR"
-
-echo "Initializing rent_payments..."
-invoke_init "$RENT_PAYMENTS_ID" "$ADMIN_IDENTITY" \
-  --admin "$ADMIN_ADDR"
+ENV_SNIPPET="$(cat <<EOF
+# backend/.env
+SOROBAN_RPC_URL=$RPC_URL
+SOROBAN_NETWORK_PASSPHRASE=$NETWORK_PASSPHRASE
+SOROBAN_CONTRACT_ID=$TRANSACTION_RECEIPT_ID
+SOROBAN_USDC_TOKEN_ID=$USDC_TOKEN_ID
+SOROBAN_STAKING_POOL_ID=$STAKING_POOL_ID
+SOROBAN_STAKING_REWARDS_ID=$STAKING_REWARDS_ID
+# Optional (use operator identity secret):
+# SOROBAN_ADMIN_SECRET=$(stellar keys secret "$OPERATOR_IDENTITY")
+EOF
+)"
 
 echo ""
-echo "# backend/.env"
-echo "SOROBAN_RPC_URL=$RPC_URL"
-echo "SOROBAN_NETWORK_PASSPHRASE=$NETWORK_PASSPHRASE"
-echo "SOROBAN_CONTRACT_ID=$TRANSACTION_RECEIPT_ID"
-echo "SOROBAN_USDC_TOKEN_ID=$USDC_TOKEN_ID"
-echo "SOROBAN_STAKING_POOL_ID=$STAKING_POOL_ID"
-echo "SOROBAN_STAKING_REWARDS_ID=$STAKING_REWARDS_ID"
-echo "# Optional (use operator identity secret):"
-echo "# SOROBAN_ADMIN_SECRET=$(stellar keys secret \"$OPERATOR_IDENTITY\")"
+echo "Deployment complete. Contract IDs:"
+echo "  TRANSACTION_RECEIPT_ID=$TRANSACTION_RECEIPT_ID"
+echo "  USDC_TOKEN_ID=$USDC_TOKEN_ID"
+echo "  STAKING_POOL_ID=$STAKING_POOL_ID"
+echo "  STAKING_REWARDS_ID=$STAKING_REWARDS_ID"
+echo ""
+echo "$ENV_SNIPPET"
+
+if [[ -n "$ENV_FILE" ]]; then
+  mkdir -p "$(dirname "$ENV_FILE")"
+  printf '%s\n' "$ENV_SNIPPET" > "$ENV_FILE"
+  echo ""
+  echo "Wrote env snippet to: $ENV_FILE"
+fi
