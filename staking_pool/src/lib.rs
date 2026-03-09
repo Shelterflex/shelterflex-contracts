@@ -7,7 +7,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec as StdVec;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Map, String, Symbol,
+    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Map, String, Symbol,
 };
 
 #[contracttype]
@@ -22,6 +22,27 @@ pub enum DataKey {
     Paused,
     LockPeriod,
     StakeTimestamps,
+}
+
+/// Contract error types
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ContractError {
+    /// Contract has already been initialized
+    AlreadyInitialized = 1,
+    /// Caller is not authorized for this operation
+    NotAuthorized = 2,
+    /// Contract is currently paused
+    Paused = 3,
+    /// Amount is invalid (zero or negative)
+    InvalidAmount = 4,
+    /// Insufficient staked balance
+    InsufficientBalance = 5,
+    /// Tokens are locked and cannot be unstaked yet
+    TokensLocked = 6,
+    /// No stake timestamp found for user
+    NoStakeTimestamp = 7,
 }
 
 /// Input parameters for computing metadata hash
@@ -130,12 +151,16 @@ fn is_paused(env: &Env) -> bool {
         .unwrap_or(false)
 }
 
-fn require_admin(env: &Env) {
+fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
     let admin = get_admin(env);
-    admin.require_auth();
+    caller.require_auth();
+    if caller != &admin {
+        return Err(ContractError::NotAuthorized);
+    }
+    Ok(())
 }
 
-fn require_user_or_operator(env: &Env, user: &Address) -> Address {
+fn require_user_or_operator(env: &Env, user: &Address, caller: &Address) -> Result<Address, ContractError> {
     // Primary rule: the *user* can always authorize.
     // If an operator is configured, it can authorize stake/unstake on behalf of the user.
     // Operator does not get to redirect funds since stake/unstake always move tokens
@@ -147,23 +172,31 @@ fn require_user_or_operator(env: &Env, user: &Address) -> Address {
     // Returns the authorized spender address used for token `transfer`.
     if let Some(op) = get_operator(env) {
         op.require_auth();
-        op
+        if caller != &op {
+            return Err(ContractError::NotAuthorized);
+        }
+        Ok(op)
     } else {
         user.require_auth();
-        user.clone()
+        if caller != user {
+            return Err(ContractError::NotAuthorized);
+        }
+        Ok(user.clone())
     }
 }
 
-fn require_not_paused(env: &Env) {
+fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     if is_paused(env) {
-        panic!("contract is paused");
+        return Err(ContractError::Paused);
     }
+    Ok(())
 }
 
-fn require_positive_amount(amount: i128) {
+fn require_positive_amount(amount: i128) -> Result<(), ContractError> {
     if amount <= 0 {
-        panic!("amount must be positive");
+        return Err(ContractError::InvalidAmount);
     }
+    Ok(())
 }
 
 /// Creates canonical payload v1 serialization for receipt input
@@ -232,9 +265,9 @@ fn compute_canonical_hash(env: &Env, payload: &Bytes) -> BytesN<32> {
 
 #[contractimpl]
 impl StakingPool {
-    pub fn init(env: Env, admin: Address, token: Address) {
+    pub fn init(env: Env, admin: Address, token: Address) -> Result<(), ContractError> {
         if env.storage().instance().has(&DataKey::Admin) {
-            panic!("already initialized");
+            return Err(ContractError::AlreadyInitialized);
         }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -250,8 +283,17 @@ impl StakingPool {
         env.storage()
             .instance()
             .set(&DataKey::StakeTimestamps, &Map::<Address, u64>::new(&env));
+        env.storage().instance().set(&DataKey::Paused, &false);
 
-        env.events().publish((Symbol::new(&env, "init"),), admin);
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_pool"),
+                Symbol::new(&env, "init"),
+            ),
+            admin,
+        );
+
+        Ok(())
     }
 
     pub fn contract_version(env: Env) -> u32 {
@@ -261,8 +303,8 @@ impl StakingPool {
             .unwrap_or(0u32)
     }
 
-    pub fn set_operator(env: Env, new_operator: Option<Address>) {
-        require_admin(&env);
+    pub fn set_operator(env: Env, admin: Address, new_operator: Option<Address>) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
 
         let old_operator: Option<Address> = get_operator(&env);
         env.storage()
@@ -270,19 +312,25 @@ impl StakingPool {
             .set(&DataKey::Operator, &new_operator);
 
         env.events().publish(
-            (Symbol::new(&env, "set_operator"),),
+            (
+                Symbol::new(&env, "staking_pool"),
+                Symbol::new(&env, "set_operator"),
+            ),
             (old_operator, new_operator),
         );
+
+        Ok(())
     }
 
     pub fn is_operator(env: Env, addr: Address) -> bool {
         is_operator(&env, &addr)
     }
 
-    pub fn stake(env: Env, from: Address, amount: i128) {
-        let _spender = require_user_or_operator(&env, &from);
-        require_not_paused(&env);
-        require_positive_amount(amount);
+    pub fn stake(env: Env, from: Address, amount: i128) -> Result<(), ContractError> {
+        from.require_auth();
+        let _spender = require_user_or_operator(&env, &from, &from)?;
+        require_not_paused(&env)?;
+        require_positive_amount(amount)?;
 
         let token_address = get_token(&env);
         let token_client = token::Client::new(&env, &token_address);
@@ -309,21 +357,28 @@ impl StakingPool {
         let new_user_balance = current_balance + amount;
         let new_total = total + amount;
         env.events().publish(
-            (Symbol::new(&env, "stake"), from.clone()),
+            (
+                Symbol::new(&env, "staking_pool"),
+                Symbol::new(&env, "stake"),
+                from.clone(),
+            ),
             (amount, new_user_balance, new_total),
         );
+
+        Ok(())
     }
 
-    pub fn unstake(env: Env, to: Address, amount: i128) {
-        let _spender = require_user_or_operator(&env, &to);
-        require_not_paused(&env);
-        require_positive_amount(amount);
+    pub fn unstake(env: Env, to: Address, amount: i128) -> Result<(), ContractError> {
+        to.require_auth();
+        let _spender = require_user_or_operator(&env, &to, &to)?;
+        require_not_paused(&env)?;
+        require_positive_amount(amount)?;
 
         // Check sufficient staked balance
         let mut balances = staked_balances(&env);
         let current_balance = balances.get(to.clone()).unwrap_or(0);
         if current_balance < amount {
-            panic!("insufficient staked balance");
+            return Err(ContractError::InsufficientBalance);
         }
 
         // Check lock period
@@ -333,10 +388,10 @@ impl StakingPool {
             if let Some(stake_time) = timestamps.get(to.clone()) {
                 let current_time = env.ledger().timestamp();
                 if current_time < stake_time + lock_period {
-                    panic!("tokens are locked until {}", stake_time + lock_period);
+                    return Err(ContractError::TokensLocked);
                 }
             } else {
-                panic!("no stake timestamp found for user");
+                return Err(ContractError::NoStakeTimestamp);
             }
         }
 
@@ -365,9 +420,15 @@ impl StakingPool {
         let new_user_balance = current_balance - amount;
         let new_total = total - amount;
         env.events().publish(
-            (Symbol::new(&env, "unstake"), to.clone()),
+            (
+                Symbol::new(&env, "staking_pool"),
+                Symbol::new(&env, "unstake"),
+                to.clone(),
+            ),
             (amount, new_user_balance, new_total),
         );
+
+        Ok(())
     }
 
     pub fn staked_balance(env: Env, user: Address) -> i128 {
@@ -379,27 +440,47 @@ impl StakingPool {
         get_total_staked(&env)
     }
 
-    pub fn pause(env: Env) {
-        require_admin(&env);
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((Symbol::new(&env, "pause"),), ());
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_pool"),
+                Symbol::new(&env, "pause"),
+            ),
+            (),
+        );
+        Ok(())
     }
 
-    pub fn unpause(env: Env) {
-        require_admin(&env);
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((Symbol::new(&env, "unpause"),), ());
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_pool"),
+                Symbol::new(&env, "unpause"),
+            ),
+            (),
+        );
+        Ok(())
     }
 
     pub fn is_paused(env: Env) -> bool {
         is_paused(&env)
     }
 
-    pub fn set_lock_period(env: Env, seconds: u64) {
-        require_admin(&env);
+    pub fn set_lock_period(env: Env, admin: Address, seconds: u64) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
         put_lock_period(&env, seconds);
-        env.events()
-            .publish((Symbol::new(&env, "set_lock_period"),), seconds);
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_pool"),
+                Symbol::new(&env, "set_lock_period"),
+            ),
+            seconds,
+        );
+        Ok(())
     }
 
     pub fn get_lock_period(env: Env) -> u64 {
@@ -427,11 +508,11 @@ impl StakingPool {
     ///
     /// All fields are concatenated in order with no delimiters.
     /// Optional fields use empty values when None.
-    pub fn compute_metadata_hash(env: Env, input: ReceiptInput) -> BytesN<32> {
-        require_positive_amount(input.amount_usdc);
+    pub fn compute_metadata_hash(env: Env, input: ReceiptInput) -> Result<BytesN<32>, ContractError> {
+        require_positive_amount(input.amount_usdc)?;
 
         let payload = create_canonical_payload_v1(&env, &input);
-        compute_canonical_hash(&env, &payload)
+        Ok(compute_canonical_hash(&env, &payload))
     }
 
     /// Verifies that a metadata hash matches the computed hash for given input
@@ -442,9 +523,9 @@ impl StakingPool {
     ///
     /// # Returns
     /// bool - true if hash matches, false otherwise
-    pub fn verify_metadata_hash(env: Env, input: ReceiptInput, expected_hash: BytesN<32>) -> bool {
-        let computed_hash = Self::compute_metadata_hash(env, input);
-        computed_hash == expected_hash
+    pub fn verify_metadata_hash(env: Env, input: ReceiptInput, expected_hash: BytesN<32>) -> Result<bool, ContractError> {
+        let computed_hash = Self::compute_metadata_hash(env, input)?;
+        Ok(computed_hash == expected_hash)
     }
 }
 
@@ -452,7 +533,7 @@ impl StakingPool {
 mod test {
     extern crate std;
 
-    use super::{ReceiptInput, StakingPool, StakingPoolClient};
+    use super::{ContractError, ReceiptInput, StakingPool, StakingPoolClient};
     use soroban_sdk::testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke};
     use soroban_sdk::{Address, BytesN, Env, IntoVal, Map, String, Symbol, TryIntoVal};
 
@@ -488,7 +569,7 @@ mod test {
         let token_contract_id = token_contract.address();
 
         // Initialize contract
-        client.init(&admin, &token_contract_id);
+        client.try_init(&admin, &token_contract_id).unwrap().unwrap();
 
         (contract_id, client, admin, user, token_contract_id)
     }
@@ -508,7 +589,7 @@ mod test {
         let token_contract = env.register_stellar_asset_contract_v2(token_admin);
         let token_contract_id = token_contract.address();
 
-        client.init(&admin, &token_contract_id);
+        client.try_init(&admin, &token_contract_id).unwrap().unwrap();
 
         assert_eq!(client.contract_version(), 1u32);
 
@@ -518,16 +599,15 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        client.try_pause(&admin).unwrap().unwrap();
         assert!(client.is_paused());
     }
 
     #[test]
-    #[should_panic(expected = "already initialized")]
     fn init_cannot_be_called_twice() {
         let env = Env::default();
         let contract_id = env.register(StakingPool, ());
@@ -538,8 +618,9 @@ mod test {
         let token_contract = env.register_stellar_asset_contract_v2(token_admin);
         let token_contract_id = token_contract.address();
 
-        client.init(&admin, &token_contract_id);
-        client.init(&admin, &token_contract_id);
+        client.try_init(&admin, &token_contract_id).unwrap().unwrap();
+        let err = client.try_init(&admin, &token_contract_id).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::AlreadyInitialized);
     }
 
     // ============================================================================
@@ -577,12 +658,12 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        client.pause();
+        client.try_pause(&admin).unwrap().unwrap();
         assert!(client.is_paused());
 
         env.mock_auths(&[MockAuth {
@@ -590,17 +671,16 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "unpause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        client.unpause();
+        client.try_unpause(&admin).unwrap().unwrap();
         assert!(!client.is_paused());
     }
 
     #[test]
-    #[should_panic]
     fn non_admin_cannot_pause() {
         let env = Env::default();
         let (contract_id, client, _admin, _user, _token_id) = setup_contract(&env);
@@ -611,16 +691,16 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (non_admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        client.pause();
+        let err = client.try_pause(&non_admin).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
     }
 
     #[test]
-    #[should_panic]
     fn non_admin_cannot_set_operator() {
         let env = Env::default();
         let (contract_id, client, _admin, _user, _token_id) = setup_contract(&env);
@@ -632,12 +712,13 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "set_operator",
-                args: (Some(operator.clone()),).into_val(&env),
+                args: (non_admin.clone(), Some(operator.clone()),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        client.set_operator(&Some(operator));
+        let err = client.try_set_operator(&non_admin, &Some(operator)).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
     }
 
     #[test]
@@ -651,12 +732,12 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "set_operator",
-                args: (Some(operator.clone()),).into_val(&env),
+                args: (admin.clone(), Some(operator.clone()),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        client.set_operator(&Some(operator.clone()));
+        client.try_set_operator(&admin, &Some(operator.clone())).unwrap().unwrap();
         assert!(client.is_operator(&operator));
     }
 
@@ -665,7 +746,6 @@ mod test {
     // ============================================================================
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
     fn stake_fails_when_paused() {
         let env = Env::default();
         let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
@@ -676,11 +756,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        client.try_pause(&admin).unwrap().unwrap();
 
         // Try to stake while paused
         env.mock_auths(&[MockAuth {
@@ -693,11 +773,11 @@ mod test {
             },
         }]);
 
-        client.stake(&user, &100i128);
+        let err = client.try_stake(&user, &100i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::Paused);
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
     fn operator_stake_fails_when_paused() {
         let env = Env::default();
         let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
@@ -709,11 +789,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "set_operator",
-                args: (Some(operator.clone()),).into_val(&env),
+                args: (admin.clone(), Some(operator.clone()),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.set_operator(&Some(operator.clone()));
+        client.try_set_operator(&admin, &Some(operator.clone())).unwrap().unwrap();
 
         // Pause the contract
         env.mock_auths(&[MockAuth {
@@ -721,11 +801,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        client.try_pause(&admin).unwrap().unwrap();
 
         // Operator attempts to stake for user
         env.mock_auths(&[MockAuth {
@@ -738,11 +818,11 @@ mod test {
             },
         }]);
 
-        client.stake(&user, &100i128);
+        let err = client.try_stake(&user, &100i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::Paused);
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
     fn unstake_fails_when_paused() {
         let env = Env::default();
         let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
@@ -753,11 +833,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        client.try_pause(&admin).unwrap().unwrap();
 
         // Try to unstake while paused
         env.mock_auths(&[MockAuth {
@@ -770,7 +850,8 @@ mod test {
             },
         }]);
 
-        client.unstake(&user, &50i128);
+        let err = client.try_unstake(&user, &50i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::Paused);
     }
 
     // ============================================================================
@@ -778,7 +859,6 @@ mod test {
     // ============================================================================
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn stake_fails_with_zero_amount() {
         let env = Env::default();
         let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
@@ -793,11 +873,11 @@ mod test {
             },
         }]);
 
-        client.stake(&user, &0i128);
+        let err = client.try_stake(&user, &0i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn stake_fails_with_negative_amount() {
         let env = Env::default();
         let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
@@ -812,11 +892,11 @@ mod test {
             },
         }]);
 
-        client.stake(&user, &-10i128);
+        let err = client.try_stake(&user, &-10i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn unstake_fails_with_zero_amount() {
         let env = Env::default();
         let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
@@ -831,11 +911,11 @@ mod test {
             },
         }]);
 
-        client.unstake(&user, &0i128);
+        let err = client.try_unstake(&user, &0i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn unstake_fails_with_negative_amount() {
         let env = Env::default();
         let (contract_id, client, admin, user, _token_id) = setup_contract(&env);
@@ -850,7 +930,8 @@ mod test {
             },
         }]);
 
-        client.unstake(&user, &-10i128);
+        let err = client.try_unstake(&user, &-10i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
     }
 
     // ============================================================================
@@ -867,20 +948,22 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        client.pause();
+        client.try_pause(&admin).unwrap().unwrap();
 
         let events = env.events().all();
         let pause_event = events.last().unwrap();
 
         let topics: soroban_sdk::Vec<soroban_sdk::Val> = pause_event.1.clone();
-        assert_eq!(topics.len(), 1);
+        assert_eq!(topics.len(), 2);
 
-        let event_name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        let contract_name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(contract_name, Symbol::new(&env, "staking_pool"));
+        let event_name: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
         assert_eq!(event_name, Symbol::new(&env, "pause"));
     }
 
@@ -895,11 +978,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        client.try_pause(&admin).unwrap().unwrap();
 
         // Then unpause
         env.mock_auths(&[MockAuth {
@@ -907,19 +990,21 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "unpause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.unpause();
+        client.try_unpause(&admin).unwrap().unwrap();
 
         let events = env.events().all();
         let unpause_event = events.last().unwrap();
 
         let topics: soroban_sdk::Vec<soroban_sdk::Val> = unpause_event.1.clone();
-        assert_eq!(topics.len(), 1);
+        assert_eq!(topics.len(), 2);
 
-        let event_name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        let contract_name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(contract_name, Symbol::new(&env, "staking_pool"));
+        let event_name: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
         assert_eq!(event_name, Symbol::new(&env, "unpause"));
     }
 
@@ -934,15 +1019,17 @@ mod test {
         let token_contract = env.register_stellar_asset_contract_v2(token_admin);
         let token_contract_id = token_contract.address();
 
-        client.init(&admin, &token_contract_id);
+        client.try_init(&admin, &token_contract_id).unwrap().unwrap();
 
         let events = env.events().all();
         let init_event = events.last().unwrap();
 
         let topics: soroban_sdk::Vec<soroban_sdk::Val> = init_event.1.clone();
-        assert_eq!(topics.len(), 1);
+        assert_eq!(topics.len(), 2);
 
-        let event_name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        let contract_name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(contract_name, Symbol::new(&env, "staking_pool"));
+        let event_name: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
         assert_eq!(event_name, Symbol::new(&env, "init"));
 
         let data: Address = init_event.2.try_into_val(&env).unwrap();
@@ -970,17 +1057,16 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "set_lock_period",
-                args: (3600u64,).into_val(&env),
+                args: (admin.clone(), 3600u64,).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        client.set_lock_period(&3600u64);
+        client.try_set_lock_period(&admin, &3600u64).unwrap().unwrap();
         assert_eq!(client.get_lock_period(), 3600u64);
     }
 
     #[test]
-    #[should_panic]
     fn non_admin_cannot_set_lock_period() {
         let env = Env::default();
         let (contract_id, client, _admin, _user, _token_id) = setup_contract(&env);
@@ -991,12 +1077,13 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "set_lock_period",
-                args: (3600u64,).into_val(&env),
+                args: (non_admin.clone(), 3600u64,).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        client.set_lock_period(&3600u64);
+        let err = client.try_set_lock_period(&non_admin, &3600u64).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
     }
 
     #[test]
@@ -1010,11 +1097,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "set_lock_period",
-                args: (3600u64,).into_val(&env),
+                args: (admin.clone(), 3600u64,).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.set_lock_period(&3600u64);
+        client.try_set_lock_period(&admin, &3600u64).unwrap().unwrap();
 
         // Try to unstake without any stake (should fail due to insufficient balance)
         env.mock_auths(&[MockAuth {
@@ -1026,10 +1113,8 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.unstake(&user, &500i128);
-        }));
-        assert!(result.is_err());
+        let err = client.try_unstake(&user, &500i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InsufficientBalance);
     }
 
     #[test]
@@ -1044,11 +1129,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "set_operator",
-                args: (Some(operator.clone()),).into_val(&env),
+                args: (admin.clone(), Some(operator.clone()),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.set_operator(&Some(operator.clone()));
+        client.try_set_operator(&admin, &Some(operator.clone())).unwrap().unwrap();
 
         // Fund user
         let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_id);
@@ -1076,7 +1161,7 @@ mod test {
                 },
             },
         ]);
-        client.stake(&user, &500i128);
+        client.try_stake(&user, &500i128).unwrap().unwrap();
         assert_eq!(client.staked_balance(&user), 500i128);
 
         // Unstake authorized by operator
@@ -1089,7 +1174,7 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        client.unstake(&user, &200i128);
+        client.try_unstake(&user, &200i128).unwrap().unwrap();
         assert_eq!(client.staked_balance(&user), 300i128);
     }
 
@@ -1104,11 +1189,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "set_lock_period",
-                args: (3600u64,).into_val(&env),
+                args: (admin.clone(), 3600u64,).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.set_lock_period(&3600u64);
+        client.try_set_lock_period(&admin, &3600u64).unwrap().unwrap();
 
         // Try to unstake without any stake (should fail due to insufficient balance)
         env.mock_auths(&[MockAuth {
@@ -1120,10 +1205,8 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.unstake(&user, &500i128);
-        }));
-        assert!(result.is_err());
+        let err = client.try_unstake(&user, &500i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InsufficientBalance);
     }
 
     #[test]
@@ -1143,10 +1226,8 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.unstake(&user, &500i128);
-        }));
-        assert!(result.is_err());
+        let err = client.try_unstake(&user, &500i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InsufficientBalance);
     }
 
     #[test]
@@ -1159,12 +1240,12 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "set_lock_period",
-                args: (3600u64,).into_val(&env),
+                args: (admin.clone(), 3600u64,).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        client.set_lock_period(&3600u64);
+        client.try_set_lock_period(&admin, &3600u64).unwrap().unwrap();
 
         let events = env.events().all();
         let lock_event = events.last().unwrap();
@@ -1189,10 +1270,8 @@ mod test {
         let (contract_id, client, admin, user, token_id) = setup_contract(&env);
 
         // Test that staking requires user authorization
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.stake(&user, &1000i128);
-        }));
-        assert!(result.is_err());
+        let err = client.try_stake(&user, &1000i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
     }
 
     #[test]
@@ -1201,10 +1280,8 @@ mod test {
         let (contract_id, client, admin, user, token_id) = setup_contract(&env);
 
         // Test that unstaking requires user authorization
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.unstake(&user, &1000i128);
-        }));
-        assert!(result.is_err());
+        let err = client.try_unstake(&user, &1000i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
     }
 
     #[test]
@@ -1213,10 +1290,9 @@ mod test {
         let (contract_id, client, admin, user, token_id) = setup_contract(&env);
 
         // Test that pause requires admin authorization
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.pause();
-        }));
-        assert!(result.is_err());
+        let non_admin = Address::generate(&env);
+        let err = client.try_pause(&non_admin).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
 
         // Test that admin can pause
         env.mock_auths(&[MockAuth {
@@ -1224,11 +1300,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        client.try_pause(&admin).unwrap().unwrap();
     }
 
     #[test]
@@ -1242,11 +1318,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        client.try_pause(&admin).unwrap().unwrap();
 
         // Test that staking fails when paused
         env.mock_auths(&[MockAuth {
@@ -1258,10 +1334,8 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.stake(&user, &1000i128);
-        }));
-        assert!(result.is_err());
+        let err = client.try_stake(&user, &1000i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::Paused);
     }
 
     #[test]
@@ -1279,10 +1353,8 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.stake(&user, &0i128);
-        }));
-        assert!(result.is_err());
+        let err = client.try_stake(&user, &0i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
 
         // Test unstaking zero amount fails
         env.mock_auths(&[MockAuth {
@@ -1294,10 +1366,8 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.unstake(&user, &0i128);
-        }));
-        assert!(result.is_err());
+        let err = client.try_unstake(&user, &0i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
     }
 
     #[test]
@@ -1315,10 +1385,8 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.stake(&user, &-100i128);
-        }));
-        assert!(result.is_err());
+        let err = client.try_stake(&user, &-100i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
 
         // Test unstaking negative amount fails
         env.mock_auths(&[MockAuth {
@@ -1330,10 +1398,8 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.unstake(&user, &-100i128);
-        }));
-        assert!(result.is_err());
+        let err = client.try_unstake(&user, &-100i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
     }
 
     #[test]
@@ -1376,7 +1442,7 @@ mod test {
             metadata: None,
         };
 
-        let hash = client.compute_metadata_hash(&input);
+        let hash = client.try_compute_metadata_hash(&input).unwrap().unwrap();
 
         #[cfg(test)]
         {
@@ -1423,7 +1489,7 @@ mod test {
             metadata: Some(metadata),
         };
 
-        let hash = client.compute_metadata_hash(&input);
+        let hash = client.try_compute_metadata_hash(&input).unwrap().unwrap();
 
         // Verify hash is non-zero
         let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
@@ -1446,8 +1512,8 @@ mod test {
             metadata: None,
         };
 
-        let expected_hash = client.compute_metadata_hash(&input);
-        let is_valid = client.verify_metadata_hash(&input, &expected_hash);
+        let expected_hash = client.try_compute_metadata_hash(&input).unwrap().unwrap();
+        let is_valid = client.try_verify_metadata_hash(&input, &expected_hash).unwrap().unwrap();
 
         assert!(is_valid);
     }
@@ -1469,7 +1535,7 @@ mod test {
         };
 
         let wrong_hash = BytesN::from_array(&env, &[1u8; 32]);
-        let is_valid = client.verify_metadata_hash(&input, &wrong_hash);
+        let is_valid = client.try_verify_metadata_hash(&input, &wrong_hash).unwrap().unwrap();
 
         assert!(!is_valid);
     }
@@ -1490,8 +1556,8 @@ mod test {
             metadata: None,
         };
 
-        let hash1 = client.compute_metadata_hash(&input.clone());
-        let hash2 = client.compute_metadata_hash(&input);
+        let hash1 = client.try_compute_metadata_hash(&input.clone()).unwrap().unwrap();
+        let hash2 = client.try_compute_metadata_hash(&input).unwrap().unwrap();
 
         assert_eq!(hash1, hash2);
     }
@@ -1523,14 +1589,13 @@ mod test {
             metadata: None,
         };
 
-        let hash1 = client.compute_metadata_hash(&input1);
-        let hash2 = client.compute_metadata_hash(&input2);
+        let hash1 = client.try_compute_metadata_hash(&input1).unwrap().unwrap();
+        let hash2 = client.try_compute_metadata_hash(&input2).unwrap().unwrap();
 
         assert_ne!(hash1, hash2);
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn test_metadata_hash_rejects_zero_amount() {
         let env = Env::default();
         let (_contract_id, client, _admin, user, token_id) = setup_contract(&env);
@@ -1546,11 +1611,11 @@ mod test {
             metadata: None,
         };
 
-        client.compute_metadata_hash(&input);
+        let err = client.try_compute_metadata_hash(&input).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn test_metadata_hash_rejects_negative_amount() {
         let env = Env::default();
         let (_contract_id, client, _admin, user, token_id) = setup_contract(&env);
@@ -1566,7 +1631,8 @@ mod test {
             metadata: None,
         };
 
-        client.compute_metadata_hash(&input);
+        let err = client.try_compute_metadata_hash(&input).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
     }
 
     // ============================================================================
@@ -1592,7 +1658,7 @@ mod test {
             metadata: None,
         };
 
-        let hash = client.compute_metadata_hash(&input);
+        let hash = client.try_compute_metadata_hash(&input).unwrap().unwrap();
 
         let expected = BytesN::from_array(
             &env,
@@ -1629,7 +1695,7 @@ mod test {
             metadata: Some(metadata),
         };
 
-        let hash = client.compute_metadata_hash(&input);
+        let hash = client.try_compute_metadata_hash(&input).unwrap().unwrap();
 
         let expected = BytesN::from_array(
             &env,

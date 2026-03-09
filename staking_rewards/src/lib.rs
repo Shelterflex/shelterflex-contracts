@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
 
 #[contracttype]
 #[derive(Clone)]
@@ -16,7 +16,7 @@ pub enum StorageKey {
 pub enum ContractError {
     AlreadyInitialized = 1,
     NotAuthorized = 2,
-    ContractPaused = 3,
+    Paused = 3,
 }
 
 #[contracttype]
@@ -76,7 +76,10 @@ impl StakingRewards {
         env.storage().instance().set(&StorageKey::Operator, &operator);
         
         env.events().publish(
-            ("add_operator",),
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "add_operator"),
+            ),
             operator,
         );
         
@@ -90,7 +93,10 @@ impl StakingRewards {
         
         if let Some(op) = operator {
             env.events().publish(
-                ("remove_operator",),
+                (
+                    Symbol::new(&env, "staking_rewards"),
+                    Symbol::new(&env, "remove_operator"),
+                ),
                 op,
             );
         }
@@ -111,7 +117,10 @@ impl StakingRewards {
         env.storage().instance().set(&StorageKey::Paused, &true);
         
         env.events().publish(
-            ("pause",),
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "pause"),
+            ),
             (),
         );
         
@@ -123,7 +132,10 @@ impl StakingRewards {
         env.storage().instance().set(&StorageKey::Paused, &false);
         
         env.events().publish(
-            ("unpause",),
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "unpause"),
+            ),
             (),
         );
         
@@ -165,7 +177,7 @@ impl StakingRewards {
 
     fn require_not_paused(env: &Env) -> Result<(), ContractError> {
         if Self::is_paused(env) {
-            Err(ContractError::ContractPaused)
+            Err(ContractError::Paused)
         } else {
             Ok(())
         }
@@ -189,7 +201,10 @@ impl StakingRewards {
             .set(&TOTAL_STAKED, &(total + amount));
 
         env.events().publish(
-            ("stake",),
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "stake"),
+            ),
             (user, amount),
         );
 
@@ -216,7 +231,10 @@ impl StakingRewards {
             .set(&TOTAL_STAKED, &(total - amount));
 
         env.events().publish(
-            ("unstake",),
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "unstake"),
+            ),
             (user, amount),
         );
 
@@ -237,7 +255,10 @@ impl StakingRewards {
         env.storage().persistent().set(&REWARD_INDEX, &new_index);
 
         env.events().publish(
-            ("fund_rewards",),
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "fund_rewards"),
+            ),
             amount,
         );
 
@@ -258,7 +279,10 @@ impl StakingRewards {
         env.storage().persistent().set(&REWARD_INDEX, &new_index);
 
         env.events().publish(
-            ("distribute_rewards",),
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "distribute_rewards"),
+            ),
             amount,
         );
 
@@ -278,7 +302,10 @@ impl StakingRewards {
         env.storage().persistent().set(&user, &user_stake);
 
         env.events().publish(
-            ("claim",),
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "claim"),
+            ),
             (user, claimable),
         );
 

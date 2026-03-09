@@ -258,10 +258,10 @@ pub enum ContractError {
     NotAuthorized = 2,
     /// Contract is currently paused
     Paused = 3,
-    /// Transaction ID already exists (duplicate)
-    DuplicateTransaction = 4,
     /// Amount is invalid (zero or negative)
-    InvalidAmount = 5,
+    InvalidAmount = 4,
+    /// Transaction ID already exists (duplicate)
+    DuplicateTransaction = 5,
     /// External reference source is not in allowed list
     InvalidExternalRefSource = 6,
     /// External reference is invalid (empty, contains pipes, or too long)
