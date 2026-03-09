@@ -6,6 +6,8 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 pub enum StorageKey {
     ContractVersion,
     Admin,
+    Operator,
+    Paused,
 }
 
 #[contracterror]
@@ -13,6 +15,8 @@ pub enum StorageKey {
 #[repr(u32)]
 pub enum ContractError {
     AlreadyInitialized = 1,
+    NotAuthorized = 2,
+    ContractPaused = 3,
 }
 
 #[contracttype]
@@ -40,6 +44,9 @@ impl StakingRewards {
         env.storage()
             .instance()
             .set(&StorageKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
+            .set(&StorageKey::Paused, &false);
 
         Ok(())
     }
@@ -51,7 +58,121 @@ impl StakingRewards {
             .unwrap_or(0u32)
     }
 
-    pub fn stake(env: Env, user: Address, amount: i128) {
+    pub fn admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get::<_, Address>(&StorageKey::Admin)
+            .unwrap()
+    }
+
+    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&StorageKey::Admin, &new_admin);
+        Ok(())
+    }
+
+    pub fn add_operator(env: Env, operator: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&StorageKey::Operator, &operator);
+        
+        env.events().publish(
+            ("add_operator",),
+            operator,
+        );
+        
+        Ok(())
+    }
+
+    pub fn remove_operator(env: Env) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        let operator = env.storage().instance().get::<_, Address>(&StorageKey::Operator);
+        env.storage().instance().remove(&StorageKey::Operator);
+        
+        if let Some(op) = operator {
+            env.events().publish(
+                ("remove_operator",),
+                op,
+            );
+        }
+        
+        Ok(())
+    }
+
+    pub fn is_operator(env: Env, address: Address) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, Address>(&StorageKey::Operator)
+            .map(|op| op == address)
+            .unwrap_or(false)
+    }
+
+    pub fn pause(env: Env) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&StorageKey::Paused, &true);
+        
+        env.events().publish(
+            ("pause",),
+            (),
+        );
+        
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&StorageKey::Paused, &false);
+        
+        env.events().publish(
+            ("unpause",),
+            (),
+        );
+        
+        Ok(())
+    }
+
+    pub fn is_paused(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&StorageKey::Paused)
+            .unwrap_or(false)
+    }
+
+    fn require_admin(env: &Env) -> Result<(), ContractError> {
+        let admin = env.storage()
+            .instance()
+            .get::<_, Address>(&StorageKey::Admin);
+        
+        if let Some(admin_addr) = admin {
+            admin_addr.require_auth();
+            Ok(())
+        } else {
+            Err(ContractError::NotAuthorized)
+        }
+    }
+
+    fn require_operator(env: &Env) -> Result<(), ContractError> {
+        let operator = env.storage()
+            .instance()
+            .get::<_, Address>(&StorageKey::Operator);
+        
+        if let Some(op_addr) = operator {
+            op_addr.require_auth();
+            Ok(())
+        } else {
+            Err(ContractError::NotAuthorized)
+        }
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if Self::is_paused(env) {
+            Err(ContractError::ContractPaused)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn stake(env: Env, user: Address, amount: i128) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         user.require_auth();
 
         let mut user_stake = Self::get_user_stake(&env, &user);
@@ -66,20 +187,86 @@ impl StakingRewards {
         env.storage()
             .persistent()
             .set(&TOTAL_STAKED, &(total + amount));
+
+        env.events().publish(
+            ("stake",),
+            (user, amount),
+        );
+
+        Ok(())
     }
 
-    pub fn distribute_rewards(env: Env, amount: i128) {
+    pub fn unstake(env: Env, user: Address, amount: i128) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
+        user.require_auth();
+
+        let mut user_stake = Self::get_user_stake(&env, &user);
+        
+        if user_stake.amount < amount {
+            panic!("Insufficient staked amount");
+        }
+
+        user_stake.amount -= amount;
+        
+        env.storage().persistent().set(&user, &user_stake);
+
+        let total = Self::get_total_staked(&env);
+        env.storage()
+            .persistent()
+            .set(&TOTAL_STAKED, &(total - amount));
+
+        env.events().publish(
+            ("unstake",),
+            (user, amount),
+        );
+
+        Ok(())
+    }
+
+    pub fn fund_rewards(env: Env, amount: i128) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
+        Self::require_operator(&env)?;
+
         let total = Self::get_total_staked(&env);
         if total == 0 {
-            return;
+            return Ok(());
         }
 
         let reward_index = Self::get_reward_index(&env);
         let new_index = reward_index + (amount * SCALE / total);
         env.storage().persistent().set(&REWARD_INDEX, &new_index);
+
+        env.events().publish(
+            ("fund_rewards",),
+            amount,
+        );
+
+        Ok(())
     }
 
-    pub fn claim(env: Env, user: Address) -> i128 {
+    pub fn distribute_rewards(env: Env, amount: i128) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
+        Self::require_admin(&env)?;
+
+        let total = Self::get_total_staked(&env);
+        if total == 0 {
+            return Ok(());
+        }
+
+        let reward_index = Self::get_reward_index(&env);
+        let new_index = reward_index + (amount * SCALE / total);
+        env.storage().persistent().set(&REWARD_INDEX, &new_index);
+
+        env.events().publish(
+            ("distribute_rewards",),
+            amount,
+        );
+
+        Ok(())
+    }
+
+    pub fn claim(env: Env, user: Address) -> Result<i128, ContractError> {
+        Self::require_not_paused(&env)?;
         user.require_auth();
 
         let mut user_stake = Self::get_user_stake(&env, &user);
@@ -89,7 +276,13 @@ impl StakingRewards {
         user_stake.user_index = reward_index;
 
         env.storage().persistent().set(&user, &user_stake);
-        claimable
+
+        env.events().publish(
+            ("claim",),
+            (user, claimable),
+        );
+
+        Ok(claimable)
     }
 
     pub fn get_claimable(env: Env, user: Address) -> i128 {
