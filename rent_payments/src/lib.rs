@@ -47,6 +47,7 @@ pub struct ReceiptPage {
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
+    ContractVersion,
     Admin,
     Deals,
     Receipts(DealId),
@@ -150,7 +151,18 @@ impl RentPayments {
             panic!("already initialized");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.events().publish((Symbol::new(&env, "init"),), admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &1u32);
+        env.events()
+            .publish((Symbol::new(&env, "init"),), (admin, 1u32));
+    }
+
+    pub fn contract_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<_, u32>(&DataKey::ContractVersion)
+            .unwrap_or(0u32)
     }
 
     /// Create a new receipt for a deal
@@ -373,6 +385,27 @@ mod test {
         let admin = Address::generate(env);
         client.init(&admin);
         (admin, client, contract_id)
+    }
+
+    #[test]
+    fn init_sets_version_to_one() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RentPayments);
+        let client = RentPaymentsClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init(&admin);
+        assert_eq!(client.contract_version(), 1u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "already initialized")]
+    fn init_cannot_be_called_twice() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RentPayments);
+        let client = RentPaymentsClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init(&admin);
+        client.init(&admin);
     }
 
     #[test]

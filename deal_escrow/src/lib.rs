@@ -10,6 +10,7 @@ use soroban_sdk::{
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
+    ContractVersion,
     Admin,
     Operator,
     Token,
@@ -127,13 +128,26 @@ impl DealEscrow {
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage()
             .instance()
+            .set(&DataKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
             .set(&DataKey::DealBalances, &Map::<String, i128>::new(&env));
         env.storage()
             .instance()
             .set(&DataKey::ReceiptContract, &receipt_contract);
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((Symbol::new(&env, "deal_escrow"), Symbol::new(&env, "init")), (admin, operator, token, receipt_contract));
+        env.events().publish(
+            (Symbol::new(&env, "deal_escrow"), Symbol::new(&env, "init")),
+            (admin, operator, token, receipt_contract, 1u32),
+        );
         Ok(())
+    }
+
+    pub fn contract_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<_, u32>(&DataKey::ContractVersion)
+            .unwrap_or(0u32)
     }
 
     pub fn deposit(env: Env, from: Address, deal_id: String, amount: i128) -> Result<(), ContractError> {
@@ -209,6 +223,37 @@ mod test {
     use super::{ContractError, DealEscrow, DealEscrowClient, TokenClient, StellarAssetClient};
     use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
     use soroban_sdk::{Address, Env, IntoVal, String, Symbol};
+
+    #[test]
+    fn init_sets_version_to_one() {
+        let env = Env::default();
+        let contract_id = env.register(DealEscrow, ());
+        let client = DealEscrowClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let operator = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+        let token_id = token_contract.address();
+        let receipt = Address::generate(&env);
+        client.try_init(&admin, &operator, &token_id, &receipt).unwrap().unwrap();
+        assert_eq!(client.contract_version(), 1u32);
+    }
+
+    #[test]
+    fn init_cannot_be_called_twice() {
+        let env = Env::default();
+        let contract_id = env.register(DealEscrow, ());
+        let client = DealEscrowClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let operator = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+        let token_id = token_contract.address();
+        let receipt = Address::generate(&env);
+        client.try_init(&admin, &operator, &token_id, &receipt).unwrap().unwrap();
+        let err = client.try_init(&admin, &operator, &token_id, &receipt).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::AlreadyInitialized);
+    }
 
     fn setup(env: &Env) -> (Address, DealEscrowClient<'_>, Address, Address, Address, Address, Address) {
         let contract_id = env.register(DealEscrow, ());
