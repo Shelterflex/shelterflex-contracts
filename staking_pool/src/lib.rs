@@ -328,8 +328,8 @@ impl StakingPool {
 
     pub fn stake(env: Env, from: Address, amount: i128) -> Result<(), ContractError> {
         from.require_auth();
-        let _spender = require_user_or_operator(&env, &from, &from)?;
         require_not_paused(&env)?;
+        let _spender = require_user_or_operator(&env, &from, &from)?;
         require_positive_amount(amount)?;
 
         let token_address = get_token(&env);
@@ -370,8 +370,8 @@ impl StakingPool {
 
     pub fn unstake(env: Env, to: Address, amount: i128) -> Result<(), ContractError> {
         to.require_auth();
-        let _spender = require_user_or_operator(&env, &to, &to)?;
         require_not_paused(&env)?;
+        let _spender = require_user_or_operator(&env, &to, &to)?;
         require_positive_amount(amount)?;
 
         // Check sufficient staked balance
