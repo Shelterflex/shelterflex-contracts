@@ -170,6 +170,8 @@ fn require_user_or_operator(env: &Env, user: &Address, caller: &Address) -> Resu
     // - If no operator is configured, ONLY the user may authorize stake/unstake.
     //
     // Returns the authorized spender address used for token `transfer`.
+    // Note: `caller` should be the invoker (the address that called the contract function),
+    // which is determined by the first MockAuth entry in tests.
     if let Some(op) = get_operator(env) {
         op.require_auth();
         if caller != &op {
@@ -329,6 +331,9 @@ impl StakingPool {
     pub fn stake(env: Env, from: Address, amount: i128) -> Result<(), ContractError> {
         from.require_auth();
         require_not_paused(&env)?;
+        // In tests, the invoker (caller) is determined by the first MockAuth entry.
+        // Since we're calling stake(&user, ...), the invoker should be user when no operator is set.
+        // We pass &from as the caller parameter, which should match the invoker in the test setup.
         let _spender = require_user_or_operator(&env, &from, &from)?;
         require_positive_amount(amount)?;
 
@@ -371,6 +376,9 @@ impl StakingPool {
     pub fn unstake(env: Env, to: Address, amount: i128) -> Result<(), ContractError> {
         to.require_auth();
         require_not_paused(&env)?;
+        // In tests, the invoker (caller) is determined by the first MockAuth entry.
+        // Since we're calling unstake(&user, ...), the invoker should be user when no operator is set.
+        // We pass &to as the caller parameter, which should match the invoker in the test setup.
         let _spender = require_user_or_operator(&env, &to, &to)?;
         require_positive_amount(amount)?;
 
@@ -800,7 +808,26 @@ mod test {
         client.try_pause(&admin).unwrap().unwrap();
 
         // Operator attempts to stake for user
-        env.mock_all_auths();
+        env.mock_auths(&[
+            MockAuth {
+                address: &operator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "stake",
+                    args: (user.clone(), 100i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+            MockAuth {
+                address: &user,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "stake",
+                    args: (user.clone(), 100i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+        ]);
 
         let err = client.try_stake(&user, &100i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::Paused);
@@ -845,9 +872,17 @@ mod test {
     #[test]
     fn stake_fails_with_zero_amount() {
         let env = Env::default();
-        let (_contract_id, client, _admin, user, _token_id) = setup_contract(&env);
+        let (contract_id, client, _admin, user, _token_id) = setup_contract(&env);
 
-        env.mock_all_auths();
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "stake",
+                args: (user.clone(), 0i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
 
         let err = client.try_stake(&user, &0i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::InvalidAmount);
@@ -856,9 +891,17 @@ mod test {
     #[test]
     fn stake_fails_with_negative_amount() {
         let env = Env::default();
-        let (_contract_id, client, _admin, user, _token_id) = setup_contract(&env);
+        let (contract_id, client, _admin, user, _token_id) = setup_contract(&env);
 
-        env.mock_all_auths();
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "stake",
+                args: (user.clone(), -10i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
 
         let err = client.try_stake(&user, &-10i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::InvalidAmount);
@@ -867,9 +910,17 @@ mod test {
     #[test]
     fn unstake_fails_with_zero_amount() {
         let env = Env::default();
-        let (_contract_id, client, _admin, user, _token_id) = setup_contract(&env);
+        let (contract_id, client, _admin, user, _token_id) = setup_contract(&env);
 
-        env.mock_all_auths();
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), 0i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
 
         let err = client.try_unstake(&user, &0i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::InvalidAmount);
@@ -878,9 +929,17 @@ mod test {
     #[test]
     fn unstake_fails_with_negative_amount() {
         let env = Env::default();
-        let (_contract_id, client, _admin, user, _token_id) = setup_contract(&env);
+        let (contract_id, client, _admin, user, _token_id) = setup_contract(&env);
 
-        env.mock_all_auths();
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), -10i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
 
         let err = client.try_unstake(&user, &-10i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::InvalidAmount);
@@ -1175,7 +1234,15 @@ mod test {
         client.try_set_lock_period(&admin, &3600u64).unwrap().unwrap();
 
         // Try to unstake without any stake (should fail due to insufficient balance)
-        env.mock_all_auths();
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), 500i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
         let err = client.try_unstake(&user, &500i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::InsufficientBalance);
     }
@@ -1183,12 +1250,20 @@ mod test {
     #[test]
     fn unstake_succeeds_with_zero_lock_period() {
         let env = Env::default();
-        let (_contract_id, client, _admin, user, _token_id) = setup_contract(&env);
+        let (contract_id, client, _admin, user, _token_id) = setup_contract(&env);
 
         // Don't set lock period (defaults to 0)
 
         // Try to unstake without any stake (should fail due to insufficient balance)
-        env.mock_all_auths();
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), 500i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
         let err = client.try_unstake(&user, &500i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::InsufficientBalance);
     }
@@ -1343,7 +1418,15 @@ mod test {
         client.try_pause(&admin).unwrap().unwrap();
 
         // Test that staking fails when paused
-        env.mock_all_auths();
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "stake",
+                args: (user.clone(), 1000i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
         let err = client.try_stake(&user, &1000i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::Paused);
     }
@@ -1351,15 +1434,31 @@ mod test {
     #[test]
     fn test_zero_amount_rejection() {
         let env = Env::default();
-        let (contract_id, client, admin, user, token_id) = setup_contract(&env);
+        let (contract_id, client, _admin, user, _token_id) = setup_contract(&env);
 
         // Test staking zero amount fails
-        env.mock_all_auths();
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "stake",
+                args: (user.clone(), 0i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
         let err = client.try_stake(&user, &0i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::InvalidAmount);
 
         // Test unstaking zero amount fails
-        env.mock_all_auths();
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), 0i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
         let err = client.try_unstake(&user, &0i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::InvalidAmount);
     }
@@ -1367,15 +1466,31 @@ mod test {
     #[test]
     fn test_negative_amount_rejection() {
         let env = Env::default();
-        let (contract_id, client, admin, user, token_id) = setup_contract(&env);
+        let (contract_id, client, _admin, user, _token_id) = setup_contract(&env);
 
         // Test staking negative amount fails
-        env.mock_all_auths();
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "stake",
+                args: (user.clone(), -100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
         let err = client.try_stake(&user, &-100i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::InvalidAmount);
 
         // Test unstaking negative amount fails
-        env.mock_all_auths();
+        env.mock_auths(&[MockAuth {
+            address: &user,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unstake",
+                args: (user.clone(), -100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
         let err = client.try_unstake(&user, &-100i128).unwrap_err().unwrap();
         assert_eq!(err, ContractError::InvalidAmount);
     }
