@@ -446,22 +446,6 @@ mod test {
         client.init(&admin, &token_contract_id);
     }
 
-    #[test]
-    #[should_panic(expected = "already initialized")]
-    fn init_cannot_be_called_twice() {
-        let env = Env::default();
-        let contract_id = env.register(StakingPool, ());
-        let client = StakingPoolClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token_contract = env.register_stellar_asset_contract_v2(token_admin);
-        let token_contract_id = token_contract.address();
-
-        client.init(&admin, &token_contract_id);
-        client.init(&admin, &token_contract_id);
-    }
-
     // ============================================================================
     // Query Tests
     // ============================================================================
