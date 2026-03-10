@@ -17,6 +17,12 @@ This folder contains Soroban smart contracts written in Rust.
 ```bash
 cd contracts
 
+# Formatting
+cargo fmt
+
+# Linting
+cargo clippy --all-targets --all-features -- -D warnings
+
 # 1) Run unit tests
 cargo test
 
