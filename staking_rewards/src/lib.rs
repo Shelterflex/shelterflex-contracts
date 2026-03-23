@@ -44,9 +44,7 @@ impl StakingRewards {
         env.storage()
             .instance()
             .set(&StorageKey::ContractVersion, &1u32);
-        env.storage()
-            .instance()
-            .set(&StorageKey::Paused, &false);
+        env.storage().instance().set(&StorageKey::Paused, &false);
 
         Ok(())
     }
@@ -73,8 +71,10 @@ impl StakingRewards {
 
     pub fn add_operator(env: Env, operator: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        env.storage().instance().set(&StorageKey::Operator, &operator);
-        
+        env.storage()
+            .instance()
+            .set(&StorageKey::Operator, &operator);
+
         env.events().publish(
             (
                 Symbol::new(&env, "staking_rewards"),
@@ -82,15 +82,18 @@ impl StakingRewards {
             ),
             operator,
         );
-        
+
         Ok(())
     }
 
     pub fn remove_operator(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        let operator = env.storage().instance().get::<_, Address>(&StorageKey::Operator);
+        let operator = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&StorageKey::Operator);
         env.storage().instance().remove(&StorageKey::Operator);
-        
+
         if let Some(op) = operator {
             env.events().publish(
                 (
@@ -100,7 +103,7 @@ impl StakingRewards {
                 op,
             );
         }
-        
+
         Ok(())
     }
 
@@ -115,7 +118,7 @@ impl StakingRewards {
     pub fn pause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&StorageKey::Paused, &true);
-        
+
         env.events().publish(
             (
                 Symbol::new(&env, "staking_rewards"),
@@ -123,14 +126,14 @@ impl StakingRewards {
             ),
             (),
         );
-        
+
         Ok(())
     }
 
     pub fn unpause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&StorageKey::Paused, &false);
-        
+
         env.events().publish(
             (
                 Symbol::new(&env, "staking_rewards"),
@@ -138,7 +141,7 @@ impl StakingRewards {
             ),
             (),
         );
-        
+
         Ok(())
     }
 
@@ -150,10 +153,11 @@ impl StakingRewards {
     }
 
     fn require_admin(env: &Env) -> Result<(), ContractError> {
-        let admin = env.storage()
+        let admin = env
+            .storage()
             .instance()
             .get::<_, Address>(&StorageKey::Admin);
-        
+
         if let Some(admin_addr) = admin {
             admin_addr.require_auth();
             Ok(())
@@ -163,10 +167,11 @@ impl StakingRewards {
     }
 
     fn require_operator(env: &Env) -> Result<(), ContractError> {
-        let operator = env.storage()
+        let operator = env
+            .storage()
             .instance()
             .get::<_, Address>(&StorageKey::Operator);
-        
+
         if let Some(op_addr) = operator {
             op_addr.require_auth();
             Ok(())
@@ -216,13 +221,13 @@ impl StakingRewards {
         user.require_auth();
 
         let mut user_stake = Self::get_user_stake(&env, &user);
-        
+
         if user_stake.amount < amount {
             panic!("Insufficient staked amount");
         }
 
         user_stake.amount -= amount;
-        
+
         env.storage().persistent().set(&user, &user_stake);
 
         let total = Self::get_total_staked(&env);
