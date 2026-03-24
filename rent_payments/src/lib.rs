@@ -137,8 +137,8 @@ fn get_tx_id(env: &Env) -> TxId {
     }
 
     // Fill remaining bytes with a pattern for uniqueness
-    for i in 16..32 {
-        bytes[i] = (timestamp as u8).wrapping_add(i as u8);
+    for (i, byte) in bytes.iter_mut().enumerate().skip(16) {
+        *byte = (timestamp as u8).wrapping_add(i as u8);
     }
 
     BytesN::from_array(env, &bytes)
@@ -289,7 +289,7 @@ impl RentPayments {
                 }
             }
             // If no receipt found that is > cursor, we're at the end
-            if start_index == 0 && sorted_receipts.len() > 0 {
+            if start_index == 0 && !sorted_receipts.is_empty() {
                 let first = sorted_receipts.get(0).unwrap();
                 let first_tx_id_array = first.tx_id.to_array();
                 if !(first.timestamp > cursor.timestamp
@@ -319,9 +319,9 @@ impl RentPayments {
 
         // Determine next cursor
         let empty_tx_id = BytesN::from_array(&env, &[0u8; 32]);
-        let (has_next, next_cursor) = if end_index < receipts_len_u32 && page_receipts.len() > 0 {
+        let (has_next, next_cursor) = if end_index < receipts_len_u32 && !page_receipts.is_empty() {
             // There are more receipts, create cursor from the last item in this page
-            let last_index = if page_receipts.len() > 0 {
+            let last_index = if !page_receipts.is_empty() {
                 page_receipts.len() - 1
             } else {
                 0
