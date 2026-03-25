@@ -448,7 +448,6 @@ mod test {
         }]);
         client.pause();
         assert!(client.is_paused());
-
     }
 
     #[test]
