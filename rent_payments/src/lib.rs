@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, vec, Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, Symbol, Vec,
+};
 
 /// Deal ID type - using u64 for simplicity
 pub type DealId = u64;
@@ -52,6 +54,15 @@ pub enum DataKey {
     Deals,
     Receipts(DealId),
     ReceiptCount(DealId),
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ContractError {
+    AlreadyInitialized = 1,
+    InvalidAmount = 2,
+    InvalidLimit = 3,
 }
 
 #[contract]
@@ -146,9 +157,9 @@ fn get_tx_id(env: &Env) -> TxId {
 
 #[contractimpl]
 impl RentPayments {
-    pub fn init(env: Env, admin: Address) {
+    pub fn init(env: Env, admin: Address) -> Result<(), ContractError> {
         if env.storage().instance().has(&DataKey::Admin) {
-            panic!("already initialized");
+            return Err(ContractError::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
@@ -156,6 +167,7 @@ impl RentPayments {
             .set(&DataKey::ContractVersion, &1u32);
         env.events()
             .publish((Symbol::new(&env, "init"),), (admin, 1u32));
+        Ok(())
     }
 
     pub fn contract_version(env: Env) -> u32 {
@@ -167,11 +179,16 @@ impl RentPayments {
 
     /// Create a new receipt for a deal
     /// This function records a monthly payment receipt
-    pub fn create_receipt(env: Env, deal_id: DealId, amount: i128, payer: Address) -> Receipt {
+    pub fn create_receipt(
+        env: Env,
+        deal_id: DealId,
+        amount: i128,
+        payer: Address,
+    ) -> Result<Receipt, ContractError> {
         require_admin(&env);
 
         if amount <= 0 {
-            panic!("amount must be positive");
+            return Err(ContractError::InvalidAmount);
         }
 
         let receipt_id = increment_receipt_count(&env, deal_id);
@@ -197,7 +214,7 @@ impl RentPayments {
             (receipt_id, amount, payer_clone),
         );
 
-        receipt
+        Ok(receipt)
     }
 
     /// List receipts for a deal with cursor-based pagination
@@ -224,9 +241,9 @@ impl RentPayments {
         deal_id: DealId,
         limit: u32,
         cursor: Option<Cursor>,
-    ) -> ReceiptPage {
+    ) -> Result<ReceiptPage, ContractError> {
         if limit == 0 || limit > 100 {
-            panic!("limit must be between 1 and 100");
+            return Err(ContractError::InvalidLimit);
         }
 
         let receipts = get_receipts(&env, deal_id);
@@ -355,11 +372,11 @@ impl RentPayments {
             )
         };
 
-        ReceiptPage {
+        Ok(ReceiptPage {
             receipts: page_receipts,
             has_next,
             next_cursor,
-        }
+        })
     }
 
     /// Get the total number of receipts for a deal
@@ -398,14 +415,14 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "already initialized")]
     fn init_cannot_be_called_twice() {
         let env = Env::default();
         let contract_id = env.register_contract(None, RentPayments);
         let client = RentPaymentsClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.init(&admin);
-        client.init(&admin);
+        let err = client.try_init(&admin).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::AlreadyInitialized);
     }
 
     #[test]
@@ -703,23 +720,29 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "limit must be between 1 and 100")]
     fn test_list_receipts_by_deal_invalid_limit_zero() {
         let env = Env::default();
         let (_admin, client, _contract_id) = setup(&env);
         let deal_id = 1u64;
 
-        client.list_receipts_by_deal(&deal_id, &0u32, &None);
+        let err = client
+            .try_list_receipts_by_deal(&deal_id, &0u32, &None)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidLimit);
     }
 
     #[test]
-    #[should_panic(expected = "limit must be between 1 and 100")]
     fn test_list_receipts_by_deal_invalid_limit_too_large() {
         let env = Env::default();
         let (_admin, client, _contract_id) = setup(&env);
         let deal_id = 1u64;
 
-        client.list_receipts_by_deal(&deal_id, &101u32, &None);
+        let err = client
+            .try_list_receipts_by_deal(&deal_id, &101u32, &None)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidLimit);
     }
 
     // ============================================================================
@@ -727,7 +750,6 @@ mod test {
     // ============================================================================
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn create_receipt_fails_with_zero_amount() {
         let env = Env::default();
         let (admin, client, contract_id) = setup(&env);
@@ -744,11 +766,14 @@ mod test {
             },
         }]);
 
-        client.create_receipt(&deal_id, &0i128, &payer);
+        let err = client
+            .try_create_receipt(&deal_id, &0i128, &payer)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
     }
 
     #[test]
-    #[should_panic(expected = "amount must be positive")]
     fn create_receipt_fails_with_negative_amount() {
         let env = Env::default();
         let (admin, client, contract_id) = setup(&env);
@@ -765,7 +790,11 @@ mod test {
             },
         }]);
 
-        client.create_receipt(&deal_id, &-100i128, &payer);
+        let err = client
+            .try_create_receipt(&deal_id, &-100i128, &payer)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidAmount);
     }
 
     #[test]
