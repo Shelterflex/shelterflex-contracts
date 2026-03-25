@@ -993,3 +993,121 @@ fn test_conversion_idempotency() {
     let receipt = client.get_receipt(&tx_id_1).unwrap();
     assert_eq!(receipt.amount_usdc, 500_000);
 }
+
+#[test]
+fn test_record_receipt_duplicate_tx_id_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(TransactionReceiptContract, ());
+    let client = TransactionReceiptContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let operator = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.try_init(&admin, &operator).unwrap();
+
+    let input = ReceiptInput {
+        external_ref_source: Symbol::new(&env, "paystack"),
+        external_ref: String::from_str(&env, "dup_ref_001"),
+        tx_type: Symbol::new(&env, "TENANT_REPAYMENT"),
+        amount_usdc: 1_000_000i128,
+        token: token.clone(),
+        deal_id: String::from_str(&env, "deal_dup"),
+        listing_id: None,
+        from: None,
+        to: None,
+        amount_ngn: None,
+        fx_rate_ngn_per_usdc: None,
+        fx_provider: None,
+        metadata_hash: None,
+    };
+
+    // First record succeeds
+    client.try_record_receipt(&operator, &input).unwrap();
+
+    // Second record with identical external_ref must fail with DuplicateTransaction
+    let err = client
+        .try_record_receipt(&operator, &input)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::DuplicateTransaction);
+}
+
+#[test]
+fn test_record_receipt_external_ref_too_long_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(TransactionReceiptContract, ());
+    let client = TransactionReceiptContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let operator = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.try_init(&admin, &operator).unwrap();
+
+    // 257-character external_ref exceeds the 256-char limit
+    let long_ref = "x".repeat(257);
+
+    let input = ReceiptInput {
+        external_ref_source: Symbol::new(&env, "paystack"),
+        external_ref: String::from_str(&env, &long_ref),
+        tx_type: Symbol::new(&env, "TENANT_REPAYMENT"),
+        amount_usdc: 1_000_000i128,
+        token: token.clone(),
+        deal_id: String::from_str(&env, "deal_longref"),
+        listing_id: None,
+        from: None,
+        to: None,
+        amount_ngn: None,
+        fx_rate_ngn_per_usdc: None,
+        fx_provider: None,
+        metadata_hash: None,
+    };
+
+    let err = client
+        .try_record_receipt(&operator, &input)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::InvalidExternalRef);
+}
+
+#[test]
+fn test_record_receipt_invalid_external_ref_source_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(TransactionReceiptContract, ());
+    let client = TransactionReceiptContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let operator = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.try_init(&admin, &operator).unwrap();
+
+    let input = ReceiptInput {
+        external_ref_source: Symbol::new(&env, "unknown_provider"),
+        external_ref: String::from_str(&env, "ref_xyz"),
+        tx_type: Symbol::new(&env, "TENANT_REPAYMENT"),
+        amount_usdc: 1_000_000i128,
+        token: token.clone(),
+        deal_id: String::from_str(&env, "deal_badsource"),
+        listing_id: None,
+        from: None,
+        to: None,
+        amount_ngn: None,
+        fx_rate_ngn_per_usdc: None,
+        fx_provider: None,
+        metadata_hash: None,
+    };
+
+    let err = client
+        .try_record_receipt(&operator, &input)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::InvalidExternalRefSource);
+}
