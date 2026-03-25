@@ -641,6 +641,15 @@ mod test {
         client.add_operator(&operator);
 
         // Stake some tokens
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &user,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "stake",
+                args: (user.clone(), 1000i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
         client.stake(&user, &1000);
 
         // Operator funds rewards
