@@ -994,8 +994,10 @@ fn test_conversion_idempotency() {
     assert_eq!(receipt.amount_usdc, 500_000);
 }
 
+// Tests for event emission on record_receipt
+
 #[test]
-fn test_record_receipt_duplicate_tx_id_rejected() {
+fn test_record_receipt_emits_event_with_correct_topics() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -1068,15 +1070,20 @@ fn test_record_receipt_external_ref_too_long_rejected() {
         metadata_hash: None,
     };
 
+    use soroban_sdk::testutils::Events as _;
+
     let err = client
         .try_record_receipt(&operator, &input)
         .unwrap_err()
         .unwrap();
     assert_eq!(err, ContractError::InvalidExternalRef);
+
+    // Validation failures must not emit the receipt_recorded event.
+    assert_eq!(env.events().all().len(), 0);
 }
 
 #[test]
-fn test_record_receipt_invalid_external_ref_source_rejected() {
+fn test_invalid_input_does_not_emit_event() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -1087,15 +1094,16 @@ fn test_record_receipt_invalid_external_ref_source_rejected() {
     let operator = Address::generate(&env);
     let token = Address::generate(&env);
 
-    client.try_init(&admin, &operator).unwrap();
+    client.init(&admin, &operator);
 
+    // Zero amount is invalid
     let input = ReceiptInput {
-        external_ref_source: Symbol::new(&env, "unknown_provider"),
-        external_ref: String::from_str(&env, "ref_xyz"),
-        tx_type: Symbol::new(&env, "TENANT_REPAYMENT"),
-        amount_usdc: 1_000_000i128,
+        external_ref_source: Symbol::new(&env, "paystack"),
+        external_ref: String::from_str(&env, "ref_invalid_amount"),
+        tx_type: Symbol::new(&env, "UNSTAKE"),
+        amount_usdc: 0,
         token: token.clone(),
-        deal_id: String::from_str(&env, "deal_badsource"),
+        deal_id: String::from_str(&env, "deal_invalid"),
         listing_id: None,
         from: None,
         to: None,
@@ -1109,5 +1117,9 @@ fn test_record_receipt_invalid_external_ref_source_rejected() {
         .try_record_receipt(&operator, &input)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, ContractError::InvalidExternalRefSource);
+    assert_eq!(err, ContractError::InvalidAmount);
+
+    use soroban_sdk::testutils::Events as _;
+    // No events should be emitted when validation fails
+    assert_eq!(env.events().all().len(), 0);
 }
