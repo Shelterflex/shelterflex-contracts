@@ -1072,18 +1072,13 @@ fn test_record_receipt_external_ref_too_long_rejected() {
 
     use soroban_sdk::testutils::Events as _;
 
-    // First call succeeds; events() reflects the last invocation only
-    client.record_receipt(&operator, &input);
-    assert_eq!(env.events().all().len(), 1);
-
-    // Second call with same external ref must fail with DuplicateTransaction
     let err = client
         .try_record_receipt(&operator, &input)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, ContractError::DuplicateTransaction);
+    assert_eq!(err, ContractError::InvalidExternalRef);
 
-    // The failed call emits no contract events
+    // Validation failures must not emit the receipt_recorded event.
     assert_eq!(env.events().all().len(), 0);
 }
 
