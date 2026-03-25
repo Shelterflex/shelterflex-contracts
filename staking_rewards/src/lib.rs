@@ -346,7 +346,7 @@ impl StakingRewards {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{testutils::Address as _, Env, IntoVal};
 
     fn setup(env: &Env) -> (soroban_sdk::Address, StakingRewardsClient<'_>) {
         env.mock_all_auths();
@@ -412,5 +412,82 @@ mod test {
 
         assert_eq!(client.get_claimable(&user1), 3000);
         assert_eq!(client.get_claimable(&user2), 1000);
+    }
+
+    #[test]
+    fn admin_can_set_admin() {
+        let env = Env::default();
+        env.mock_all_auths(); // Initial setup uses mock_all_auths in init
+        let contract_id = env.register(StakingRewards, ());
+        let client = StakingRewardsClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init(&admin);
+        let new_admin = Address::generate(&env);
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_admin(&new_admin);
+        assert_eq!(client.admin(), new_admin);
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &new_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
+        assert!(client.is_paused());
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unpause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client.try_unpause().unwrap_err().unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
+    }
+
+    #[test]
+    fn non_admin_cannot_set_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(StakingRewards, ());
+        let client = StakingRewardsClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.init(&admin);
+
+        let non_admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &non_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_set_admin(&new_admin)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
     }
 }

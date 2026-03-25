@@ -742,6 +742,22 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(client.balance(&user), 50i128);
+
+        // Old admin should lose permissions
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (admin.clone(), user.clone(), 50i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_credit(&admin, &user, &50i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
     }
 
     #[test]
