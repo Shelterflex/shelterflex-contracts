@@ -688,7 +688,6 @@ mod test {
         }]);
         client.fund_rewards(&500);
     }
-}
 
     #[test]
     #[should_panic(expected = "HostError")]
