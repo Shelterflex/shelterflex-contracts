@@ -993,3 +993,263 @@ fn test_conversion_idempotency() {
     let receipt = client.get_receipt(&tx_id_1).unwrap();
     assert_eq!(receipt.amount_usdc, 500_000);
 }
+
+// Tests for event emission on record_receipt
+
+#[test]
+fn test_record_receipt_emits_event_with_correct_topics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(TransactionReceiptContract, ());
+    let client = TransactionReceiptContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let operator = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.init(&admin, &operator);
+
+    let input = ReceiptInput {
+        external_ref_source: Symbol::new(&env, "paystack"),
+        external_ref: String::from_str(&env, "ref_event_001"),
+        tx_type: Symbol::new(&env, "TENANT_REPAYMENT"),
+        amount_usdc: 2_000_000,
+        token: token.clone(),
+        deal_id: String::from_str(&env, "deal_evt_001"),
+        listing_id: None,
+        from: None,
+        to: None,
+        amount_ngn: None,
+        fx_rate_ngn_per_usdc: None,
+        fx_provider: None,
+        metadata_hash: None,
+    };
+
+    let tx_id = client.record_receipt(&operator, &input);
+
+    use soroban_sdk::testutils::Events as _;
+    let events = env.events().all();
+
+    // Exactly one contract event should be emitted
+    assert_eq!(events.len(), 1);
+
+    let (emitting_contract, topics, _data) = events.get(0).unwrap();
+    assert_eq!(emitting_contract, contract_id);
+
+    // Topic 0: "transaction_receipt"
+    let topic_0: Symbol = soroban_sdk::FromVal::from_val(&env, &topics.get(0).unwrap());
+    assert_eq!(topic_0, Symbol::new(&env, "transaction_receipt"));
+
+    // Topic 1: "receipt_recorded"
+    let topic_1: Symbol = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
+    assert_eq!(topic_1, Symbol::new(&env, "receipt_recorded"));
+
+    // Topic 2: the tx_id returned by record_receipt
+    let topic_2: BytesN<32> = soroban_sdk::FromVal::from_val(&env, &topics.get(2).unwrap());
+    assert_eq!(topic_2, tx_id);
+}
+
+#[test]
+fn test_record_receipt_emits_event_with_correct_data_fields() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(TransactionReceiptContract, ());
+    let client = TransactionReceiptContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let operator = Address::generate(&env);
+    let from_user = Address::generate(&env);
+    let to_user = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.init(&admin, &operator);
+
+    let input = ReceiptInput {
+        external_ref_source: Symbol::new(&env, "stellar"),
+        external_ref: String::from_str(&env, "ref_event_002"),
+        tx_type: Symbol::new(&env, "LANDLORD_PAYOUT"),
+        amount_usdc: 5_000_000,
+        token: token.clone(),
+        deal_id: String::from_str(&env, "deal_evt_002"),
+        listing_id: Some(String::from_str(&env, "listing_001")),
+        from: Some(from_user.clone()),
+        to: Some(to_user.clone()),
+        amount_ngn: Some(7_500_000_000),
+        fx_rate_ngn_per_usdc: Some(1_500),
+        fx_provider: Some(String::from_str(&env, "provider_a")),
+        metadata_hash: None,
+    };
+
+    let tx_id = client.record_receipt(&operator, &input);
+
+    use soroban_sdk::testutils::Events as _;
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+
+    let (_contract, _topics, data) = events.get(0).unwrap();
+    let emitted_receipt: Receipt = soroban_sdk::FromVal::from_val(&env, &data);
+
+    assert_eq!(emitted_receipt.tx_id, tx_id);
+    assert_eq!(
+        emitted_receipt.tx_type,
+        Symbol::new(&env, "LANDLORD_PAYOUT")
+    );
+    assert_eq!(emitted_receipt.amount_usdc, 5_000_000);
+    assert_eq!(emitted_receipt.token, token);
+    assert_eq!(
+        emitted_receipt.deal_id,
+        String::from_str(&env, "deal_evt_002")
+    );
+    assert_eq!(
+        emitted_receipt.listing_id,
+        Some(String::from_str(&env, "listing_001"))
+    );
+    assert_eq!(emitted_receipt.from, Some(from_user));
+    assert_eq!(emitted_receipt.to, Some(to_user));
+    assert_eq!(emitted_receipt.amount_ngn, Some(7_500_000_000));
+    assert_eq!(emitted_receipt.fx_rate_ngn_per_usdc, Some(1_500));
+    assert_eq!(
+        emitted_receipt.fx_provider,
+        Some(String::from_str(&env, "provider_a"))
+    );
+}
+
+#[test]
+fn test_record_receipt_multiple_receipts_emit_separate_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(TransactionReceiptContract, ());
+    let client = TransactionReceiptContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let operator = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.init(&admin, &operator);
+
+    use soroban_sdk::testutils::Events as _;
+
+    // Verify each record_receipt call emits exactly one event with the correct topics
+    for i in 1u32..=3 {
+        let input = ReceiptInput {
+            external_ref_source: Symbol::new(&env, "flutterwave"),
+            external_ref: String::from_str(&env, &alloc::format!("ref_multi_{}", i)),
+            tx_type: Symbol::new(&env, "STAKE"),
+            amount_usdc: 100_000 * i as i128,
+            token: token.clone(),
+            deal_id: String::from_str(&env, "deal_multi"),
+            listing_id: None,
+            from: None,
+            to: None,
+            amount_ngn: None,
+            fx_rate_ngn_per_usdc: None,
+            fx_provider: None,
+            metadata_hash: None,
+        };
+        let tx_id = client.record_receipt(&operator, &input);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "expected one event for call {}", i);
+
+        let (emitting_contract, topics, _data) = events.get(0).unwrap();
+        assert_eq!(emitting_contract, contract_id);
+        let topic_0: Symbol = soroban_sdk::FromVal::from_val(&env, &topics.get(0).unwrap());
+        assert_eq!(topic_0, Symbol::new(&env, "transaction_receipt"));
+        let topic_1: Symbol = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
+        assert_eq!(topic_1, Symbol::new(&env, "receipt_recorded"));
+        let topic_2: BytesN<32> = soroban_sdk::FromVal::from_val(&env, &topics.get(2).unwrap());
+        assert_eq!(topic_2, tx_id);
+    }
+}
+
+#[test]
+fn test_duplicate_receipt_does_not_emit_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(TransactionReceiptContract, ());
+    let client = TransactionReceiptContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let operator = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.init(&admin, &operator);
+
+    let input = ReceiptInput {
+        external_ref_source: Symbol::new(&env, "bank_transfer"),
+        external_ref: String::from_str(&env, "ref_dup_event"),
+        tx_type: Symbol::new(&env, "STAKE"),
+        amount_usdc: 1_000_000,
+        token: token.clone(),
+        deal_id: String::from_str(&env, "deal_dup_evt"),
+        listing_id: None,
+        from: None,
+        to: None,
+        amount_ngn: None,
+        fx_rate_ngn_per_usdc: None,
+        fx_provider: None,
+        metadata_hash: None,
+    };
+
+    use soroban_sdk::testutils::Events as _;
+
+    // First call succeeds; events() reflects the last invocation only
+    client.record_receipt(&operator, &input);
+    assert_eq!(env.events().all().len(), 1);
+
+    // Second call with same external ref must fail with DuplicateTransaction
+    let err = client
+        .try_record_receipt(&operator, &input)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::DuplicateTransaction);
+
+    // The failed call emits no contract events
+    assert_eq!(env.events().all().len(), 0);
+}
+
+#[test]
+fn test_invalid_input_does_not_emit_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(TransactionReceiptContract, ());
+    let client = TransactionReceiptContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let operator = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.init(&admin, &operator);
+
+    // Zero amount is invalid
+    let input = ReceiptInput {
+        external_ref_source: Symbol::new(&env, "paystack"),
+        external_ref: String::from_str(&env, "ref_invalid_amount"),
+        tx_type: Symbol::new(&env, "UNSTAKE"),
+        amount_usdc: 0,
+        token: token.clone(),
+        deal_id: String::from_str(&env, "deal_invalid"),
+        listing_id: None,
+        from: None,
+        to: None,
+        amount_ngn: None,
+        fx_rate_ngn_per_usdc: None,
+        fx_provider: None,
+        metadata_hash: None,
+    };
+
+    let err = client
+        .try_record_receipt(&operator, &input)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::InvalidAmount);
+
+    use soroban_sdk::testutils::Events as _;
+    // No events should be emitted when validation fails
+    assert_eq!(env.events().all().len(), 0);
+}
