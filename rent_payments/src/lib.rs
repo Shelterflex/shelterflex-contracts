@@ -48,6 +48,7 @@ pub struct ReceiptPage {
 #[derive(Clone)]
 pub enum DataKey {
     ContractVersion,
+    Paused,
     Admin,
     Deals,
     Receipts(DealId),
@@ -56,6 +57,16 @@ pub enum DataKey {
 
 #[contract]
 pub struct RentPayments;
+
+fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false)
+}
+
+fn require_not_paused(env: &Env) {
+    if is_paused(env) {
+        panic!("contract is paused");
+    }
+}
 
 fn get_admin(env: &Env) -> Address {
     env.storage()
@@ -165,10 +176,27 @@ impl RentPayments {
             .unwrap_or(0u32)
     }
 
+    pub fn pause(env: Env) {
+        require_admin(&env);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((Symbol::new(&env, "paused"),), ());
+    }
+
+    pub fn unpause(env: Env) {
+        require_admin(&env);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((Symbol::new(&env, "unpaused"),), ());
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        is_paused(&env)
+    }
+
     /// Create a new receipt for a deal
     /// This function records a monthly payment receipt
     pub fn create_receipt(env: Env, deal_id: DealId, amount: i128, payer: Address) -> Receipt {
         require_admin(&env);
+        require_not_paused(&env);
 
         if amount <= 0 {
             panic!("amount must be positive");
@@ -993,5 +1021,40 @@ mod test {
         // Verify deal 2 has 3 receipts
         let page2 = client.list_receipts_by_deal(&2u64, &10u32, &None);
         assert_eq!(page2.receipts.len(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_pause() {
+        let env = Env::default();
+        let (admin, client, payer) = setup(&env);
+        let contract_id = env.register_contract(None, RentPayments);
+        client.init(&admin);
+
+        // Pause the contract
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.pause();
+
+        assert_eq!(client.is_paused(), true);
+
+        // Try to create a receipt while paused (should panic)
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (1u64, 1000i128, payer.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.create_receipt(&1u64, &1000, &payer);
     }
 }
