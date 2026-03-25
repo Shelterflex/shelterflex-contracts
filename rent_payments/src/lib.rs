@@ -1059,9 +1059,8 @@ mod test {
     #[should_panic(expected = "contract is paused")]
     fn test_pause() {
         let env = Env::default();
-        let (admin, client, payer) = setup(&env);
-        let contract_id = env.register_contract(None, RentPayments);
-        client.init(&admin);
+        let (admin, client, contract_id) = setup(&env);
+        let payer = Address::generate(&env);
 
         // Pause the contract
         env.mock_auths(&[MockAuth {
