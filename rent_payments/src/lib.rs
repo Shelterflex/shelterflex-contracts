@@ -70,7 +70,10 @@ pub enum ContractError {
 pub struct RentPayments;
 
 fn is_paused(env: &Env) -> bool {
-    env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false)
+    env.storage()
+        .instance()
+        .get::<_, bool>(&DataKey::Paused)
+        .unwrap_or(false)
 }
 
 fn require_not_paused(env: &Env) {
