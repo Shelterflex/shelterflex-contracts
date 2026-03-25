@@ -484,10 +484,7 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        let err = client
-            .try_set_admin(&new_admin)
-            .unwrap_err()
-            .unwrap();
+        let err = client.try_set_admin(&new_admin).unwrap_err().unwrap();
         assert_eq!(err, ContractError::NotAuthorized);
     }
 }
