@@ -689,7 +689,10 @@ mod test {
             },
         }]);
 
-        let err = client.try_debit(&admin, &user, &1i128).unwrap_err().unwrap();
+        let err = client
+            .try_debit(&admin, &user, &1i128)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ContractError::InsufficientBalance);
         assert!(client.balance(&user) >= 0i128);
     }

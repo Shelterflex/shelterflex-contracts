@@ -12,8 +12,8 @@ use crate::{
     ALLOWED_TX_TYPES,
 };
 use soroban_sdk::{
-    testutils::{Address as _, Events as _}, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
-    TryFromVal, TryIntoVal,
+    testutils::{Address as _, Events as _},
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, TryFromVal, TryIntoVal,
 };
 use std::string::String as StdString;
 
@@ -166,7 +166,10 @@ fn test_metadata_hash_optional_none_is_accepted() {
         metadata_hash: None,
     };
 
-    let tx_id = client.try_record_receipt(&operator, &input).unwrap().unwrap();
+    let tx_id = client
+        .try_record_receipt(&operator, &input)
+        .unwrap()
+        .unwrap();
     let receipt = client.get_receipt(&tx_id).unwrap();
     assert_eq!(receipt.metadata_hash, None);
 }
@@ -1121,7 +1124,10 @@ fn test_event_vector_receipt_recorded_exact_shape() {
         metadata_hash: None,
     };
 
-    let tx_id = client.try_record_receipt(&operator, &input).unwrap().unwrap();
+    let tx_id = client
+        .try_record_receipt(&operator, &input)
+        .unwrap()
+        .unwrap();
 
     let events = env.events().all();
     assert_eq!(events.len(), 1);
