@@ -146,7 +146,7 @@ fn test_metadata_hash_optional_none_is_accepted() {
 
     let admin = Address::generate(&env);
     let operator = Address::generate(&env);
-    client.try_init(&admin, &operator).unwrap();
+    client.try_init(&admin, &operator).unwrap().unwrap();
     env.mock_all_auths();
 
     let token = Address::generate(&env);
@@ -493,7 +493,7 @@ fn test_version_matches_contract_version() {
     let admin = Address::generate(&env);
     let operator = Address::generate(&env);
 
-    client.try_init(&admin, &operator).unwrap();
+    client.try_init(&admin, &operator).unwrap().unwrap();
 
     assert_eq!(client.version(), 1u32);
     assert_eq!(client.version(), client.contract_version());
@@ -1075,7 +1075,7 @@ fn test_event_vector_init_event_exact_shape() {
     let admin = Address::generate(&env);
     let operator = Address::generate(&env);
 
-    client.try_init(&admin, &operator).unwrap();
+    client.try_init(&admin, &operator).unwrap().unwrap();
 
     let events = env.events().all();
     assert_eq!(events.len(), 1);
@@ -1165,7 +1165,7 @@ fn test_record_receipt_duplicate_transaction_rejected() {
     let operator = Address::generate(&env);
     let token = Address::generate(&env);
 
-    client.try_init(&admin, &operator).unwrap();
+    client.try_init(&admin, &operator).unwrap().unwrap();
     let input = ReceiptInput {
         external_ref_source: Symbol::new(&env, "paystack"),
         external_ref: String::from_str(&env, "dup_ref_001"),

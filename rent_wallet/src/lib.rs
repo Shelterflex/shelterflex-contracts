@@ -298,7 +298,7 @@ mod test {
     #[test]
     fn version_matches_contract_version() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, RentWallet);
+        let contract_id = env.register(RentWallet, ());
         let client = RentWalletClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
