@@ -320,13 +320,16 @@ impl StakingPool {
     pub fn pause(env: Env) {
         require_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((Symbol::new(&env, "paused"),), ());
+        env.events()
+            .publish((Symbol::new(&env, "mvp_staking_pool"), Symbol::new(&env, "paused")), ());
     }
 
     pub fn unpause(env: Env) {
-        require_admin(&env);
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((Symbol::new(&env, "unpaused"),), ());
+        env.events()
+            .publish((Symbol::new(&env, "mvp_staking_pool"), Symbol::new(&env, "unpaused")), ());
     }
 
     pub fn is_paused(env: Env) -> bool {
