@@ -106,6 +106,10 @@ impl RentWallet {
             .unwrap_or(0u32)
     }
 
+    pub fn version(env: Env) -> u32 {
+        Self::contract_version(env)
+    }
+
     pub fn credit(
         env: Env,
         admin: Address,
@@ -290,6 +294,19 @@ mod test {
         }]);
         client.try_credit(&admin, &user, &100i128).unwrap().unwrap();
         assert_eq!(client.balance(&user), 100i128);
+    }
+
+    #[test]
+    fn version_matches_contract_version() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RentWallet);
+        let client = RentWalletClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.try_init(&admin).unwrap().unwrap();
+
+        assert_eq!(client.version(), 1u32);
+        assert_eq!(client.version(), client.contract_version());
     }
 
     #[test]
@@ -651,6 +668,121 @@ mod test {
         }]);
         client.try_debit(&admin, &user, &80i128).unwrap().unwrap();
         assert_eq!(client.balance(&user), 120i128);
+    }
+
+    // ============================================================================
+    // Balance Invariant Tests
+    // ============================================================================
+
+    #[test]
+    fn invariant_balance_never_negative_after_failed_debit() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "debit",
+                args: (admin.clone(), user.clone(), 1i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err = client.try_debit(&admin, &user, &1i128).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::InsufficientBalance);
+        assert!(client.balance(&user) >= 0i128);
+    }
+
+    #[test]
+    fn invariant_credit_strictly_increases_balance() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        let before = client.balance(&user);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (admin.clone(), user.clone(), 25i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_credit(&admin, &user, &25i128).unwrap().unwrap();
+
+        let after = client.balance(&user);
+        assert_eq!(after, before + 25i128);
+        assert!(after > before);
+    }
+
+    #[test]
+    fn invariant_debit_strictly_decreases_balance() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (admin.clone(), user.clone(), 100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_credit(&admin, &user, &100i128).unwrap().unwrap();
+
+        let before = client.balance(&user);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "debit",
+                args: (admin.clone(), user.clone(), 40i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_debit(&admin, &user, &40i128).unwrap().unwrap();
+
+        let after = client.balance(&user);
+        assert_eq!(after, before - 40i128);
+        assert!(after < before);
+    }
+
+    #[test]
+    fn invariant_debit_insufficient_fails_and_preserves_balance() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (admin.clone(), user.clone(), 30i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_credit(&admin, &user, &30i128).unwrap().unwrap();
+        let before = client.balance(&user);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "debit",
+                args: (admin.clone(), user.clone(), 31i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_debit(&admin, &user, &31i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InsufficientBalance);
+        assert_eq!(client.balance(&user), before);
     }
 
     // ============================================================================

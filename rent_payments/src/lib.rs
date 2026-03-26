@@ -191,6 +191,10 @@ impl RentPayments {
             .unwrap_or(0u32)
     }
 
+    pub fn version(env: Env) -> u32 {
+        Self::contract_version(env)
+    }
+
     pub fn pause(env: Env) {
         require_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -456,6 +460,17 @@ mod test {
         let admin = Address::generate(&env);
         client.init(&admin);
         assert_eq!(client.contract_version(), 1u32);
+    }
+
+    #[test]
+    fn version_matches_contract_version() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RentPayments);
+        let client = RentPaymentsClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init(&admin);
+        assert_eq!(client.version(), 1u32);
+        assert_eq!(client.version(), client.contract_version());
     }
 
     #[test]

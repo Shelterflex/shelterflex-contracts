@@ -306,6 +306,10 @@ impl StakingPool {
             .unwrap_or(0u32)
     }
 
+    pub fn version(env: Env) -> u32 {
+        Self::contract_version(env)
+    }
+
     pub fn set_operator(
         env: Env,
         admin: Address,
@@ -631,6 +635,26 @@ mod test {
         }]);
         client.try_pause(&admin).unwrap().unwrap();
         assert!(client.is_paused());
+    }
+
+    #[test]
+    fn version_matches_contract_version() {
+        let env = Env::default();
+        let contract_id = env.register(StakingPool, ());
+        let client = StakingPoolClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+        let token_contract_id = token_contract.address();
+
+        client
+            .try_init(&admin, &token_contract_id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(client.version(), 1u32);
+        assert_eq!(client.version(), client.contract_version());
     }
 
     #[test]
