@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(test)]
+mod storage_tests;
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, Symbol, Vec,
 };
