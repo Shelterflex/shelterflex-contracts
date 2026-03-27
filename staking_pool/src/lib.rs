@@ -11,6 +11,12 @@ use soroban_sdk::{
     String, Symbol,
 };
 
+#[cfg(test)]
+mod test;
+
+#[cfg(test)]
+mod stress_tests;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
