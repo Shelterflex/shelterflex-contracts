@@ -91,10 +91,7 @@ pub fn validate_string(_env: &Env, s: &String) -> Result<(), ContractError> {
 ///
 /// Used to prevent e.g. self-transfer or assigning an admin to itself when a
 /// distinct new admin is required.
-pub fn validate_distinct_addresses(
-    a: &Address,
-    b: &Address,
-) -> Result<(), ContractError> {
+pub fn validate_distinct_addresses(a: &Address, b: &Address) -> Result<(), ContractError> {
     if a == b {
         return Err(ContractError::SameAddress);
     }
@@ -128,7 +125,10 @@ mod tests {
     #[test]
     fn negative_amount_rejected() {
         assert_eq!(validate_amount(-1), Err(ContractError::InvalidAmount));
-        assert_eq!(validate_amount(i128::MIN), Err(ContractError::InvalidAmount));
+        assert_eq!(
+            validate_amount(i128::MIN),
+            Err(ContractError::InvalidAmount)
+        );
     }
 
     #[test]
