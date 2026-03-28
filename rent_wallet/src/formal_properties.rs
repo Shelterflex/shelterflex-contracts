@@ -158,7 +158,10 @@ mod formal_properties {
 
         // Balance unchanged
         assert_eq!(client.balance(&user), 100);
-        assert!(client.balance(&user) >= 0, "balance must remain non-negative");
+        assert!(
+            client.balance(&user) >= 0,
+            "balance must remain non-negative"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -203,7 +206,10 @@ mod formal_properties {
             },
         }]);
         assert_eq!(
-            client.try_credit(&admin, &user, &50i128).unwrap_err().unwrap(),
+            client
+                .try_credit(&admin, &user, &50i128)
+                .unwrap_err()
+                .unwrap(),
             ContractError::Paused
         );
 
@@ -218,12 +224,19 @@ mod formal_properties {
             },
         }]);
         assert_eq!(
-            client.try_debit(&admin, &user, &50i128).unwrap_err().unwrap(),
+            client
+                .try_debit(&admin, &user, &50i128)
+                .unwrap_err()
+                .unwrap(),
             ContractError::Paused
         );
 
         // Balance unchanged
-        assert_eq!(client.balance(&user), 200, "balance must be unchanged while paused");
+        assert_eq!(
+            client.balance(&user),
+            200,
+            "balance must be unchanged while paused"
+        );
 
         // Unpause — mutations must succeed again
         env.mock_auths(&[MockAuth {
@@ -357,7 +370,10 @@ mod formal_properties {
             },
         }]);
         assert_eq!(
-            client.try_credit(&admin, &user, &0i128).unwrap_err().unwrap(),
+            client
+                .try_credit(&admin, &user, &0i128)
+                .unwrap_err()
+                .unwrap(),
             ContractError::InvalidAmount
         );
 
@@ -371,7 +387,10 @@ mod formal_properties {
             },
         }]);
         assert_eq!(
-            client.try_debit(&admin, &user, &0i128).unwrap_err().unwrap(),
+            client
+                .try_debit(&admin, &user, &0i128)
+                .unwrap_err()
+                .unwrap(),
             ContractError::InvalidAmount
         );
     }
@@ -407,7 +426,10 @@ mod formal_properties {
             },
         }]);
         assert_eq!(
-            client.try_debit(&admin, &user, &1i128).unwrap_err().unwrap(),
+            client
+                .try_debit(&admin, &user, &1i128)
+                .unwrap_err()
+                .unwrap(),
             ContractError::InsufficientBalance
         );
     }
@@ -430,7 +452,10 @@ mod formal_properties {
         for amount in [1i128, 100, 999, 1_000_000] {
             do_credit(&env, &contract_id, &client, &admin, &user, amount);
             let next = client.balance(&user);
-            assert!(next > prev, "balance must strictly increase after credit({amount})");
+            assert!(
+                next > prev,
+                "balance must strictly increase after credit({amount})"
+            );
             prev = next;
         }
     }
@@ -452,7 +477,7 @@ mod formal_properties {
         let users: std::vec::Vec<Address> = (0..5).map(|_| Address::generate(&env)).collect();
 
         let credits = [100i128, 200, 300, 400, 500];
-        let debits  = [50i128,  80,  0,  100, 250];
+        let debits = [50i128, 80, 0, 100, 250];
 
         let mut total_net = 0i128;
 
