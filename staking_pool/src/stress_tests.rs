@@ -40,7 +40,9 @@ mod stress_tests {
     fn setup(env: &Env) -> TestCtx<'_> {
         // Deploy a minimal SAC-compatible token for staking
         let token_admin = Address::generate(env);
-        let token_id = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
         let token_client = token::StellarAssetClient::new(env, &token_id);
 
         let contract_id = env.register(StakingPool, ());
@@ -53,7 +55,12 @@ mod stress_tests {
         // Mint enough tokens into the contract itself to cover unstake payouts
         token_client.mint(&contract_id, &1_000_000_000_000i128);
 
-        TestCtx { contract_id, token_id, client, admin }
+        TestCtx {
+            contract_id,
+            token_id,
+            client,
+            admin,
+        }
     }
 
     /// Mint `amount` tokens to `user` and have them stake immediately.
