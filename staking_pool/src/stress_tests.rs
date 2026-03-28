@@ -17,7 +17,7 @@
 //! | Concurrent partial unstakes     | multiple users partially unstake same ledger  |
 
 #[cfg(test)]
-mod stress_tests {
+mod tests {
     extern crate std;
 
     use crate::{ContractError, StakingPool, StakingPoolClient};
@@ -30,6 +30,7 @@ mod stress_tests {
     // Helpers
     // ─────────────────────────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     struct TestCtx<'a> {
         contract_id: Address,
         token_id: Address,
@@ -301,7 +302,7 @@ mod stress_tests {
     #[test]
     fn stress_budget_within_limits() {
         let env = Env::default();
-        env.budget().reset_default(); // enforce default Soroban network limits
+        env.cost_estimate().budget().reset_default(); // enforce default Soroban network limits
         let ctx = setup(&env);
         let token_client = token::StellarAssetClient::new(&env, &ctx.token_id);
 
