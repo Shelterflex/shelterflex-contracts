@@ -2,6 +2,9 @@
 
 pub mod validation;
 
+#[cfg(test)]
+mod formal_properties;
+
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Map, Symbol};
 
 #[contracttype]
