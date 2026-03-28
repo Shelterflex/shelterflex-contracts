@@ -1,4 +1,4 @@
-use soroban_sdk::{Env, Bytes};
+use soroban_sdk::{Bytes, Env};
 
 pub trait Versionable {
     fn get_version(env: &Env) -> u32;

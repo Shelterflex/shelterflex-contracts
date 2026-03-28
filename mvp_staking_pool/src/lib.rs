@@ -1,11 +1,12 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token::Client as TokenClient, Address, Env, Map, Symbol, Bytes, BytesN,
+    contract, contractimpl, contracttype, token::Client as TokenClient, Address, Bytes, BytesN,
+    Env, Map, Symbol,
 };
 
 mod migration;
-use migration::{Versionable, Migratable};
+use migration::{Migratable, Versionable};
 
 const REWARD_INDEX_SCALE: i128 = 1_000_000_000_000;
 
@@ -406,7 +407,7 @@ mod test {
 
     use super::{StakingPool, StakingPoolClient};
     use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
-    use soroban_sdk::{token::StellarAssetClient, Address, Env, IntoVal, Bytes};
+    use soroban_sdk::{token::StellarAssetClient, Address, Bytes, Env, IntoVal};
 
     fn setup_contract(env: &Env) -> (Address, StakingPoolClient<'_>, Address, Address, Address) {
         let contract_id = env.register(StakingPool, ());
