@@ -1,7 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token::Client as TokenClient, Address, Env, Map, Symbol,
+    contract, contracterror, contractimpl, contracttype, token::Client as TokenClient, Address,
+    BytesN, Env, Symbol,
 };
 
 const REWARD_INDEX_SCALE: i128 = 1_000_000_000_000;
@@ -12,12 +13,29 @@ pub enum DataKey {
     ContractVersion,
     Admin,
     Token,
-    StakedBalances,
     TotalStaked,
     Paused,
     GlobalRewardIndex,
-    UserRewardIndex,
-    ClaimableRewards,
+    // Per-user keys (persistent storage) — replaces instance Map (#386)
+    StakedBalance(Address),
+    UserRewardIndex(Address),
+    ClaimableReward(Address),
+    // Upgrade governance (#392)
+    Guardian,
+    UpgradeDelay,
+    PendingUpgradeHash,
+    PendingUpgradeAt,
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ContractError {
+    // Upgrade governance errors (#392)
+    UpgradeAlreadyPending = 1,
+    NoUpgradePending = 2,
+    UpgradeDelayNotMet = 3,
+    NotAuthorized = 4,
 }
 
 #[contract]
@@ -35,19 +53,6 @@ fn get_token(env: &Env) -> Address {
         .instance()
         .get(&DataKey::Token)
         .expect("token not set")
-}
-
-fn staked_balances(env: &Env) -> Map<Address, i128> {
-    env.storage()
-        .instance()
-        .get::<_, Map<Address, i128>>(&DataKey::StakedBalances)
-        .unwrap_or_else(|| Map::new(env))
-}
-
-fn put_staked_balances(env: &Env, balances: Map<Address, i128>) {
-    env.storage()
-        .instance()
-        .set(&DataKey::StakedBalances, &balances);
 }
 
 fn get_total_staked(env: &Env) -> i128 {
@@ -74,32 +79,6 @@ fn put_global_reward_index(env: &Env, idx: i128) {
         .set(&DataKey::GlobalRewardIndex, &idx);
 }
 
-fn user_reward_index(env: &Env) -> Map<Address, i128> {
-    env.storage()
-        .instance()
-        .get::<_, Map<Address, i128>>(&DataKey::UserRewardIndex)
-        .unwrap_or_else(|| Map::new(env))
-}
-
-fn put_user_reward_index(env: &Env, idxs: Map<Address, i128>) {
-    env.storage()
-        .instance()
-        .set(&DataKey::UserRewardIndex, &idxs);
-}
-
-fn claimable_rewards(env: &Env) -> Map<Address, i128> {
-    env.storage()
-        .instance()
-        .get::<_, Map<Address, i128>>(&DataKey::ClaimableRewards)
-        .unwrap_or_else(|| Map::new(env))
-}
-
-fn put_claimable_rewards(env: &Env, rewards: Map<Address, i128>) {
-    env.storage()
-        .instance()
-        .set(&DataKey::ClaimableRewards, &rewards);
-}
-
 fn is_paused(env: &Env) -> bool {
     env.storage()
         .instance()
@@ -124,33 +103,53 @@ fn require_positive_amount(amount: i128) {
     }
 }
 
+fn get_staked_balance(env: &Env, user: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get::<_, i128>(&DataKey::StakedBalance(user.clone()))
+        .unwrap_or(0)
+}
+
+fn get_user_reward_index(env: &Env, user: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get::<_, i128>(&DataKey::UserRewardIndex(user.clone()))
+        .unwrap_or(0)
+}
+
+fn get_claimable_reward(env: &Env, user: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get::<_, i128>(&DataKey::ClaimableReward(user.clone()))
+        .unwrap_or(0)
+}
+
 fn accrue_user_rewards(env: &Env, user: &Address) {
     let global_idx = get_global_reward_index(env);
-
-    let mut user_idxs = user_reward_index(env);
-    let user_idx = user_idxs.get(user.clone()).unwrap_or(0);
+    let user_idx = get_user_reward_index(env, user);
 
     if global_idx <= user_idx {
         return;
     }
 
-    let balances = staked_balances(env);
-    let staked = balances.get(user.clone()).unwrap_or(0);
+    let staked = get_staked_balance(env, user);
 
     if staked > 0 {
         let delta = global_idx - user_idx;
         let accrued = (staked * delta) / REWARD_INDEX_SCALE;
 
         if accrued > 0 {
-            let mut rewards = claimable_rewards(env);
-            let current = rewards.get(user.clone()).unwrap_or(0);
-            rewards.set(user.clone(), current + accrued);
-            put_claimable_rewards(env, rewards);
+            let current = get_claimable_reward(env, user);
+            env.storage().persistent().set(
+                &DataKey::ClaimableReward(user.clone()),
+                &(current + accrued),
+            );
         }
     }
 
-    user_idxs.set(user.clone(), global_idx);
-    put_user_reward_index(env, user_idxs);
+    env.storage()
+        .persistent()
+        .set(&DataKey::UserRewardIndex(user.clone()), &global_idx);
 }
 
 #[contractimpl]
@@ -165,22 +164,18 @@ impl StakingPool {
         env.storage()
             .instance()
             .set(&DataKey::ContractVersion, &1u32);
-        env.storage()
-            .instance()
-            .set(&DataKey::StakedBalances, &Map::<Address, i128>::new(&env));
         env.storage().instance().set(&DataKey::TotalStaked, &0i128);
         env.storage()
             .instance()
             .set(&DataKey::GlobalRewardIndex, &0i128);
-        env.storage()
-            .instance()
-            .set(&DataKey::UserRewardIndex, &Map::<Address, i128>::new(&env));
-        env.storage()
-            .instance()
-            .set(&DataKey::ClaimableRewards, &Map::<Address, i128>::new(&env));
 
-        env.events()
-            .publish((Symbol::new(&env, "init"),), (admin, token, 1u32));
+        env.events().publish(
+            (
+                Symbol::new(&env, "mvp_staking_pool"),
+                Symbol::new(&env, "init"),
+            ),
+            (admin, token, 1u32),
+        );
     }
 
     pub fn contract_version(env: Env) -> u32 {
@@ -204,16 +199,16 @@ impl StakingPool {
         token_client.transfer(&user, &env.current_contract_address(), &amount);
 
         // Update staked balance
-        let mut balances = staked_balances(&env);
-        let current_balance = balances.get(user.clone()).unwrap_or(0);
-        balances.set(user.clone(), current_balance + amount);
-        put_staked_balances(&env, balances);
+        let current_balance = get_staked_balance(&env, &user);
+        env.storage().persistent().set(
+            &DataKey::StakedBalance(user.clone()),
+            &(current_balance + amount),
+        );
 
         // Update total staked
         let total = get_total_staked(&env);
         put_total_staked(&env, total + amount);
 
-        // Emit event with standardized topic ("stake", user)
         env.events()
             .publish((Symbol::new(&env, "stake"), user.clone()), amount);
     }
@@ -225,9 +220,7 @@ impl StakingPool {
 
         accrue_user_rewards(&env, &user);
 
-        // Check sufficient staked balance
-        let mut balances = staked_balances(&env);
-        let current_balance = balances.get(user.clone()).unwrap_or(0);
+        let current_balance = get_staked_balance(&env, &user);
         if current_balance < amount {
             panic!("insufficient staked balance");
         }
@@ -236,8 +229,10 @@ impl StakingPool {
         let token_client = TokenClient::new(&env, &token_address);
 
         // Update staked balance
-        balances.set(user.clone(), current_balance - amount);
-        put_staked_balances(&env, balances);
+        env.storage().persistent().set(
+            &DataKey::StakedBalance(user.clone()),
+            &(current_balance - amount),
+        );
 
         // Update total staked
         let total = get_total_staked(&env);
@@ -246,14 +241,12 @@ impl StakingPool {
         // Transfer tokens from contract to user
         token_client.transfer(&env.current_contract_address(), &user, &amount);
 
-        // Emit event with standardized topic ("unstake", user)
         env.events()
             .publish((Symbol::new(&env, "unstake"), user.clone()), amount);
     }
 
     pub fn staked_balance(env: Env, user: Address) -> i128 {
-        let balances = staked_balances(&env);
-        balances.get(user).unwrap_or(0)
+        get_staked_balance(&env, &user)
     }
 
     pub fn total_staked(env: Env) -> i128 {
@@ -289,8 +282,7 @@ impl StakingPool {
 
     pub fn claimable(env: Env, user: Address) -> i128 {
         accrue_user_rewards(&env, &user);
-        let rewards = claimable_rewards(&env);
-        rewards.get(user).unwrap_or(0)
+        get_claimable_reward(&env, &user)
     }
 
     pub fn claim(env: Env, to: Address) -> i128 {
@@ -299,14 +291,14 @@ impl StakingPool {
 
         accrue_user_rewards(&env, &to);
 
-        let mut rewards = claimable_rewards(&env);
-        let amount = rewards.get(to.clone()).unwrap_or(0);
+        let amount = get_claimable_reward(&env, &to);
         if amount <= 0 {
             return 0;
         }
 
-        rewards.set(to.clone(), 0);
-        put_claimable_rewards(&env, rewards);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ClaimableReward(to.clone()), &0i128);
 
         let token_address = get_token(&env);
         let token_client = TokenClient::new(&env, &token_address);
@@ -319,13 +311,14 @@ impl StakingPool {
 
     pub fn pause(env: Env) {
         require_admin(&env);
+        let admin = get_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events().publish(
             (
                 Symbol::new(&env, "mvp_staking_pool"),
                 Symbol::new(&env, "paused"),
             ),
-            (),
+            admin,
         );
     }
 
@@ -338,12 +331,166 @@ impl StakingPool {
                 Symbol::new(&env, "mvp_staking_pool"),
                 Symbol::new(&env, "unpaused"),
             ),
-            (),
+            admin,
         );
     }
 
     pub fn is_paused(env: Env) -> bool {
         is_paused(&env)
+    }
+
+    // ── Upgrade governance (#392) ──────────────────────────────────────────────
+
+    pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::Guardian, &guardian);
+        env.events().publish(
+            (
+                Symbol::new(&env, "mvp_staking_pool"),
+                Symbol::new(&env, "set_guardian"),
+            ),
+            guardian,
+        );
+        Ok(())
+    }
+
+    pub fn set_upgrade_delay(env: Env, admin: Address, delay: u64) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::UpgradeDelay, &delay);
+        env.events().publish(
+            (
+                Symbol::new(&env, "mvp_staking_pool"),
+                Symbol::new(&env, "set_upgrade_delay"),
+            ),
+            delay,
+        );
+        Ok(())
+    }
+
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        if env.storage().instance().has(&DataKey::PendingUpgradeHash) {
+            return Err(ContractError::UpgradeAlreadyPending);
+        }
+        let delay: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeDelay)
+            .unwrap_or(0);
+        let execute_at = env.ledger().timestamp() + delay;
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeHash, &new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeAt, &execute_at);
+        env.events().publish(
+            (
+                Symbol::new(&env, "mvp_staking_pool"),
+                Symbol::new(&env, "propose_upgrade"),
+            ),
+            (new_wasm_hash, execute_at),
+        );
+        Ok(())
+    }
+
+    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        let hash = env
+            .storage()
+            .instance()
+            .get::<_, BytesN<32>>(&DataKey::PendingUpgradeHash)
+            .ok_or(ContractError::NoUpgradePending)?;
+        let execute_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeAt)
+            .ok_or(ContractError::NoUpgradePending)?;
+        if env.ledger().timestamp() < execute_at {
+            return Err(ContractError::UpgradeDelayNotMet);
+        }
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeHash);
+        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "mvp_staking_pool"),
+                Symbol::new(&env, "execute_upgrade"),
+            ),
+            hash.clone(),
+        );
+        env.deployer().update_current_contract_wasm(hash);
+        Ok(())
+    }
+
+    pub fn emergency_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        if let Some(guardian) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::Guardian)
+        {
+            guardian.require_auth();
+        }
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeHash);
+        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "mvp_staking_pool"),
+                Symbol::new(&env, "emergency_upgrade"),
+            ),
+            (admin.clone(), new_wasm_hash.clone()),
+        );
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        if !env.storage().instance().has(&DataKey::PendingUpgradeHash) {
+            return Err(ContractError::NoUpgradePending);
+        }
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeHash);
+        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "mvp_staking_pool"),
+                Symbol::new(&env, "cancel_upgrade"),
+            ),
+            admin.clone(),
+        );
+        Ok(())
     }
 }
 

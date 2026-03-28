@@ -1,5 +1,7 @@
 #![no_std]
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
+};
 
 #[contracttype]
 #[derive(Clone)]
@@ -8,6 +10,11 @@ pub enum StorageKey {
     Admin,
     Operator,
     Paused,
+    // Upgrade governance (#392)
+    Guardian,
+    UpgradeDelay,
+    PendingUpgradeHash,
+    PendingUpgradeAt,
 }
 
 #[contracterror]
@@ -17,6 +24,10 @@ pub enum ContractError {
     AlreadyInitialized = 1,
     NotAuthorized = 2,
     Paused = 3,
+    // Upgrade governance errors (#392)
+    UpgradeAlreadyPending = 4,
+    NoUpgradePending = 5,
+    UpgradeDelayNotMet = 6,
 }
 
 #[contracttype]
@@ -46,6 +57,14 @@ impl StakingRewards {
             .set(&StorageKey::ContractVersion, &1u32);
         env.storage().instance().set(&StorageKey::Paused, &false);
 
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "init"),
+            ),
+            (admin, 1u32),
+        );
+
         Ok(())
     }
 
@@ -69,7 +88,19 @@ impl StakingRewards {
 
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("admin not set");
         env.storage().instance().set(&StorageKey::Admin, &new_admin);
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "set_admin"),
+            ),
+            (old_admin, new_admin),
+        );
         Ok(())
     }
 
@@ -121,6 +152,11 @@ impl StakingRewards {
 
     pub fn pause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("admin not set");
         env.storage().instance().set(&StorageKey::Paused, &true);
 
         env.events().publish(
@@ -128,7 +164,7 @@ impl StakingRewards {
                 Symbol::new(&env, "staking_rewards"),
                 Symbol::new(&env, "pause"),
             ),
-            (),
+            admin,
         );
 
         Ok(())
@@ -136,6 +172,11 @@ impl StakingRewards {
 
     pub fn unpause(env: Env) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("admin not set");
         env.storage().instance().set(&StorageKey::Paused, &false);
 
         env.events().publish(
@@ -143,7 +184,7 @@ impl StakingRewards {
                 Symbol::new(&env, "staking_rewards"),
                 Symbol::new(&env, "unpause"),
             ),
-            (),
+            admin,
         );
 
         Ok(())
@@ -344,6 +385,208 @@ impl StakingRewards {
 
     fn get_total_staked(env: &Env) -> i128 {
         env.storage().persistent().get(&TOTAL_STAKED).unwrap_or(0)
+    }
+
+    // ── Upgrade governance (#392) ──────────────────────────────────────────────
+
+    pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .ok_or(ContractError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(ContractError::NotAuthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&StorageKey::Guardian, &guardian);
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "set_guardian"),
+            ),
+            guardian,
+        );
+        Ok(())
+    }
+
+    pub fn set_upgrade_delay(env: Env, admin: Address, delay: u64) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .ok_or(ContractError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(ContractError::NotAuthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&StorageKey::UpgradeDelay, &delay);
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "set_upgrade_delay"),
+            ),
+            delay,
+        );
+        Ok(())
+    }
+
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .ok_or(ContractError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(ContractError::NotAuthorized);
+        }
+        if env
+            .storage()
+            .instance()
+            .has(&StorageKey::PendingUpgradeHash)
+        {
+            return Err(ContractError::UpgradeAlreadyPending);
+        }
+        let delay: u64 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::UpgradeDelay)
+            .unwrap_or(0);
+        let execute_at = env.ledger().timestamp() + delay;
+        env.storage()
+            .instance()
+            .set(&StorageKey::PendingUpgradeHash, &new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&StorageKey::PendingUpgradeAt, &execute_at);
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "propose_upgrade"),
+            ),
+            (new_wasm_hash, execute_at),
+        );
+        Ok(())
+    }
+
+    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .ok_or(ContractError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(ContractError::NotAuthorized);
+        }
+        let hash = env
+            .storage()
+            .instance()
+            .get::<_, BytesN<32>>(&StorageKey::PendingUpgradeHash)
+            .ok_or(ContractError::NoUpgradePending)?;
+        let execute_at: u64 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::PendingUpgradeAt)
+            .ok_or(ContractError::NoUpgradePending)?;
+        if env.ledger().timestamp() < execute_at {
+            return Err(ContractError::UpgradeDelayNotMet);
+        }
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeHash);
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "execute_upgrade"),
+            ),
+            hash.clone(),
+        );
+        env.deployer().update_current_contract_wasm(hash);
+        Ok(())
+    }
+
+    pub fn emergency_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .ok_or(ContractError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(ContractError::NotAuthorized);
+        }
+        if let Some(guardian) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&StorageKey::Guardian)
+        {
+            guardian.require_auth();
+        }
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeHash);
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "emergency_upgrade"),
+            ),
+            (admin.clone(), new_wasm_hash.clone()),
+        );
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .ok_or(ContractError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(ContractError::NotAuthorized);
+        }
+        if !env
+            .storage()
+            .instance()
+            .has(&StorageKey::PendingUpgradeHash)
+        {
+            return Err(ContractError::NoUpgradePending);
+        }
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeHash);
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_rewards"),
+                Symbol::new(&env, "cancel_upgrade"),
+            ),
+            admin.clone(),
+        );
+        Ok(())
     }
 }
 

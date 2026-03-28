@@ -168,18 +168,6 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "ClaimableRewards"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "map": []
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
                               "symbol": "ContractVersion"
                             }
                           ]
@@ -219,18 +207,6 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "StakedBalances"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "map": []
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
                               "symbol": "Token"
                             }
                           ]
@@ -252,18 +228,6 @@
                             "hi": 0,
                             "lo": 0
                           }
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "UserRewardIndex"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "map": []
                         }
                       }
                     ]
@@ -509,5 +473,29 @@
       ]
     ]
   },
-  "events": []
+  "events": [
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "mvp_staking_pool"
+              },
+              {
+                "symbol": "unpaused"
+              }
+            ],
+            "data": {
+              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+            }
+          }
+        }
+      },
+      "failed_call": false
+    }
+  ]
 }
