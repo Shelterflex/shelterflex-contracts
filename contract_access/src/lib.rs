@@ -33,10 +33,10 @@ use soroban_sdk::{
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Copy)]
 #[repr(u32)]
 pub enum Role {
-    Admin    = 0,
+    Admin = 0,
     Operator = 1,
-    User     = 2,
-    Auditor  = 3,
+    User = 2,
+    Auditor = 3,
 }
 
 /// All permissions that can be granted to a role.  Add new variants here as
@@ -48,32 +48,32 @@ pub enum Role {
 pub enum Permission {
     // ── Core ──────────────────────────────────────────────────────────────
     /// Initialize the contract
-    Initialize     = 0,
+    Initialize = 0,
     /// Pause / unpause contract operations
-    PauseContract  = 1,
+    PauseContract = 1,
     /// Upgrade contract WASM (requires multi-sig)
     UpgradeContract = 2,
 
     // ── Role management (requires multi-sig) ───────────────────────────
-    AssignRole   = 3,
-    RevokeRole   = 4,
+    AssignRole = 3,
+    RevokeRole = 4,
     TransferAdmin = 5,
 
     // ── Fund operations ────────────────────────────────────────────────
     /// Credit / mint funds to a user
-    CreditFunds    = 6,
+    CreditFunds = 6,
     /// Debit / burn funds from a user
-    DebitFunds     = 7,
+    DebitFunds = 7,
     /// Transfer funds between accounts
-    TransferFunds  = 8,
+    TransferFunds = 8,
 
     // ── Staking operations ────────────────────────────────────────────
-    Stake   = 9,
+    Stake = 9,
     Unstake = 10,
     SetLockPeriod = 11,
 
     // ── Audit / read ──────────────────────────────────────────────────
-    ReadBalance  = 12,
+    ReadBalance = 12,
     ReadAuditLog = 13,
 }
 
@@ -100,15 +100,15 @@ pub enum DataKey {
 #[repr(u32)]
 pub enum AccessError {
     /// Caller does not hold a role that grants the requested permission
-    Unauthorized        = 1,
+    Unauthorized = 1,
     /// Multi-sig second approver has not yet confirmed
-    AwaitingApproval    = 2,
+    AwaitingApproval = 2,
     /// Contract already initialised
-    AlreadyInitialized  = 3,
+    AlreadyInitialized = 3,
     /// Tried to revoke the last admin — would lock the contract
     CannotRevokeLastAdmin = 4,
     /// Second approver not configured for multi-sig operations
-    NoSecondApprover    = 5,
+    NoSecondApprover = 5,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -177,10 +177,7 @@ fn permission_matrix(role: Role) -> &'static [Permission] {
             Permission::Unstake,
             Permission::ReadBalance,
         ],
-        Role::Auditor => &[
-            Permission::ReadBalance,
-            Permission::ReadAuditLog,
-        ],
+        Role::Auditor => &[Permission::ReadBalance, Permission::ReadAuditLog],
     }
 }
 
@@ -213,11 +210,7 @@ impl AccessControl {
 
     /// Initialise the access-control contract with `admin` as the first
     /// Admin-role holder and `second_approver` as the multi-sig co-signer.
-    pub fn init(
-        env: Env,
-        admin: Address,
-        second_approver: Address,
-    ) -> Result<(), AccessError> {
+    pub fn init(env: Env, admin: Address, second_approver: Address) -> Result<(), AccessError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(AccessError::AlreadyInitialized);
         }
@@ -319,10 +312,7 @@ impl AccessControl {
 
         // Guard: cannot revoke yourself if you're the only admin
         let roles = roles_map(&env);
-        let admin_count = roles
-            .iter()
-            .filter(|(_, r)| r == &Role::Admin)
-            .count();
+        let admin_count = roles.iter().filter(|(_, r)| r == &Role::Admin).count();
 
         if roles.get(subject.clone()) == Some(Role::Admin) && admin_count <= 1 {
             return Err(AccessError::CannotRevokeLastAdmin);
