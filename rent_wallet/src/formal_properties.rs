@@ -21,7 +21,7 @@
 //! | 10| TotalConsistencyAfterBatch  | sequential credit + debit preserves total across multiple users |
 
 #[cfg(test)]
-mod formal_properties {
+mod tests {
     extern crate std;
 
     use crate::{ContractError, RentWallet, RentWalletClient};
@@ -34,6 +34,7 @@ mod formal_properties {
     // Helpers
     // ─────────────────────────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     fn setup(env: &Env) -> (Address, Address, RentWalletClient<'_>) {
         let id = env.register(RentWallet, ());
         let client = RentWalletClient::new(env, &id);
