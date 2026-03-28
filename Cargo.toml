@@ -9,6 +9,7 @@ members = [
   "mvp_staking_pool",
   "whistleblower_rewards",
   "deal_escrow",
+  "contract_access",
 ]
 
 [profile.release-with-logs]

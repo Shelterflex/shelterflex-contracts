@@ -60,11 +60,13 @@
                           "vec": [
                             {
                               "symbol": "ContractVersion"
+                              "symbol": "Balances"
                             }
                           ]
                         },
                         "val": {
                           "u32": 1
+                          "map": []
                         }
                       },
                       {
@@ -72,11 +74,13 @@
                           "vec": [
                             {
                               "symbol": "Paused"
+                              "symbol": "ContractVersion"
                             }
                           ]
                         },
                         "val": {
                           "bool": false
+                          "u32": 1
                         }
                       }
                     ]

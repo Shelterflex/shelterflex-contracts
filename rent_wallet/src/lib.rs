@@ -5,6 +5,12 @@ use soroban_sdk::{
 };
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
+pub mod validation;
+
+#[cfg(test)]
+mod formal_properties;
+
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Map, Symbol};
 
 #[contracttype]
 #[derive(Clone)]
@@ -36,6 +42,18 @@ pub enum ContractError {
     UpgradeAlreadyPending = 6,
     NoUpgradePending = 7,
     UpgradeDelayNotMet = 8,
+    /// Amount exceeds the allowed maximum (prevents overflow cascades)
+    AmountTooLarge = 6,
+    /// Time/lock value exceeds the safe upper bound
+    InvalidTimeValue = 7,
+    /// String field was empty
+    EmptyString = 8,
+    /// String field exceeds maximum allowed length
+    StringTooLong = 9,
+    /// String contains non-printable or disallowed characters
+    InvalidStringChar = 10,
+    /// Two addresses that must differ were identical
+    SameAddress = 11,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -402,8 +420,6 @@ impl RentWallet {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod test {
     extern crate std;
@@ -421,7 +437,7 @@ mod test {
         Address,
         Address,
     ) {
-        let contract_id = env.register_contract(None, RentWallet);
+        let contract_id = env.register(RentWallet, ());
 
         let client = RentWalletClient::new(env, &contract_id);
 
@@ -443,7 +459,7 @@ mod test {
     #[test]
     fn init_sets_admin() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, RentWallet);
+        let contract_id = env.register(RentWallet, ());
         let client = RentWalletClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -469,7 +485,7 @@ mod test {
     #[test]
     fn version_matches_contract_version() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, RentWallet);
+        let contract_id = env.register(RentWallet, ());
         let client = RentWalletClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -482,7 +498,7 @@ mod test {
     #[test]
     fn init_initializes_empty_balances() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, RentWallet);
+        let contract_id = env.register(RentWallet, ());
         let client = RentWalletClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let user = Address::generate(&env);
@@ -496,7 +512,7 @@ mod test {
     #[test]
     fn init_cannot_be_called_twice() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, RentWallet);
+        let contract_id = env.register(RentWallet, ());
         let client = RentWalletClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
