@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod validation;
+
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Map, Symbol};
 
 #[contracttype]
@@ -24,6 +26,18 @@ pub enum ContractError {
     Paused = 3,
     InvalidAmount = 4,
     InsufficientBalance = 5,
+    /// Amount exceeds the allowed maximum (prevents overflow cascades)
+    AmountTooLarge = 6,
+    /// Time/lock value exceeds the safe upper bound
+    InvalidTimeValue = 7,
+    /// String field was empty
+    EmptyString = 8,
+    /// String field exceeds maximum allowed length
+    StringTooLong = 9,
+    /// String contains non-printable or disallowed characters
+    InvalidStringChar = 10,
+    /// Two addresses that must differ were identical
+    SameAddress = 11,
 }
 
 #[contract]
