@@ -3,9 +3,8 @@
 extern crate alloc;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype,
-    token::{Client as TokenClient, StellarAssetClient},
-    Address, BytesN, Env, Map, String, Symbol,
+    contract, contracterror, contractimpl, contracttype, token::Client as TokenClient, Address,
+    BytesN, Env, String, Symbol,
 };
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -492,8 +491,9 @@ impl DealEscrow {
 #[cfg(test)]
 mod test {
     extern crate std;
-    use super::{ContractError, DealEscrow, DealEscrowClient, StellarAssetClient, TokenClient};
+    use super::{ContractError, DealEscrow, DealEscrowClient, TokenClient};
     use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+    use soroban_sdk::token::StellarAssetClient;
     use soroban_sdk::{Address, BytesN, Env, IntoVal, String, Symbol};
 
     #[test]

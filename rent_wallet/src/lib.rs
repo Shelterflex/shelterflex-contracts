@@ -10,8 +10,6 @@ pub mod validation;
 #[cfg(test)]
 mod formal_properties;
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Map, Symbol};
-
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -43,17 +41,17 @@ pub enum ContractError {
     NoUpgradePending = 7,
     UpgradeDelayNotMet = 8,
     /// Amount exceeds the allowed maximum (prevents overflow cascades)
-    AmountTooLarge = 6,
+    AmountTooLarge = 9,
     /// Time/lock value exceeds the safe upper bound
-    InvalidTimeValue = 7,
+    InvalidTimeValue = 10,
     /// String field was empty
-    EmptyString = 8,
+    EmptyString = 11,
     /// String field exceeds maximum allowed length
-    StringTooLong = 9,
+    StringTooLong = 12,
     /// String contains non-printable or disallowed characters
-    InvalidStringChar = 10,
+    InvalidStringChar = 13,
     /// Two addresses that must differ were identical
-    SameAddress = 11,
+    SameAddress = 14,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
