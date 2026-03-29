@@ -1152,6 +1152,9 @@ mod test {
         // data is (receipt_id: u64, amount: i128, payer: Address, schema_version: u32)
         let data: soroban_sdk::Vec<soroban_sdk::Val> = last.2.clone().try_into_val(&env).unwrap();
         let schema_version: u32 = data.get(3).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(schema_version, 1u32, "receipt_created event must carry schema_version = 1");
+        assert_eq!(
+            schema_version, 1u32,
+            "receipt_created event must carry schema_version = 1"
+        );
     }
 }
