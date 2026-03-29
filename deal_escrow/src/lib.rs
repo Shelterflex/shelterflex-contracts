@@ -163,7 +163,7 @@ impl DealEscrow {
         let cur = b.get(deal_id.clone()).unwrap_or(0);
         b.set(deal_id.clone(), cur + amount);
         put_deal_balances(&env, b);
-        env.events().publish((Symbol::new(&env, "deal_escrow"), Symbol::new(&env, "deposit")), (deal_id, from, amount));
+        env.events().publish((Symbol::new(&env, "deal_escrow"), Symbol::new(&env, "deposit")), (deal_id, from, amount, 1u32));
         Ok(())
         }
 
@@ -184,7 +184,7 @@ impl DealEscrow {
         let tx_id = generate_tx_id(&env, &external_ref_source, &external_ref);
         env.events().publish(
             (Symbol::new(&env, "deal_escrow"), Symbol::new(&env, "release")),
-            (deal_id, to, cur, external_ref_source, tx_id),
+            (deal_id, to, cur, external_ref_source, tx_id, 1u32),
         );
         Ok(cur)
     }
@@ -463,5 +463,117 @@ mod test {
         }]);
         let err = client.try_release(&non_auth, &deal_id, &to, &Symbol::new(&env, "manual_admin"), &String::from_str(&env, "ext3")).unwrap_err().unwrap();
         assert_eq!(err, ContractError::NotAuthorized);
+    }
+
+    // ============================================================================
+    // Event Schema Version Tests
+    // ============================================================================
+
+    #[test]
+    fn deposit_event_includes_schema_version_one() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryIntoVal;
+
+        let env = Env::default();
+        let (contract_id, client, _admin, _operator, token, token_admin, _rcpt) = setup(&env);
+        let from = Address::generate(&env);
+        let token_sac = StellarAssetClient::new(&env, &token);
+        let deal_id = String::from_str(&env, "deal-ev1");
+
+        env.mock_auths(&[MockAuth {
+            address: &token_admin,
+            invoke: &MockAuthInvoke {
+                contract: &token,
+                fn_name: "mint",
+                args: (from.clone(), 100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        token_sac.mint(&from, &100i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &from,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (from.clone(), deal_id.clone(), 100i128).into_val(&env),
+                sub_invokes: &[
+                    MockAuthInvoke {
+                        contract: &token,
+                        fn_name: "transfer",
+                        args: (from.clone(), contract_id.clone(), 100i128).into_val(&env),
+                        sub_invokes: &[],
+                    }
+                ],
+            },
+        }]);
+        client.try_deposit(&from, &deal_id, &100i128).unwrap().unwrap();
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        // data is (deal_id: String, from: Address, amount: i128, schema_version: u32)
+        let data: soroban_sdk::Vec<soroban_sdk::Val> = last.2.clone().try_into_val(&env).unwrap();
+        let schema_version: u32 = data.get(3).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(schema_version, 1u32, "deposit event must carry schema_version = 1");
+    }
+
+    #[test]
+    fn release_event_includes_schema_version_one() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::TryIntoVal;
+
+        let env = Env::default();
+        let (contract_id, client, _admin, operator, token, token_admin, _rcpt) = setup(&env);
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        let token_sac = StellarAssetClient::new(&env, &token);
+        let deal_id = String::from_str(&env, "deal-ev2");
+
+        env.mock_auths(&[MockAuth {
+            address: &token_admin,
+            invoke: &MockAuthInvoke {
+                contract: &token,
+                fn_name: "mint",
+                args: (from.clone(), 200i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        token_sac.mint(&from, &200i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &from,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (from.clone(), deal_id.clone(), 200i128).into_val(&env),
+                sub_invokes: &[
+                    MockAuthInvoke {
+                        contract: &token,
+                        fn_name: "transfer",
+                        args: (from.clone(), contract_id.clone(), 200i128).into_val(&env),
+                        sub_invokes: &[],
+                    }
+                ],
+            },
+        }]);
+        client.try_deposit(&from, &deal_id, &200i128).unwrap().unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &operator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "release",
+                args: (operator.clone(), deal_id.clone(), to.clone(), Symbol::new(&env, "manual_admin"), String::from_str(&env, "ev-ref")).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_release(&operator, &deal_id, &to, &Symbol::new(&env, "manual_admin"), &String::from_str(&env, "ev-ref")).unwrap().unwrap();
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        // data is (deal_id: String, to: Address, amount: i128, source: Symbol, tx_id: BytesN<32>, schema_version: u32)
+        let data: soroban_sdk::Vec<soroban_sdk::Val> = last.2.clone().try_into_val(&env).unwrap();
+        let schema_version: u32 = data.get(5).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(schema_version, 1u32, "release event must carry schema_version = 1");
     }
 }

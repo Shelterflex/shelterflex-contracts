@@ -262,7 +262,7 @@ impl RentPayments {
 
         env.events().publish(
             (Symbol::new(&env, "receipt_created"), deal_id),
-            (receipt_id, amount, payer_clone),
+            (receipt_id, amount, payer_clone, 1u32),
         );
 
         Ok(receipt)
@@ -1118,5 +1118,40 @@ mod test {
             },
         }]);
         client.create_receipt(&1u64, &1000, &payer);
+    }
+
+    // ============================================================================
+    // Event Schema Version Tests
+    // ============================================================================
+
+    #[test]
+    fn receipt_created_event_includes_schema_version_one() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::{IntoVal, TryIntoVal};
+
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let payer = Address::generate(&env);
+        let deal_id = 1u64;
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id, 5000i128, payer.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.create_receipt(&deal_id, &5000i128, &payer);
+
+        let events = env.events().all();
+        // The last event is receipt_created (init emits one event before)
+        let last = events.last().unwrap();
+
+        // data is (receipt_id: u64, amount: i128, payer: Address, schema_version: u32)
+        let data: soroban_sdk::Vec<soroban_sdk::Val> = last.2.clone().try_into_val(&env).unwrap();
+        let schema_version: u32 = data.get(3).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(schema_version, 1u32, "receipt_created event must carry schema_version = 1");
     }
 }
