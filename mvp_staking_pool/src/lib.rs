@@ -888,7 +888,9 @@ mod reward_math_invariants {
         let client = StakingPoolClient::new(env, &contract_id);
         let admin = Address::generate(env);
         let token_admin = Address::generate(env);
-        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
         client.init(&admin, &token);
         (client, admin, token)
     }
@@ -940,7 +942,10 @@ mod reward_math_invariants {
 
         let reward_a = client.claimable(&user_a);
         let reward_b = client.claimable(&user_b);
-        assert_eq!(reward_a, reward_b, "equal stakers must receive equal rewards");
+        assert_eq!(
+            reward_a, reward_b,
+            "equal stakers must receive equal rewards"
+        );
         assert_eq!(reward_a, 500i128);
     }
 
@@ -994,8 +999,14 @@ mod reward_math_invariants {
 
         // early: 1000 (sole) + 500 (split) = 1500
         // late:  0    (pre)  + 500 (split) = 500
-        assert_eq!(reward_early, 1_500i128, "early staker must earn pre-join rewards");
-        assert_eq!(reward_late, 500i128, "late staker must not earn pre-stake rewards");
+        assert_eq!(
+            reward_early, 1_500i128,
+            "early staker must earn pre-join rewards"
+        );
+        assert_eq!(
+            reward_late, 500i128,
+            "late staker must not earn pre-stake rewards"
+        );
     }
 
     // Invariant 5: claimable returns zero for a user who has never staked
@@ -1062,7 +1073,10 @@ mod reward_math_invariants {
         client.fund_rewards(&admin, &large);
 
         let reward = client.claimable(&user);
-        assert_eq!(reward, large, "large-amount sole staker must receive full reward");
+        assert_eq!(
+            reward, large,
+            "large-amount sole staker must receive full reward"
+        );
     }
 
     // Invariant 8: claim resets claimable to zero; double-claim yields nothing
