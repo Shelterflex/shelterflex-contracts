@@ -882,6 +882,7 @@ mod reward_math_invariants {
 
     use super::{StakingPool, StakingPoolClient};
     use soroban_sdk::{token::StellarAssetClient, Address, Env};
+    use soroban_sdk::testutils::Address as _;
 
     fn setup(env: &Env) -> (StakingPoolClient<'_>, Address, Address) {
         let contract_id = env.register(StakingPool, ());
