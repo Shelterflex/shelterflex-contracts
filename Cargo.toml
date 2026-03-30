@@ -8,6 +8,7 @@ members = [
   "staking_pool",
   "mvp_staking_pool",
   "whistleblower_rewards",
+  "deal_escrow",
   "contract_access",
 ]
 
