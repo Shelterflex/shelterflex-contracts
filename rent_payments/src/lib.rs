@@ -1,8 +1,9 @@
 #![no_std]
 
 use soroban_pausable::{Pausable, PausableError};
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, Symbol, Vec};
-
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, Symbol, Vec,
+};
 
 /// Deal ID type - using u64 for simplicity
 pub type DealId = u64;
@@ -182,7 +183,6 @@ impl RentPayments {
     pub fn version(env: Env) -> u32 {
         Self::contract_version(env)
     }
-
 
     /// Create a new receipt for a deal
     /// This function records a monthly payment receipt
@@ -402,7 +402,10 @@ impl Pausable for RentPayments {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")), ());
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
+            (),
+        );
         Ok(())
     }
 
@@ -413,7 +416,10 @@ impl Pausable for RentPayments {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")), ());
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")),
+            (),
+        );
         Ok(())
     }
 

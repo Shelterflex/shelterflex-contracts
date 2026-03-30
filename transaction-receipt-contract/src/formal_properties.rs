@@ -2,7 +2,7 @@
 mod formal_properties {
     use super::*;
     use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
-    use soroban_sdk::{Address, Env, IntoVal, BytesN};
+    use soroban_sdk::{Address, BytesN, Env, IntoVal};
 
     #[test]
     #[kani::proof]
@@ -12,9 +12,9 @@ mod formal_properties {
         let operator = Address::generate(&env);
         let contract_id = env.register(TransactionReceipt, ());
         let client = TransactionReceiptClient::new(&env, &contract_id);
-        
+
         client.init(&admin, &operator);
-        
+
         // Verification that receipts are stored and indexed correctly
     }
 }

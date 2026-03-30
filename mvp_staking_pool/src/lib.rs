@@ -309,7 +309,6 @@ impl StakingPool {
             .publish((Symbol::new(&env, "claim"), to.clone()), amount);
         amount
     }
-}
 
     // ── Upgrade governance (#392) ──────────────────────────────────────────────
 
@@ -475,7 +474,10 @@ impl Pausable for StakingPool {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")), ());
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
+            (),
+        );
         Ok(())
     }
 
@@ -486,13 +488,17 @@ impl Pausable for StakingPool {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")), ());
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")),
+            (),
+        );
         Ok(())
     }
 
     fn is_paused(env: Env) -> bool {
         is_paused(&env)
     }
+}
 
 #[cfg(test)]
 mod test {

@@ -16,7 +16,7 @@ use soroban_sdk::{
 };
 
 #[cfg(kani)]
-mod verification;
+pub mod formal_properties;
 
 /// Allowed external reference sources for transaction ID generation
 pub const ALLOWED_SOURCES: [&str; 8] = [

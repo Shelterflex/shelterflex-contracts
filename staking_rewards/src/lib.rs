@@ -1,15 +1,11 @@
 #![no_std]
-<<<<<<< HEAD
+use soroban_pausable::{Pausable, PausableError};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
 };
-=======
-use soroban_pausable::{Pausable, PausableError};
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
->>>>>>> db49032 (feat: implement Pausable trait across all core contracts (Task 1))
 
 #[cfg(kani)]
-mod verification;
+pub mod formal_properties;
 
 #[contracttype]
 #[derive(Clone)]
@@ -159,7 +155,6 @@ impl StakingRewards {
             .unwrap_or(false)
     }
 
-
     fn require_admin(env: &Env) -> Result<(), ContractError> {
         let admin = env
             .storage()
@@ -189,7 +184,11 @@ impl StakingRewards {
     }
 
     fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-        let paused = env.storage().instance().get::<_, bool>(&StorageKey::Paused).unwrap_or(false);
+        let paused = env
+            .storage()
+            .instance()
+            .get::<_, bool>(&StorageKey::Paused)
+            .unwrap_or(false);
         if paused {
             Err(ContractError::Paused)
         } else {

@@ -17,7 +17,7 @@ use soroban_sdk::{
 // Map is still used in ReceiptInput.metadata
 
 #[cfg(kani)]
-mod verification;
+pub mod formal_properties;
 
 #[contracttype]
 #[derive(Clone)]
@@ -516,7 +516,6 @@ impl StakingPool {
     pub fn total_staked(env: Env) -> i128 {
         get_total_staked(&env)
     }
-
 
     pub fn set_lock_period(env: Env, admin: Address, seconds: u64) -> Result<(), ContractError> {
         require_admin(&env, &admin)?;

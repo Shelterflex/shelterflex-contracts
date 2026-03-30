@@ -11,7 +11,6 @@ pub mod validation;
 #[cfg(test)]
 mod formal_properties;
 
-
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -233,7 +232,6 @@ impl Pausable for RentWallet {
         env.events().publish(
             (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
             (),
-
         );
         Ok(())
     }
@@ -247,7 +245,6 @@ impl Pausable for RentWallet {
         env.events().publish(
             (Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")),
             (),
-
         );
         Ok(())
     }
@@ -255,7 +252,10 @@ impl Pausable for RentWallet {
     fn is_paused(env: Env) -> bool {
         get_paused_state(&env)
     }
+}
 
+#[contractimpl]
+impl RentWallet {
     // ── Upgrade governance (#392) ─────────────────────────────────────────────
 
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
@@ -924,9 +924,38 @@ mod test {
     }
 
     #[test]
-<<<<<<< HEAD
     fn paused_contract_blocks_credit_and_debit() {
-=======
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: (admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_pause(&admin).unwrap().unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (admin.clone(), user.clone(), 10i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_credit(&admin, &user, &10i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::Paused);
+    }
+
+    #[test]
     fn non_admin_cannot_pause() {
         let env = Env::default();
         let (contract_id, client, _admin, _user, non_admin) = setup(&env);
@@ -977,7 +1006,6 @@ mod test {
 
     #[test]
     fn credit_fails_when_paused() {
->>>>>>> db49032 (feat: implement Pausable trait across all core contracts (Task 1))
         let env = Env::default();
         let (contract_id, client, admin, user, _non_admin) = setup(&env);
 
