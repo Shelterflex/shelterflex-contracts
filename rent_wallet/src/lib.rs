@@ -7,6 +7,7 @@ use soroban_sdk::{
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
 pub mod validation;
+pub mod access_control;
 
 #[cfg(kani)]
 mod formal_properties;
@@ -24,6 +25,7 @@ pub enum DataKey {
     UpgradeDelay,
     PendingUpgradeHash,
     PendingUpgradeAt,
+    PendingUpgradeVersion,
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -53,6 +55,8 @@ pub enum ContractError {
     InvalidStringChar = 13,
     /// Two addresses that must differ were identical
     SameAddress = 14,
+    /// Upgrade version must be strictly greater than current version
+    InvalidUpgradeVersion = 15,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -81,15 +85,6 @@ fn put_balance(env: &Env, user: &Address, amount: i128) {
     env.storage()
         .persistent()
         .set(&DataKey::Balance(user.clone()), &amount);
-}
-
-fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
-    let admin = get_admin(env);
-    caller.require_auth();
-    if caller != &admin {
-        return Err(ContractError::NotAuthorized);
-    }
-    Ok(())
 }
 
 fn get_paused_state(env: &Env) -> bool {
@@ -147,7 +142,8 @@ impl RentWallet {
         user: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "credit")?;
         require_not_paused(&env)?;
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -174,7 +170,8 @@ impl RentWallet {
         user: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "debit")?;
         require_not_paused(&env)?;
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -203,7 +200,8 @@ impl RentWallet {
     }
 
     pub fn set_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_admin")?;
 
         let old_admin = get_admin(&env);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
@@ -224,7 +222,8 @@ impl RentWallet {
 #[contractimpl]
 impl Pausable for RentWallet {
     fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
-        if require_admin(&env, &admin).is_err() {
+        let current_admin = get_admin(&env);
+        if access_control::require_admin_permission(&env, &current_admin, &admin, "pause").is_err() {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -237,7 +236,8 @@ impl Pausable for RentWallet {
     }
 
     fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
-        if require_admin(&env, &admin).is_err() {
+        let current_admin = get_admin(&env);
+        if access_control::require_admin_permission(&env, &current_admin, &admin, "unpause").is_err() {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -259,7 +259,8 @@ impl RentWallet {
     // ── Upgrade governance (#392) ─────────────────────────────────────────────
 
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_guardian")?;
         env.storage().instance().set(&DataKey::Guardian, &guardian);
         env.events().publish(
             (
@@ -276,7 +277,8 @@ impl RentWallet {
         admin: Address,
         delay_seconds: u64,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_upgrade_delay")?;
         env.storage()
             .instance()
             .set(&DataKey::UpgradeDelay, &delay_seconds);
@@ -296,8 +298,16 @@ impl RentWallet {
         env: Env,
         admin: Address,
         new_wasm_hash: BytesN<32>,
+        new_version: u32,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "propose_upgrade")?;
+        
+        let current_version = RentWallet::contract_version(env.clone());
+        if new_version <= current_version {
+            return Err(ContractError::InvalidUpgradeVersion);
+        }
+
         if env.storage().instance().has(&DataKey::PendingUpgradeHash) {
             return Err(ContractError::UpgradeAlreadyPending);
         }
@@ -308,13 +318,16 @@ impl RentWallet {
         env.storage()
             .instance()
             .set(&DataKey::PendingUpgradeAt, &now);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeVersion, &new_version);
         // #389: upgrade announcement event
         env.events().publish(
             (
                 Symbol::new(&env, "rent_wallet"),
                 Symbol::new(&env, "propose_upgrade"),
             ),
-            (new_wasm_hash, now),
+            (new_wasm_hash, new_version, now),
         );
         Ok(())
     }
@@ -326,7 +339,8 @@ impl RentWallet {
         admin: Address,
         new_wasm_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "execute_upgrade")?;
         let pending: BytesN<32> = env
             .storage()
             .instance()
@@ -340,6 +354,17 @@ impl RentWallet {
             .instance()
             .get(&DataKey::PendingUpgradeAt)
             .unwrap_or(0);
+        let proposed_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeVersion)
+            .unwrap_or(0);
+        
+        let current_version = RentWallet::contract_version(env.clone());
+        if proposed_version <= current_version {
+            return Err(ContractError::InvalidUpgradeVersion);
+        }
+
         let delay: u64 = env
             .storage()
             .instance()
@@ -360,12 +385,17 @@ impl RentWallet {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.storage().instance().remove(&DataKey::PendingUpgradeVersion);
+        
+        // Update version before WASM is swapped
+        env.storage().instance().set(&DataKey::ContractVersion, &proposed_version);
+
         env.events().publish(
             (
                 Symbol::new(&env, "rent_wallet"),
                 Symbol::new(&env, "execute_upgrade"),
             ),
-            new_wasm_hash.clone(),
+            (new_wasm_hash.clone(), proposed_version),
         );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
@@ -377,8 +407,16 @@ impl RentWallet {
         env: Env,
         admin: Address,
         new_wasm_hash: BytesN<32>,
+        new_version: u32,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "emergency_upgrade")?;
+        
+        let current_version = RentWallet::contract_version(env.clone());
+        if new_version <= current_version {
+            return Err(ContractError::InvalidUpgradeVersion);
+        }
+
         // Multi-sig: require guardian if configured
         if let Some(guardian) = env
             .storage()
@@ -392,20 +430,25 @@ impl RentWallet {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.storage().instance().remove(&DataKey::PendingUpgradeVersion);
+        
+        env.storage().instance().set(&DataKey::ContractVersion, &new_version);
+
         // Enhanced logging for emergency path
         env.events().publish(
             (
                 Symbol::new(&env, "rent_wallet"),
                 Symbol::new(&env, "emergency_upgrade"),
             ),
-            (admin, new_wasm_hash.clone(), env.ledger().timestamp()),
+            (admin, new_wasm_hash.clone(), new_version, env.ledger().timestamp()),
         );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
 
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "cancel_upgrade")?;
         let hash: BytesN<32> = env
             .storage()
             .instance()
@@ -415,6 +458,7 @@ impl RentWallet {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.storage().instance().remove(&DataKey::PendingUpgradeVersion);
         env.events().publish(
             (
                 Symbol::new(&env, "rent_wallet"),
