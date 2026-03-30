@@ -488,7 +488,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "staking_pool"
+                "symbol": "Pausable"
               },
               {
                 "symbol": "unpause"

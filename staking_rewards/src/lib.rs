@@ -1,7 +1,15 @@
 #![no_std]
+<<<<<<< HEAD
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
 };
+=======
+use soroban_pausable::{Pausable, PausableError};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
+>>>>>>> db49032 (feat: implement Pausable trait across all core contracts (Task 1))
+
+#[cfg(kani)]
+mod verification;
 
 #[contracttype]
 #[derive(Clone)]
@@ -41,6 +49,7 @@ const REWARD_INDEX: &str = "REWARD_IDX";
 const TOTAL_STAKED: &str = "TOTAL_STK";
 const SCALE: i128 = 1_000_000_000;
 
+pub mod formal_properties;
 #[contract]
 pub struct StakingRewards;
 
@@ -150,52 +159,6 @@ impl StakingRewards {
             .unwrap_or(false)
     }
 
-    pub fn pause(env: Env) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&StorageKey::Admin)
-            .expect("admin not set");
-        env.storage().instance().set(&StorageKey::Paused, &true);
-
-        env.events().publish(
-            (
-                Symbol::new(&env, "staking_rewards"),
-                Symbol::new(&env, "pause"),
-            ),
-            admin,
-        );
-
-        Ok(())
-    }
-
-    pub fn unpause(env: Env) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&StorageKey::Admin)
-            .expect("admin not set");
-        env.storage().instance().set(&StorageKey::Paused, &false);
-
-        env.events().publish(
-            (
-                Symbol::new(&env, "staking_rewards"),
-                Symbol::new(&env, "unpause"),
-            ),
-            admin,
-        );
-
-        Ok(())
-    }
-
-    pub fn is_paused(env: &Env) -> bool {
-        env.storage()
-            .instance()
-            .get::<_, bool>(&StorageKey::Paused)
-            .unwrap_or(false)
-    }
 
     fn require_admin(env: &Env) -> Result<(), ContractError> {
         let admin = env
@@ -226,7 +189,8 @@ impl StakingRewards {
     }
 
     fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-        if Self::is_paused(env) {
+        let paused = env.storage().instance().get::<_, bool>(&StorageKey::Paused).unwrap_or(false);
+        if paused {
             Err(ContractError::Paused)
         } else {
             Ok(())
@@ -587,6 +551,40 @@ impl StakingRewards {
             admin.clone(),
         );
         Ok(())
+    }
+}
+
+#[contractimpl]
+impl Pausable for StakingRewards {
+    fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
+        if StakingRewards::require_admin(&env).is_err() {
+            return Err(PausableError::NotAuthorized);
+        }
+        env.storage().instance().set(&StorageKey::Paused, &true);
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
+            (),
+        );
+        Ok(())
+    }
+
+    fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
+        if StakingRewards::require_admin(&env).is_err() {
+            return Err(PausableError::NotAuthorized);
+        }
+        env.storage().instance().set(&StorageKey::Paused, &false);
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")),
+            (),
+        );
+        Ok(())
+    }
+
+    fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&StorageKey::Paused)
+            .unwrap_or(false)
     }
 }
 

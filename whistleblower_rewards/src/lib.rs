@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use soroban_pausable::{Pausable, PausableError};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, String,
     Symbol,
@@ -267,7 +268,6 @@ impl WhistleblowerRewards {
     pub fn claimable(env: Env, whistleblower: Address, listing_id: String) -> i128 {
         claimable_get(&env, &whistleblower, &listing_id)
     }
-
     pub fn set_operator(
         env: Env,
         admin: Address,
@@ -287,34 +287,35 @@ impl WhistleblowerRewards {
         );
         Ok(())
     }
+}
 
-    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+#[contractimpl]
+impl Pausable for WhistleblowerRewards {
+    fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
+        if require_admin(&env, &admin).is_err() {
+            return Err(PausableError::NotAuthorized);
+        }
         env.storage().instance().set(&StorageKey::Paused, &true);
         env.events().publish(
-            (
-                Symbol::new(&env, "whistleblower_rewards"),
-                Symbol::new(&env, "pause"),
-            ),
-            admin.clone(),
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
+            (),
         );
         Ok(())
     }
 
-    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+    fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
+        if require_admin(&env, &admin).is_err() {
+            return Err(PausableError::NotAuthorized);
+        }
         env.storage().instance().set(&StorageKey::Paused, &false);
         env.events().publish(
-            (
-                Symbol::new(&env, "whistleblower_rewards"),
-                Symbol::new(&env, "unpause"),
-            ),
-            admin.clone(),
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")),
+            (),
         );
         Ok(())
     }
 
-    pub fn is_paused(env: Env) -> bool {
+    fn is_paused(env: Env) -> bool {
         get_paused(&env)
     }
 

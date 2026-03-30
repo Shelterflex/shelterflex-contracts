@@ -1,8 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, Symbol, Vec,
-};
+use soroban_pausable::{Pausable, PausableError};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, Symbol, Vec};
+
 
 /// Deal ID type - using u64 for simplicity
 pub type DealId = u64;
@@ -80,18 +80,6 @@ fn require_not_paused(env: &Env) {
     if is_paused(env) {
         panic!("contract is paused");
     }
-}
-
-fn get_admin(env: &Env) -> Address {
-    env.storage()
-        .instance()
-        .get::<_, Address>(&DataKey::Admin)
-        .expect("admin not set")
-}
-
-fn require_admin(env: &Env) {
-    let admin = get_admin(env);
-    admin.require_auth();
 }
 
 fn get_receipts(env: &Env, deal_id: DealId) -> Vec<Receipt> {
@@ -195,34 +183,6 @@ impl RentPayments {
         Self::contract_version(env)
     }
 
-    pub fn pause(env: Env) {
-        require_admin(&env);
-        env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish(
-            (
-                Symbol::new(&env, "rent_payments"),
-                Symbol::new(&env, "paused"),
-            ),
-            (),
-        );
-    }
-
-    pub fn unpause(env: Env) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish(
-            (
-                Symbol::new(&env, "rent_payments"),
-                Symbol::new(&env, "unpaused"),
-            ),
-            (),
-        );
-    }
-
-    pub fn is_paused(env: Env) -> bool {
-        is_paused(&env)
-    }
 
     /// Create a new receipt for a deal
     /// This function records a monthly payment receipt
@@ -430,6 +390,35 @@ impl RentPayments {
     /// Get the total number of receipts for a deal
     pub fn receipt_count(env: Env, deal_id: DealId) -> u64 {
         get_receipt_count(&env, deal_id)
+    }
+}
+
+#[contractimpl]
+impl Pausable for RentPayments {
+    fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
+        admin.require_auth();
+        let stored = get_admin(&env);
+        if admin != stored {
+            return Err(PausableError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")), ());
+        Ok(())
+    }
+
+    fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
+        admin.require_auth();
+        let stored = get_admin(&env);
+        if admin != stored {
+            return Err(PausableError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")), ());
+        Ok(())
+    }
+
+    fn is_paused(env: Env) -> bool {
+        is_paused(&env)
     }
 }
 

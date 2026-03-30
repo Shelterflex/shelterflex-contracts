@@ -149,6 +149,21 @@
                         "key": {
                           "vec": [
                             {
+<<<<<<< HEAD
+=======
+                              "symbol": "DealBalances"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": []
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+>>>>>>> db49032 (feat: implement Pausable trait across all core contracts (Task 1))
                               "symbol": "Operator"
                             }
                           ]
