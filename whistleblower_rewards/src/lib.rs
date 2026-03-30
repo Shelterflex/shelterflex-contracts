@@ -292,7 +292,6 @@ impl WhistleblowerRewards {
 #[contractimpl]
 impl Pausable for WhistleblowerRewards {
     fn pause(env: Env, _admin: Address) -> Result<(), PausableError> {
-        _admin.require_auth();
         if require_admin(&env, &_admin).is_err() {
             return Err(PausableError::NotAuthorized);
         }
@@ -305,7 +304,6 @@ impl Pausable for WhistleblowerRewards {
     }
 
     fn unpause(env: Env, _admin: Address) -> Result<(), PausableError> {
-        _admin.require_auth();
         if require_admin(&env, &_admin).is_err() {
             return Err(PausableError::NotAuthorized);
         }
