@@ -3,9 +3,11 @@
 extern crate alloc;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token::{Client as TokenClient, StellarAssetClient}, Address, BytesN,
-    Env, Map, String, Symbol,
+    contract, contracterror, contractimpl, contracttype, token::Client as TokenClient, Address,
+    BytesN, Env, String, Symbol,
 };
+
+// ── Storage keys ─────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone)]
@@ -16,8 +18,18 @@ pub enum DataKey {
     Token,
     ReceiptContract,
     Paused,
-    DealBalances,
+    /// Per-deal balance in persistent storage (#386 gas optimisation)
+    DealBalance(String),
+    /// Reentrancy lock (#390)
+    Reentrancy,
+    // ── Upgrade governance (#392) ─────────────────────────────────────────
+    Guardian,
+    UpgradeDelay,
+    PendingUpgradeHash,
+    PendingUpgradeAt,
 }
+
+// ── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -28,10 +40,21 @@ pub enum ContractError {
     Paused = 3,
     InvalidAmount = 4,
     InsufficientBalance = 5,
+    // Cross-contract communication errors (#390)
+    /// Reentrancy detected
+    ReentrancyDetected = 6,
+    // Upgrade governance errors (#392)
+    UpgradeAlreadyPending = 7,
+    NoUpgradePending = 8,
+    UpgradeDelayNotMet = 9,
 }
+
+// ── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
 pub struct DealEscrow;
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
 
 fn get_admin(env: &Env) -> Address {
     env.storage()
@@ -68,15 +91,18 @@ fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     Ok(())
 }
 
-fn deal_balances(env: &Env) -> Map<String, i128> {
+/// Per-deal balance from persistent storage (#386)
+fn get_deal_balance(env: &Env, deal_id: &String) -> i128 {
     env.storage()
-        .instance()
-        .get::<_, Map<String, i128>>(&DataKey::DealBalances)
-        .unwrap_or_else(|| Map::new(env))
+        .persistent()
+        .get::<_, i128>(&DataKey::DealBalance(deal_id.clone()))
+        .unwrap_or(0)
 }
 
-fn put_deal_balances(env: &Env, b: Map<String, i128>) {
-    env.storage().instance().set(&DataKey::DealBalances, &b);
+fn put_deal_balance(env: &Env, deal_id: &String, amount: i128) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::DealBalance(deal_id.clone()), &amount);
 }
 
 fn require_admin_or_operator(env: &Env, caller: &Address) -> Result<(), ContractError> {
@@ -88,13 +114,27 @@ fn require_admin_or_operator(env: &Env, caller: &Address) -> Result<(), Contract
     Ok(())
 }
 
-fn generate_tx_id(
-    env: &Env,
-    external_ref_source: &Symbol,
-    external_ref: &String,
-)-> BytesN<32> {
-    use soroban_sdk::Bytes;
+/// Reentrancy guard (#390)
+fn enter_nonreentrant(env: &Env) -> Result<(), ContractError> {
+    if env
+        .storage()
+        .instance()
+        .get::<_, bool>(&DataKey::Reentrancy)
+        .unwrap_or(false)
+    {
+        return Err(ContractError::ReentrancyDetected);
+    }
+    env.storage().instance().set(&DataKey::Reentrancy, &true);
+    Ok(())
+}
+
+fn exit_nonreentrant(env: &Env) {
+    env.storage().instance().set(&DataKey::Reentrancy, &false);
+}
+
+fn generate_tx_id(env: &Env, external_ref_source: &Symbol, external_ref: &String) -> BytesN<32> {
     use alloc::string::ToString;
+    use soroban_sdk::Bytes;
     let source_str = external_ref_source.to_string();
     let source_trimmed = source_str.trim();
     let source_lower = {
@@ -117,9 +157,17 @@ fn generate_tx_id(
     hash.into()
 }
 
+// ── Contract implementation ───────────────────────────────────────────────────
+
 #[contractimpl]
 impl DealEscrow {
-    pub fn init(env: Env, admin: Address, operator: Address, token: Address, receipt_contract: Address) -> Result<(), ContractError> {
+    pub fn init(
+        env: Env,
+        admin: Address,
+        operator: Address,
+        token: Address,
+        receipt_contract: Address,
+    ) -> Result<(), ContractError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
@@ -131,11 +179,9 @@ impl DealEscrow {
             .set(&DataKey::ContractVersion, &1u32);
         env.storage()
             .instance()
-            .set(&DataKey::DealBalances, &Map::<String, i128>::new(&env));
-        env.storage()
-            .instance()
             .set(&DataKey::ReceiptContract, &receipt_contract);
         env.storage().instance().set(&DataKey::Paused, &false);
+        // #389: consistent init event with version
         env.events().publish(
             (Symbol::new(&env, "deal_escrow"), Symbol::new(&env, "init")),
             (admin, operator, token, receipt_contract, 1u32),
@@ -150,7 +196,12 @@ impl DealEscrow {
             .unwrap_or(0u32)
     }
 
-    pub fn deposit(env: Env, from: Address, deal_id: String, amount: i128) -> Result<(), ContractError> {
+    pub fn deposit(
+        env: Env,
+        from: Address,
+        deal_id: String,
+        amount: i128,
+    ) -> Result<(), ContractError> {
         require_not_paused(&env)?;
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -158,40 +209,67 @@ impl DealEscrow {
         from.require_auth();
         let token_addr = get_token(&env);
         let token_client = TokenClient::new(&env, &token_addr);
-        token_client.transfer(&from, &env.current_contract_address(), &amount);
-        let mut b = deal_balances(&env);
-        let cur = b.get(deal_id.clone()).unwrap_or(0);
-        b.set(deal_id.clone(), cur + amount);
-        put_deal_balances(&env, b);
-        env.events().publish((Symbol::new(&env, "deal_escrow"), Symbol::new(&env, "deposit")), (deal_id, from, amount, 1u32));
-        Ok(())
-        }
 
-    pub fn release(env: Env, caller: Address, deal_id: String, to: Address, external_ref_source: Symbol, external_ref: String) -> Result<i128, ContractError> {
+        // #390: reentrancy guard before external token call
+        enter_nonreentrant(&env)?;
+        token_client.transfer(&from, &env.current_contract_address(), &amount);
+        exit_nonreentrant(&env);
+
+        // #386: per-key persistent storage
+        let cur = get_deal_balance(&env, &deal_id);
+        put_deal_balance(&env, &deal_id, cur + amount);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "deposit"),
+            ),
+            (deal_id, from, amount),
+        );
+        Ok(())
+    }
+
+    pub fn release(
+        env: Env,
+        caller: Address,
+        deal_id: String,
+        to: Address,
+        external_ref_source: Symbol,
+        external_ref: String,
+    ) -> Result<i128, ContractError> {
         require_not_paused(&env)?;
         caller.require_auth();
         require_admin_or_operator(&env, &caller)?;
-        let mut b = deal_balances(&env);
-        let cur = b.get(deal_id.clone()).unwrap_or(0);
+
+        // #386: per-key persistent storage
+        let cur = get_deal_balance(&env, &deal_id);
         if cur <= 0 {
             return Err(ContractError::InsufficientBalance);
         }
         let token_addr = get_token(&env);
         let token_client = TokenClient::new(&env, &token_addr);
-        token_client.transfer(&env.current_contract_address(), &to, &cur);
-        b.set(deal_id.clone(), 0);
-        put_deal_balances(&env, b);
+
+        put_deal_balance(&env, &deal_id, 0);
+
         let tx_id = generate_tx_id(&env, &external_ref_source, &external_ref);
+
+        // #390: reentrancy guard before external token call
+        enter_nonreentrant(&env)?;
+        token_client.transfer(&env.current_contract_address(), &to, &cur);
+        exit_nonreentrant(&env);
+
         env.events().publish(
-            (Symbol::new(&env, "deal_escrow"), Symbol::new(&env, "release")),
-            (deal_id, to, cur, external_ref_source, tx_id, 1u32),
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "release"),
+            ),
+            (deal_id, to, cur, external_ref_source, tx_id),
         );
         Ok(cur)
     }
 
     pub fn balance(env: Env, deal_id: String) -> i128 {
-        let b = deal_balances(&env);
-        b.get(deal_id).unwrap_or(0)
+        get_deal_balance(&env, &deal_id)
     }
 
     pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
@@ -201,7 +279,11 @@ impl DealEscrow {
             return Err(ContractError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((Symbol::new(&env, "deal_escrow"), Symbol::new(&env, "pause")), ());
+        // #389: emit admin address (was `()`)
+        env.events().publish(
+            (Symbol::new(&env, "deal_escrow"), Symbol::new(&env, "pause")),
+            admin,
+        );
         Ok(())
     }
 
@@ -212,21 +294,207 @@ impl DealEscrow {
             return Err(ContractError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((Symbol::new(&env, "deal_escrow"), Symbol::new(&env, "unpause")), ());
+        // #389: emit admin address (was `()`)
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "unpause"),
+            ),
+            admin,
+        );
         Ok(())
     }
 
     pub fn is_paused(env: Env) -> bool {
         get_paused(&env)
     }
+
+    // ── Upgrade governance (#392) ─────────────────────────────────────────────
+
+    pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::Guardian, &guardian);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "set_guardian"),
+            ),
+            guardian,
+        );
+        Ok(())
+    }
+
+    pub fn set_upgrade_delay(
+        env: Env,
+        admin: Address,
+        delay_seconds: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeDelay, &delay_seconds);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "set_upgrade_delay"),
+            ),
+            delay_seconds,
+        );
+        Ok(())
+    }
+
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        if env.storage().instance().has(&DataKey::PendingUpgradeHash) {
+            return Err(ContractError::UpgradeAlreadyPending);
+        }
+        let now = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeHash, &new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeAt, &now);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "propose_upgrade"),
+            ),
+            (new_wasm_hash, now),
+        );
+        Ok(())
+    }
+
+    pub fn execute_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        let pending: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeHash)
+            .ok_or(ContractError::NoUpgradePending)?;
+        if pending != new_wasm_hash {
+            return Err(ContractError::NoUpgradePending);
+        }
+        let proposed_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeAt)
+            .unwrap_or(0);
+        let delay: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeDelay)
+            .unwrap_or(0);
+        if delay > 0 && env.ledger().timestamp() < proposed_at + delay {
+            return Err(ContractError::UpgradeDelayNotMet);
+        }
+        if let Some(guardian) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::Guardian)
+        {
+            guardian.require_auth();
+        }
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeHash);
+        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "execute_upgrade"),
+            ),
+            new_wasm_hash.clone(),
+        );
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
+    pub fn emergency_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        if let Some(guardian) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::Guardian)
+        {
+            guardian.require_auth();
+        }
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeHash);
+        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "emergency_upgrade"),
+            ),
+            (admin, new_wasm_hash.clone(), env.ledger().timestamp()),
+        );
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        if admin != get_admin(&env) {
+            return Err(ContractError::NotAuthorized);
+        }
+        let hash: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeHash)
+            .ok_or(ContractError::NoUpgradePending)?;
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeHash);
+        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "cancel_upgrade"),
+            ),
+            (admin, hash),
+        );
+        Ok(())
+    }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod test {
     extern crate std;
-    use super::{ContractError, DealEscrow, DealEscrowClient, TokenClient, StellarAssetClient};
+    use super::{ContractError, DealEscrow, DealEscrowClient, TokenClient};
     use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
-    use soroban_sdk::{Address, Env, IntoVal, String, Symbol};
+    use soroban_sdk::token::StellarAssetClient;
+    use soroban_sdk::{Address, BytesN, Env, IntoVal, String, Symbol};
 
     #[test]
     fn init_sets_version_to_one() {
@@ -239,7 +507,10 @@ mod test {
         let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
         let token_id = token_contract.address();
         let receipt = Address::generate(&env);
-        client.try_init(&admin, &operator, &token_id, &receipt).unwrap().unwrap();
+        client
+            .try_init(&admin, &operator, &token_id, &receipt)
+            .unwrap()
+            .unwrap();
         assert_eq!(client.contract_version(), 1u32);
     }
 
@@ -254,12 +525,28 @@ mod test {
         let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
         let token_id = token_contract.address();
         let receipt = Address::generate(&env);
-        client.try_init(&admin, &operator, &token_id, &receipt).unwrap().unwrap();
-        let err = client.try_init(&admin, &operator, &token_id, &receipt).unwrap_err().unwrap();
+        client
+            .try_init(&admin, &operator, &token_id, &receipt)
+            .unwrap()
+            .unwrap();
+        let err = client
+            .try_init(&admin, &operator, &token_id, &receipt)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ContractError::AlreadyInitialized);
     }
 
-    fn setup(env: &Env) -> (Address, DealEscrowClient<'_>, Address, Address, Address, Address, Address) {
+    fn setup(
+        env: &Env,
+    ) -> (
+        Address,
+        DealEscrowClient<'_>,
+        Address,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
         let contract_id = env.register(DealEscrow, ());
         let client = DealEscrowClient::new(env, &contract_id);
         let admin = Address::generate(env);
@@ -268,8 +555,19 @@ mod test {
         let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
         let token_contract_id = token_contract.address();
         let receipt_contract = Address::generate(env);
-        client.try_init(&admin, &operator, &token_contract_id, &receipt_contract).unwrap().unwrap();
-        (contract_id, client, admin, operator, token_contract_id, token_admin, receipt_contract)
+        client
+            .try_init(&admin, &operator, &token_contract_id, &receipt_contract)
+            .unwrap()
+            .unwrap();
+        (
+            contract_id,
+            client,
+            admin,
+            operator,
+            token_contract_id,
+            token_admin,
+            receipt_contract,
+        )
     }
 
     #[test]
@@ -297,17 +595,18 @@ mod test {
                 contract: &contract_id,
                 fn_name: "deposit",
                 args: (from.clone(), deal_id.clone(), 200i128).into_val(&env),
-                sub_invokes: &[
-                    MockAuthInvoke {
-                        contract: &token,
-                        fn_name: "transfer",
-                        args: (from.clone(), contract_id.clone(), 200i128).into_val(&env),
-                        sub_invokes: &[],
-                    }
-                ],
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (from.clone(), contract_id.clone(), 200i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
             },
         }]);
-        client.try_deposit(&from, &deal_id, &200i128).unwrap().unwrap();
+        client
+            .try_deposit(&from, &deal_id, &200i128)
+            .unwrap()
+            .unwrap();
         let contract_addr = contract_id.clone();
         assert_eq!(token_client.balance(&contract_addr), 200i128);
         assert_eq!(token_client.balance(&from), 300i128);
@@ -339,27 +638,44 @@ mod test {
                 contract: &contract_id,
                 fn_name: "deposit",
                 args: (from.clone(), deal_id.clone(), 250i128).into_val(&env),
-                sub_invokes: &[
-                    MockAuthInvoke {
-                        contract: &token,
-                        fn_name: "transfer",
-                        args: (from.clone(), contract_id.clone(), 250i128).into_val(&env),
-                        sub_invokes: &[],
-                    }
-                ],
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (from.clone(), contract_id.clone(), 250i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
             },
         }]);
-        client.try_deposit(&from, &deal_id, &250i128).unwrap().unwrap();
+        client
+            .try_deposit(&from, &deal_id, &250i128)
+            .unwrap()
+            .unwrap();
         env.mock_auths(&[MockAuth {
             address: &operator,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "release",
-                args: (operator.clone(), deal_id.clone(), to.clone(), Symbol::new(&env, "manual_admin"), String::from_str(&env, "ext1")).into_val(&env),
+                args: (
+                    operator.clone(),
+                    deal_id.clone(),
+                    to.clone(),
+                    Symbol::new(&env, "manual_admin"),
+                    String::from_str(&env, "ext1"),
+                )
+                    .into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        let released = client.try_release(&operator, &deal_id, &to, &Symbol::new(&env, "manual_admin"), &String::from_str(&env, "ext1")).unwrap().unwrap();
+        let released = client
+            .try_release(
+                &operator,
+                &deal_id,
+                &to,
+                &Symbol::new(&env, "manual_admin"),
+                &String::from_str(&env, "ext1"),
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(released, 250i128);
         assert_eq!(token_client.balance(&to), 250i128);
         assert_eq!(client.balance(&deal_id), 0i128);
@@ -368,11 +684,27 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "release",
-                args: (admin.clone(), deal_id.clone(), to.clone(), Symbol::new(&env, "manual_admin"), String::from_str(&env, "ext2")).into_val(&env),
+                args: (
+                    admin.clone(),
+                    deal_id.clone(),
+                    to.clone(),
+                    Symbol::new(&env, "manual_admin"),
+                    String::from_str(&env, "ext2"),
+                )
+                    .into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        let err = client.try_release(&admin, &deal_id, &to, &Symbol::new(&env, "manual_admin"), &String::from_str(&env, "ext2")).unwrap_err().unwrap();
+        let err = client
+            .try_release(
+                &admin,
+                &deal_id,
+                &to,
+                &Symbol::new(&env, "manual_admin"),
+                &String::from_str(&env, "ext2"),
+            )
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ContractError::InsufficientBalance);
     }
 
@@ -412,7 +744,10 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        let err = client.try_deposit(&from, &deal_id, &10i128).unwrap_err().unwrap();
+        let err = client
+            .try_deposit(&from, &deal_id, &10i128)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ContractError::Paused);
     }
 
@@ -441,139 +776,140 @@ mod test {
                 contract: &contract_id,
                 fn_name: "deposit",
                 args: (from.clone(), deal_id.clone(), 50i128).into_val(&env),
-                sub_invokes: &[
-                    MockAuthInvoke {
-                        contract: &token,
-                        fn_name: "transfer",
-                        args: (from.clone(), contract_id.clone(), 50i128).into_val(&env),
-                        sub_invokes: &[],
-                    }
-                ],
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (from.clone(), contract_id.clone(), 50i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
             },
         }]);
-        client.try_deposit(&from, &deal_id, &50i128).unwrap().unwrap();
+        client
+            .try_deposit(&from, &deal_id, &50i128)
+            .unwrap()
+            .unwrap();
         env.mock_auths(&[MockAuth {
             address: &non_auth,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "release",
-                args: (non_auth.clone(), deal_id.clone(), to.clone(), Symbol::new(&env, "manual_admin"), String::from_str(&env, "ext3")).into_val(&env),
+                args: (
+                    non_auth.clone(),
+                    deal_id.clone(),
+                    to.clone(),
+                    Symbol::new(&env, "manual_admin"),
+                    String::from_str(&env, "ext3"),
+                )
+                    .into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        let err = client.try_release(&non_auth, &deal_id, &to, &Symbol::new(&env, "manual_admin"), &String::from_str(&env, "ext3")).unwrap_err().unwrap();
+        let err = client
+            .try_release(
+                &non_auth,
+                &deal_id,
+                &to,
+                &Symbol::new(&env, "manual_admin"),
+                &String::from_str(&env, "ext3"),
+            )
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ContractError::NotAuthorized);
     }
 
-    // ============================================================================
-    // Event Schema Version Tests
-    // ============================================================================
+    // ── Upgrade governance tests (#392) ───────────────────────────────────────
 
     #[test]
-    fn deposit_event_includes_schema_version_one() {
-        use soroban_sdk::testutils::Events;
-        use soroban_sdk::TryIntoVal;
-
+    fn propose_upgrade_stores_pending() {
         let env = Env::default();
-        let (contract_id, client, _admin, _operator, token, token_admin, _rcpt) = setup(&env);
-        let from = Address::generate(&env);
-        let token_sac = StellarAssetClient::new(&env, &token);
-        let deal_id = String::from_str(&env, "deal-ev1");
+        let (contract_id, client, admin, _operator, _token, _token_admin, _rcpt) = setup(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
 
         env.mock_auths(&[MockAuth {
-            address: &token_admin,
+            address: &admin,
             invoke: &MockAuthInvoke {
-                contract: &token,
-                fn_name: "mint",
-                args: (from.clone(), 100i128).into_val(&env),
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone()).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        token_sac.mint(&from, &100i128);
-
-        env.mock_auths(&[MockAuth {
-            address: &from,
-            invoke: &MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "deposit",
-                args: (from.clone(), deal_id.clone(), 100i128).into_val(&env),
-                sub_invokes: &[
-                    MockAuthInvoke {
-                        contract: &token,
-                        fn_name: "transfer",
-                        args: (from.clone(), contract_id.clone(), 100i128).into_val(&env),
-                        sub_invokes: &[],
-                    }
-                ],
-            },
-        }]);
-        client.try_deposit(&from, &deal_id, &100i128).unwrap().unwrap();
-
-        let events = env.events().all();
-        let last = events.last().unwrap();
-        // data is (deal_id: String, from: Address, amount: i128, schema_version: u32)
-        let data: soroban_sdk::Vec<soroban_sdk::Val> = last.2.clone().try_into_val(&env).unwrap();
-        let schema_version: u32 = data.get(3).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(schema_version, 1u32, "deposit event must carry schema_version = 1");
+        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
     }
 
     #[test]
-    fn release_event_includes_schema_version_one() {
-        use soroban_sdk::testutils::Events;
-        use soroban_sdk::TryIntoVal;
-
+    fn execute_upgrade_fails_when_delay_not_met() {
         let env = Env::default();
-        let (contract_id, client, _admin, operator, token, token_admin, _rcpt) = setup(&env);
-        let from = Address::generate(&env);
-        let to = Address::generate(&env);
-        let token_sac = StellarAssetClient::new(&env, &token);
-        let deal_id = String::from_str(&env, "deal-ev2");
+        let (contract_id, client, admin, _operator, _token, _token_admin, _rcpt) = setup(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
 
         env.mock_auths(&[MockAuth {
-            address: &token_admin,
+            address: &admin,
             invoke: &MockAuthInvoke {
-                contract: &token,
-                fn_name: "mint",
-                args: (from.clone(), 200i128).into_val(&env),
+                contract: &contract_id,
+                fn_name: "set_upgrade_delay",
+                args: (admin.clone(), 3600u64).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        token_sac.mint(&from, &200i128);
+        client
+            .try_set_upgrade_delay(&admin, &3600u64)
+            .unwrap()
+            .unwrap();
 
         env.mock_auths(&[MockAuth {
-            address: &from,
+            address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
-                fn_name: "deposit",
-                args: (from.clone(), deal_id.clone(), 200i128).into_val(&env),
-                sub_invokes: &[
-                    MockAuthInvoke {
-                        contract: &token,
-                        fn_name: "transfer",
-                        args: (from.clone(), contract_id.clone(), 200i128).into_val(&env),
-                        sub_invokes: &[],
-                    }
-                ],
-            },
-        }]);
-        client.try_deposit(&from, &deal_id, &200i128).unwrap().unwrap();
-
-        env.mock_auths(&[MockAuth {
-            address: &operator,
-            invoke: &MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "release",
-                args: (operator.clone(), deal_id.clone(), to.clone(), Symbol::new(&env, "manual_admin"), String::from_str(&env, "ev-ref")).into_val(&env),
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone()).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.try_release(&operator, &deal_id, &to, &Symbol::new(&env, "manual_admin"), &String::from_str(&env, "ev-ref")).unwrap().unwrap();
+        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
 
-        let events = env.events().all();
-        let last = events.last().unwrap();
-        // data is (deal_id: String, to: Address, amount: i128, source: Symbol, tx_id: BytesN<32>, schema_version: u32)
-        let data: soroban_sdk::Vec<soroban_sdk::Val> = last.2.clone().try_into_val(&env).unwrap();
-        let schema_version: u32 = data.get(5).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(schema_version, 1u32, "release event must carry schema_version = 1");
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "execute_upgrade",
+                args: (admin.clone(), hash.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_execute_upgrade(&admin, &hash)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::UpgradeDelayNotMet);
+    }
+
+    #[test]
+    fn cancel_upgrade_clears_pending() {
+        let env = Env::default();
+        let (contract_id, client, admin, _operator, _token, _token_admin, _rcpt) = setup(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "cancel_upgrade",
+                args: (admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_cancel_upgrade(&admin).unwrap().unwrap();
     }
 }

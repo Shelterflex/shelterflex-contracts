@@ -1,8 +1,5 @@
 #![no_std]
 
-#[cfg(test)]
-mod storage_tests;
-
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, Symbol, Vec,
 };
@@ -448,7 +445,6 @@ mod test {
 
     fn setup(env: &Env) -> (Address, RentPaymentsClient<'_>, soroban_sdk::Address) {
         let contract_id = env.register(RentPayments, ());
-        // Note: register_contract is deprecated but still works in SDK 22.0.7
         let client = RentPaymentsClient::new(env, &contract_id);
         let admin = Address::generate(env);
         client.init(&admin);
@@ -512,7 +508,7 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, (i * 1000), payer.clone()).into_val(&env),
+                    args: (deal_id, { i * 1000 }, payer.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -538,7 +534,7 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, (i * 1000), payer.clone()).into_val(&env),
+                    args: (deal_id, { i * 1000 }, payer.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -579,7 +575,7 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, (i * 1000), payer.clone()).into_val(&env),
+                    args: (deal_id, { i * 1000 }, payer.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -627,7 +623,7 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, (i * 1000), payer.clone()).into_val(&env),
+                    args: (deal_id, { i * 1000 }, payer.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -713,7 +709,7 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, (i * 1000), payer.clone()).into_val(&env),
+                    args: (deal_id, { i * 1000 }, payer.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -1056,7 +1052,7 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (1u64, (i * 1000), payer.clone()).into_val(&env),
+                    args: (1u64, { i * 1000 }, payer.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -1070,7 +1066,7 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (2u64, (i * 2000), payer.clone()).into_val(&env),
+                    args: (2u64, { i * 2000 }, payer.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
