@@ -8,7 +8,8 @@ mod integration_test {
     // Let's use a simple mock contract.
 
     use soroban_sdk::{
-        contract, contractimpl, testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
+        contract, contractimpl,
+        testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
         Address, Env, IntoVal, Symbol, Vec,
     };
 
@@ -19,11 +20,16 @@ mod integration_test {
     impl MockTarget {
         pub fn admin_op(env: Env, admin: Address) {
             admin.require_auth();
-            env.storage().instance().set(&Symbol::new(&env, "done"), &true);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "done"), &true);
         }
 
         pub fn is_done(env: Env) -> bool {
-            env.storage().instance().get(&Symbol::new(&env, "done")).unwrap_or(false)
+            env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "done"))
+                .unwrap_or(false)
         }
     }
 
@@ -61,7 +67,14 @@ mod integration_test {
             invoke: &MockAuthInvoke {
                 contract: &timelock.address,
                 fn_name: "queue",
-                args: (admin.clone(), target_id.clone(), function.clone(), args.clone(), delay).into_val(&env),
+                args: (
+                    admin.clone(),
+                    target_id.clone(),
+                    function.clone(),
+                    args.clone(),
+                    delay,
+                )
+                    .into_val(&env),
                 sub_invokes: &[],
             },
         }]);

@@ -43,7 +43,14 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "queue",
-                args: (admin.clone(), target.clone(), function.clone(), args.clone(), delay).into_val(&env),
+                args: (
+                    admin.clone(),
+                    target.clone(),
+                    function.clone(),
+                    args.clone(),
+                    delay,
+                )
+                    .into_val(&env),
                 sub_invokes: &[],
             },
         }]);

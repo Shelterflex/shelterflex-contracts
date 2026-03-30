@@ -1,9 +1,9 @@
 #![no_std]
 
 #[cfg(test)]
-mod test;
-#[cfg(test)]
 mod integration_test;
+#[cfg(test)]
+mod test;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, BytesN, Env, IntoVal,
@@ -83,8 +83,16 @@ impl Timelock {
             return Err(TimelockError::NotAuthorized);
         }
 
-        let min: u64 = env.storage().instance().get(&DataKey::MinDelay).unwrap_or(0);
-        let max: u64 = env.storage().instance().get(&DataKey::MaxDelay).unwrap_or(u64::MAX);
+        let min: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDelay)
+            .unwrap_or(0);
+        let max: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxDelay)
+            .unwrap_or(u64::MAX);
 
         if delay < min || delay > max {
             return Err(TimelockError::InvalidDelay);
@@ -103,13 +111,19 @@ impl Timelock {
         hash_data.push_back(eta.into_val(&env));
 
         let tx_hash = env.crypto().sha256(&hash_data.to_xdr(&env));
-        let tx_hash_n: BytesN<32> = tx_hash.try_into().unwrap();
+        let tx_hash_n: BytesN<32> = tx_hash.into();
 
-        if env.storage().temporary().has(&DataKey::Queued(tx_hash_n.clone())) {
+        if env
+            .storage()
+            .temporary()
+            .has(&DataKey::Queued(tx_hash_n.clone()))
+        {
             return Err(TimelockError::TransactionAlreadyQueued);
         }
 
-        env.storage().temporary().set(&DataKey::Queued(tx_hash_n.clone()), &eta);
+        env.storage()
+            .temporary()
+            .set(&DataKey::Queued(tx_hash_n.clone()), &eta);
 
         env.events().publish(
             (Symbol::new(&env, "governance"), Symbol::new(&env, "queued")),
@@ -127,7 +141,12 @@ impl Timelock {
         args: Vec<Val>,
         eta: u64,
     ) -> Result<Val, TimelockError> {
-        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
             return Err(TimelockError::ContractPaused);
         }
 
@@ -140,7 +159,7 @@ impl Timelock {
         hash_data.push_back(eta.into_val(&env));
 
         let tx_hash = env.crypto().sha256(&hash_data.to_xdr(&env));
-        let tx_hash_n: BytesN<32> = tx_hash.try_into().unwrap();
+        let tx_hash_n: BytesN<32> = tx_hash.into();
 
         let stored_eta: u64 = env
             .storage()
@@ -149,7 +168,7 @@ impl Timelock {
             .ok_or(TimelockError::TransactionNotQueued)?;
 
         if stored_eta != eta {
-             return Err(TimelockError::TransactionNotQueued);
+            return Err(TimelockError::TransactionNotQueued);
         }
 
         let now = env.ledger().timestamp();
@@ -162,13 +181,18 @@ impl Timelock {
             return Err(TimelockError::TransactionExpired);
         }
 
-        env.storage().temporary().remove(&DataKey::Queued(tx_hash_n.clone()));
+        env.storage()
+            .temporary()
+            .remove(&DataKey::Queued(tx_hash_n.clone()));
 
         // Perform the call
         let result = env.invoke_contract::<Val>(&target, &function, args);
 
         env.events().publish(
-            (Symbol::new(&env, "governance"), Symbol::new(&env, "executed")),
+            (
+                Symbol::new(&env, "governance"),
+                Symbol::new(&env, "executed"),
+            ),
             tx_hash_n,
         );
 
@@ -183,14 +207,23 @@ impl Timelock {
             return Err(TimelockError::NotAuthorized);
         }
 
-        if !env.storage().temporary().has(&DataKey::Queued(tx_hash.clone())) {
+        if !env
+            .storage()
+            .temporary()
+            .has(&DataKey::Queued(tx_hash.clone()))
+        {
             return Err(TimelockError::TransactionNotQueued);
         }
 
-        env.storage().temporary().remove(&DataKey::Queued(tx_hash.clone()));
+        env.storage()
+            .temporary()
+            .remove(&DataKey::Queued(tx_hash.clone()));
 
         env.events().publish(
-            (Symbol::new(&env, "governance"), Symbol::new(&env, "cancelled")),
+            (
+                Symbol::new(&env, "governance"),
+                Symbol::new(&env, "cancelled"),
+            ),
             tx_hash,
         );
 
@@ -219,7 +252,10 @@ impl Timelock {
         env.storage().instance().set(&DataKey::Paused, &true);
 
         env.events().publish(
-            (Symbol::new(&env, "governance"), Symbol::new(&env, "emergency_pause")),
+            (
+                Symbol::new(&env, "governance"),
+                Symbol::new(&env, "emergency_pause"),
+            ),
             (),
         );
 
