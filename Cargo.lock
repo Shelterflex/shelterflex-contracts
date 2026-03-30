@@ -1746,6 +1746,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "timelock"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "transaction-receipt-contract"
 version = "0.1.0"
 dependencies = [
