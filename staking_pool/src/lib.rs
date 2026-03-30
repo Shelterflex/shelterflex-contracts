@@ -376,6 +376,21 @@ impl StakingPool {
         Ok(())
     }
 
+    pub fn set_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "staking_pool"),
+                Symbol::new(&env, "set_admin"),
+            ),
+            (admin, new_admin),
+        );
+        Ok(())
+    }
+
     pub fn is_operator(env: Env, addr: Address) -> bool {
         is_operator(&env, &addr)
     }

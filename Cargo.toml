@@ -10,6 +10,7 @@ members = [
   "whistleblower_rewards",
   "deal_escrow",
   "contract_access",
+  "timelock",
 ]
 
 [profile.release-with-logs]
