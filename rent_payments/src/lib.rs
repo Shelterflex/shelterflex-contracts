@@ -77,6 +77,19 @@ fn is_paused(env: &Env) -> bool {
         .unwrap_or(false)
 }
 
+fn get_admin(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .get::<_, Address>(&DataKey::Admin)
+        .expect("admin not set")
+}
+
+fn require_admin(env: &Env) -> Result<(), ContractError> {
+    let admin = get_admin(env);
+    admin.require_auth();
+    Ok(())
+}
+
 fn require_not_paused(env: &Env) {
     if is_paused(env) {
         panic!("contract is paused");
@@ -192,7 +205,7 @@ impl RentPayments {
         amount: i128,
         payer: Address,
     ) -> Result<Receipt, ContractError> {
-        require_admin(&env);
+        let _ = require_admin(&env)?;
         require_not_paused(&env);
 
         if amount <= 0 {
@@ -1090,11 +1103,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        client.pause(&admin);
 
         assert!(client.is_paused());
 

@@ -555,7 +555,7 @@ impl StakingRewards {
 
 #[contractimpl]
 impl Pausable for StakingRewards {
-    fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
+    fn pause(env: Env, _admin: Address) -> Result<(), PausableError> {
         if StakingRewards::require_admin(&env).is_err() {
             return Err(PausableError::NotAuthorized);
         }
@@ -567,7 +567,7 @@ impl Pausable for StakingRewards {
         Ok(())
     }
 
-    fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
+    fn unpause(env: Env, _admin: Address) -> Result<(), PausableError> {
         if StakingRewards::require_admin(&env).is_err() {
             return Err(PausableError::NotAuthorized);
         }
@@ -590,9 +590,10 @@ impl Pausable for StakingRewards {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env, IntoVal};
+    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+    use soroban_sdk::{Address, Env, IntoVal};
 
-    fn setup(env: &Env) -> (soroban_sdk::Address, StakingRewardsClient<'_>) {
+    pub fn setup(env: &Env) -> (soroban_sdk::Address, StakingRewardsClient<'_>) {
         env.mock_all_auths();
         let contract_id = env.register(StakingRewards, ());
         let client = StakingRewardsClient::new(env, &contract_id);
@@ -694,11 +695,11 @@ mod test {
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        client.pause(&admin);
         assert!(client.is_paused());
     }
 
@@ -735,7 +736,7 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        client.unpause();
+        client.unpause(&admin);
     }
 
     #[test]

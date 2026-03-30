@@ -278,6 +278,7 @@ pub enum ContractError {
     InvalidMetadataHash = 10,
 }
 
+#[cfg(kani)]
 pub mod formal_properties;
 #[contract]
 /// Primary contract type. All public contract methods are implemented on this

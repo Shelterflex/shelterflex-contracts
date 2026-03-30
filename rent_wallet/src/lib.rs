@@ -8,7 +8,7 @@ use soroban_sdk::{
 // ── Storage keys ─────────────────────────────────────────────────────────────
 pub mod validation;
 
-#[cfg(test)]
+#[cfg(kani)]
 mod formal_properties;
 
 #[contracttype]

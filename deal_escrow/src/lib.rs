@@ -317,12 +317,10 @@ impl Pausable for DealEscrow {
         Ok(())
     }
 
-    pub fn is_paused(env: Env) -> bool {
-        get_paused(&env)
-    }
+}
 
-    // ── Upgrade governance (#392) ─────────────────────────────────────────────
-
+#[contractimpl]
+impl DealEscrow {
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
         admin.require_auth();
         if admin != get_admin(&env) {

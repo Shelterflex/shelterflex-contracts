@@ -318,9 +318,10 @@ impl Pausable for WhistleblowerRewards {
     fn is_paused(env: Env) -> bool {
         get_paused(&env)
     }
+}
 
-    // ── Upgrade governance (#392) ──────────────────────────────────────────────
-
+#[contractimpl]
+impl WhistleblowerRewards {
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
         require_admin(&env, &admin)?;
         env.storage()
