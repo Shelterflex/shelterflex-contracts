@@ -1,6 +1,7 @@
 #![cfg(kani)]
 
 use super::*;
+use soroban_sdk::testutils::Address as _;
 
 #[kani::proof]
 #[kani::unwind(5)]

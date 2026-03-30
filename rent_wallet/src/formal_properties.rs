@@ -24,8 +24,6 @@
 mod tests {
     extern crate std;
     #[allow(unused_imports)]
-// use kani;
-
     use crate::{ContractError, RentWallet, RentWalletClient};
     use soroban_sdk::{
         testutils::{Address as _, MockAuth, MockAuthInvoke},
