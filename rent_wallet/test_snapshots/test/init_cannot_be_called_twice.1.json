@@ -76,18 +76,6 @@
                         "val": {
                           "bool": false
                         }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "ContractVersion"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u32": 1
-                        }
                       }
                     ]
                   }

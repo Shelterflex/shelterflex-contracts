@@ -276,14 +276,14 @@ impl DealEscrow {
 
 #[contractimpl]
 impl Pausable for DealEscrow {
-    fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
-        admin.require_auth();
+    fn pause(env: Env, _admin: Address) -> Result<(), PausableError> {
+        _admin.require_auth();
         let stored: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .expect("admin not set");
-        if admin != stored {
+        if _admin != stored {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -291,18 +291,17 @@ impl Pausable for DealEscrow {
             (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
             (),
         );
-
         Ok(())
     }
 
-    fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
-        admin.require_auth();
+    fn unpause(env: Env, _admin: Address) -> Result<(), PausableError> {
+        _admin.require_auth();
         let stored: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .expect("admin not set");
-        if admin != stored {
+        if _admin != stored {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -312,11 +311,14 @@ impl Pausable for DealEscrow {
                 Symbol::new(&env, "deal_escrow"),
                 Symbol::new(&env, "unpause"),
             ),
-            admin,
+            _admin,
         );
         Ok(())
     }
 
+    fn is_paused(env: Env) -> bool {
+        get_paused(&env)
+    }
 }
 
 #[contractimpl]

@@ -291,8 +291,9 @@ impl WhistleblowerRewards {
 
 #[contractimpl]
 impl Pausable for WhistleblowerRewards {
-    fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
-        if require_admin(&env, &admin).is_err() {
+    fn pause(env: Env, _admin: Address) -> Result<(), PausableError> {
+        _admin.require_auth();
+        if require_admin(&env, &_admin).is_err() {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&StorageKey::Paused, &true);
@@ -303,8 +304,9 @@ impl Pausable for WhistleblowerRewards {
         Ok(())
     }
 
-    fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
-        if require_admin(&env, &admin).is_err() {
+    fn unpause(env: Env, _admin: Address) -> Result<(), PausableError> {
+        _admin.require_auth();
+        if require_admin(&env, &_admin).is_err() {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&StorageKey::Paused, &false);

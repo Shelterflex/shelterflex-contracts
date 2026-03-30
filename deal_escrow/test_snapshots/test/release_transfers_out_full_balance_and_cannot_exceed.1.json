@@ -300,21 +300,6 @@
                           "vec": [
                             {
                               "symbol": "ContractVersion"
-<<<<<<< HEAD
-=======
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u32": 1
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "DealBalances"
->>>>>>> db49032 (feat: implement Pausable trait across all core contracts (Task 1))
                             }
                           ]
                         },
