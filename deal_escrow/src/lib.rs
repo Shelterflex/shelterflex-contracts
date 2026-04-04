@@ -109,8 +109,6 @@ fn put_deal_balance(env: &Env, deal_id: &String, amount: i128) {
         .set(&DataKey::DealBalance(deal_id.clone()), &amount);
 }
 
-
-
 /// Reentrancy guard (#390)
 fn enter_nonreentrant(env: &Env) -> Result<(), ContractError> {
     if env
@@ -238,7 +236,9 @@ impl DealEscrow {
         validation::require_non_empty_string(&env, &external_ref)?;
         let admin = get_admin(&env);
         let operator = get_operator(&env);
-        access_control::require_admin_or_operator_permission(&env, &admin, &operator, &caller, "release")?;
+        access_control::require_admin_or_operator_permission(
+            &env, &admin, &operator, &caller, "release",
+        )?;
 
         // #386: per-key persistent storage
         let cur = get_deal_balance(&env, &deal_id);
@@ -339,7 +339,12 @@ impl DealEscrow {
         delay_seconds: u64,
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
-        access_control::require_admin_permission(&env, &current_admin, &admin, "set_upgrade_delay")?;
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "set_upgrade_delay",
+        )?;
         env.storage()
             .instance()
             .set(&DataKey::UpgradeDelay, &delay_seconds);
@@ -436,7 +441,12 @@ impl DealEscrow {
         new_wasm_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
-        access_control::require_admin_permission(&env, &current_admin, &admin, "emergency_upgrade")?;
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "emergency_upgrade",
+        )?;
         if let Some(guardian) = env
             .storage()
             .instance()

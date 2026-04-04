@@ -907,8 +907,7 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        let result =
-            client.try_delegate_permission(&stranger, &target, &Permission::ReadBalance);
+        let result = client.try_delegate_permission(&stranger, &target, &Permission::ReadBalance);
         assert_eq!(result.unwrap_err().unwrap(), AccessError::Unauthorized);
     }
 }

@@ -238,8 +238,6 @@ fn is_paused(env: &Env) -> bool {
         .unwrap_or(false)
 }
 
-
-
 fn require_user_or_operator(
     env: &Env,
     user: &Address,
@@ -276,8 +274,6 @@ fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     }
     Ok(())
 }
-
-
 
 /// Creates canonical payload v1 serialization for receipt input
 /// Format: deterministic concatenation of fields with length prefixes
@@ -590,7 +586,12 @@ impl StakingPool {
         delay_seconds: u64,
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
-        access_control::require_admin_permission(&env, &current_admin, &admin, "set_upgrade_delay")?;
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "set_upgrade_delay",
+        )?;
         env.storage()
             .instance()
             .set(&DataKey::UpgradeDelay, &delay_seconds);
@@ -684,9 +685,13 @@ impl StakingPool {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
-        env.storage().instance().remove(&DataKey::PendingUpgradeVersion);
-        
-        env.storage().instance().set(&DataKey::ContractVersion, &proposed_version);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &proposed_version);
 
         env.events().publish(
             (
@@ -706,7 +711,12 @@ impl StakingPool {
         new_version: u32,
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
-        access_control::require_admin_permission(&env, &current_admin, &admin, "emergency_upgrade")?;
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "emergency_upgrade",
+        )?;
 
         validate_upgrade_safety(&env, new_version)?;
 
@@ -721,16 +731,25 @@ impl StakingPool {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
-        env.storage().instance().remove(&DataKey::PendingUpgradeVersion);
-        
-        env.storage().instance().set(&DataKey::ContractVersion, &new_version);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &new_version);
 
         env.events().publish(
             (
                 Symbol::new(&env, "staking_pool"),
                 Symbol::new(&env, "emergency_upgrade"),
             ),
-            (admin, new_wasm_hash.clone(), new_version, env.ledger().timestamp()),
+            (
+                admin,
+                new_wasm_hash.clone(),
+                new_version,
+                env.ledger().timestamp(),
+            ),
         );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
@@ -748,7 +767,9 @@ impl StakingPool {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
-        env.storage().instance().remove(&DataKey::PendingUpgradeVersion);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
         env.events().publish(
             (
                 Symbol::new(&env, "staking_pool"),
@@ -812,7 +833,8 @@ impl StakingPool {
 impl Pausable for StakingPool {
     fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
         let current_admin = get_admin(&env);
-        if access_control::require_admin_permission(&env, &current_admin, &admin, "pause").is_err() {
+        if access_control::require_admin_permission(&env, &current_admin, &admin, "pause").is_err()
+        {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -825,7 +847,9 @@ impl Pausable for StakingPool {
 
     fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
         let current_admin = get_admin(&env);
-        if access_control::require_admin_permission(&env, &current_admin, &admin, "unpause").is_err() {
+        if access_control::require_admin_permission(&env, &current_admin, &admin, "unpause")
+            .is_err()
+        {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &false);

@@ -554,7 +554,13 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "allocate",
-                args: (operator.clone(), wb.clone(), empty.clone(), deal.clone(), 10i128)
+                args: (
+                    operator.clone(),
+                    wb.clone(),
+                    empty.clone(),
+                    deal.clone(),
+                    10i128,
+                )
                     .into_val(&env),
                 sub_invokes: &[],
             },
@@ -581,7 +587,13 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "allocate",
-                args: (operator.clone(), wb.clone(), listing.clone(), deal.clone(), 10i128)
+                args: (
+                    operator.clone(),
+                    wb.clone(),
+                    listing.clone(),
+                    deal.clone(),
+                    10i128,
+                )
                     .into_val(&env),
                 sub_invokes: &[],
             },
