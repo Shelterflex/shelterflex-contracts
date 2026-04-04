@@ -1,0 +1,94 @@
+warning: failed to save last-use data
+This may prevent cargo from accurately tracking what is being used in its global cache. This information is used for automatically removing unused data in the cache.
+
+database or disk is full
+
+Caused by:
+  Error code 13: Insertion failed because database is full
+   Compiling contract_access v0.1.0 (C:\Users\USER\Desktop\monorepo\contracts\contract_access)
+warning: unused import: `TimelockError`
+ --> timelock\src\integration_test.rs:3:43
+  |
+3 | ...t, TimelockError};
+  |       ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused variable: `target_client`
+  --> timelock\src\integration_test.rs:41:13
+   |
+41 | ...et target_client = ...
+   |       ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_target_client`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `tx_hash`
+  --> timelock\src\test.rs:57:13
+   |
+57 | ...et tx_hash = ...
+   |       ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tx_hash`
+
+warning: unused variable: `exec_result`
+  --> timelock\src\test.rs:69:13
+   |
+69 | ...et exec_result = ...
+   |       ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_exec_result`
+
+warning: `timelock` (lib test) generated 4 warnings (run `cargo fix --lib -p timelock --tests` to apply 1 suggestion)
+   Compiling deal_escrow v0.1.0 (C:\Users\USER\Desktop\monorepo\contracts\deal_escrow)
+   Compiling mvp-staking-pool v0.1.0 (C:\Users\USER\Desktop\monorepo\contracts\mvp_staking_pool)
+   Compiling whistleblower_rewards v0.1.0 (C:\Users\USER\Desktop\monorepo\contracts\whistleblower_rewards)
+   Compiling rent_payments v0.1.0 (C:\Users\USER\Desktop\monorepo\contracts\rent_payments)
+   Compiling staking_pool v0.1.0 (C:\Users\USER\Desktop\monorepo\contracts\staking_pool)
+   Compiling transaction-receipt-contract v0.1.0 (C:\Users\USER\Desktop\monorepo\contracts\transaction-receipt-contract)
+   Compiling rent_wallet v0.1.0 (C:\Users\USER\Desktop\monorepo\contracts\rent_wallet)
+warning: unexpected `cfg` condition name: `kani`
+  --> staking_pool\src\lib.rs:22:7
+   |
+22 | #[cfg(kani)]
+   |       ^^^^
+   |
+   = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unused import: `soroban_sdk::Env`
+ --> staking_pool\src\validation.rs:5:5
+  |
+5 | use soroban_sdk::Env;
+  |     ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unexpected `cfg` condition name: `kani`
+  --> rent_wallet\src\lib.rs:12:7
+   |
+12 | #[cfg(kani)]
+   |       ^^^^
+   |
+   = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: associated function `is_paused` is never used
+   --> deal_escrow\src\lib.rs:484:8
+    |
+320 | impl DealEscrow {
+    | --------------- associated function in this implementation
+...
+484 |     fn is_paused(env: Env) -> bool {
+    |        ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+error:warning:warning:
