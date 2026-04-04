@@ -17,10 +17,7 @@ pub fn require_valid_amount(amount: i128) -> Result<(), ContractError> {
 /// Validates that a string is not empty.
 pub fn require_non_empty_string(_env: &Env, s: &String) -> Result<(), ContractError> {
     if s.len() == 0 {
-        // We'll reuse InvalidAmount to avoid expanding error enum size if possible
-        // or a new InvalidInput error if added. Currently InvalidAmount is fine as a generic error
-        // since ContractError in deal_escrow has very few fields.
-        return Err(ContractError::InvalidAmount); 
+        return Err(ContractError::EmptyString);
     }
     Ok(())
 }

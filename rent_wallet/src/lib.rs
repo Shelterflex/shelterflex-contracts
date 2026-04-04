@@ -16,6 +16,8 @@ mod formal_properties;
 #[derive(Clone)]
 pub enum DataKey {
     ContractVersion,
+    /// State schema version used to validate upgrade compatibility (#382)
+    StateSchemaVersion,
     Admin,
     /// Per-user balance stored in persistent storage (gas-optimised, #386)
     Balance(Address),
@@ -26,6 +28,32 @@ pub enum DataKey {
     PendingUpgradeHash,
     PendingUpgradeAt,
     PendingUpgradeVersion,
+}
+
+fn get_state_schema_version(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get::<_, u32>(&DataKey::StateSchemaVersion)
+        .unwrap_or(0u32)
+}
+
+fn validate_upgrade_safety(env: &Env, new_version: u32) -> Result<(), ContractError> {
+    let current_version = RentWallet::contract_version(env.clone());
+    let schema_version = get_state_schema_version(env);
+
+    // Ensure current on-chain state schema matches the currently running contract.
+    // This forces a migration step (in the new WASM) before further upgrades.
+    if schema_version != current_version {
+        return Err(ContractError::IncompatibleStateSchema);
+    }
+
+    // Enforce sequential upgrades by default to reduce migration complexity.
+    // Emergency upgrades can still jump versions if desired by adjusting this rule later.
+    if new_version != current_version.saturating_add(1) {
+        return Err(ContractError::InvalidUpgradeVersion);
+    }
+
+    Ok(())
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -57,6 +85,8 @@ pub enum ContractError {
     SameAddress = 14,
     /// Upgrade version must be strictly greater than current version
     InvalidUpgradeVersion = 15,
+    /// Stored state schema is incompatible with this contract version
+    IncompatibleStateSchema = 16,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -114,6 +144,9 @@ impl RentWallet {
         env.storage()
             .instance()
             .set(&DataKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::StateSchemaVersion, &1u32);
         env.storage().instance().set(&DataKey::Paused, &false);
 
         // #389: include version in init event
@@ -130,6 +163,11 @@ impl RentWallet {
             .instance()
             .get::<_, u32>(&DataKey::ContractVersion)
             .unwrap_or(0u32)
+    }
+
+    /// Current state schema version stored on-chain.
+    pub fn state_schema_version(env: Env) -> u32 {
+        get_state_schema_version(&env)
     }
 
     pub fn version(env: Env) -> u32 {
@@ -302,15 +340,12 @@ impl RentWallet {
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(&env, &current_admin, &admin, "propose_upgrade")?;
-        
-        let current_version = RentWallet::contract_version(env.clone());
-        if new_version <= current_version {
-            return Err(ContractError::InvalidUpgradeVersion);
-        }
-
         if env.storage().instance().has(&DataKey::PendingUpgradeHash) {
             return Err(ContractError::UpgradeAlreadyPending);
         }
+
+        validate_upgrade_safety(&env, new_version)?;
+
         let now = env.ledger().timestamp();
         env.storage()
             .instance()
@@ -359,11 +394,8 @@ impl RentWallet {
             .instance()
             .get(&DataKey::PendingUpgradeVersion)
             .unwrap_or(0);
-        
-        let current_version = RentWallet::contract_version(env.clone());
-        if proposed_version <= current_version {
-            return Err(ContractError::InvalidUpgradeVersion);
-        }
+
+        validate_upgrade_safety(&env, proposed_version)?;
 
         let delay: u64 = env
             .storage()
@@ -411,11 +443,10 @@ impl RentWallet {
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(&env, &current_admin, &admin, "emergency_upgrade")?;
-        
-        let current_version = RentWallet::contract_version(env.clone());
-        if new_version <= current_version {
-            return Err(ContractError::InvalidUpgradeVersion);
-        }
+
+        // Emergency upgrades still require schema compatibility, but allow only sequential
+        // upgrades for now (same safety policy as normal upgrades).
+        validate_upgrade_safety(&env, new_version)?;
 
         // Multi-sig: require guardian if configured
         if let Some(guardian) = env
@@ -1095,11 +1126,11 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+        client.try_propose_upgrade(&admin, &hash, &2u32).unwrap().unwrap();
     }
 
     #[test]
@@ -1113,23 +1144,26 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+        client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap()
+            .unwrap();
 
         env.mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
         let err = client
-            .try_propose_upgrade(&admin, &hash)
+            .try_propose_upgrade(&admin, &hash, &2u32)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ContractError::UpgradeAlreadyPending);
@@ -1146,11 +1180,14 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+        client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap()
+            .unwrap();
 
         env.mock_auths(&[MockAuth {
             address: &admin,
@@ -1169,11 +1206,14 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+        client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
@@ -1202,11 +1242,14 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+        client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap()
+            .unwrap();
 
         // Execute immediately — should fail because delay not met
         env.mock_auths(&[MockAuth {
@@ -1263,5 +1306,64 @@ mod test {
         }]);
         let err = client.try_cancel_upgrade(&admin).unwrap_err().unwrap();
         assert_eq!(err, ContractError::NoUpgradePending);
+    }
+
+    #[test]
+    fn failed_execute_upgrade_does_not_clear_pending_upgrade() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _non_admin) = setup(&env);
+        let hash = BytesN::from_array(&env, &[0u8; 32]);
+
+        // Propose an upgrade to version 2.
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap()
+            .unwrap();
+
+        // Break schema compatibility to force execute_upgrade to fail.
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&super::DataKey::StateSchemaVersion, &0u32);
+        });
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "execute_upgrade",
+                args: (admin.clone(), hash.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err = client.try_execute_upgrade(&admin, &hash).unwrap_err().unwrap();
+        assert_eq!(err, ContractError::IncompatibleStateSchema);
+
+        // Pending proposal should still exist; re-proposing should fail.
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err2 = client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err2, ContractError::UpgradeAlreadyPending);
     }
 }

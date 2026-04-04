@@ -502,6 +502,37 @@ impl AccessControl {
         has_delegation(&env, &addr, permission)
     }
 
+    /// Returns the delegated permission for `addr`, if any.
+    pub fn get_delegation(env: Env, addr: Address) -> Option<Permission> {
+        let delegations: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Delegations)
+            .unwrap_or_else(|| Map::new(&env));
+
+        let perm_u32 = delegations.get(addr)?;
+
+        let perm = match perm_u32 {
+            0 => Permission::Initialize,
+            1 => Permission::PauseContract,
+            2 => Permission::UpgradeContract,
+            3 => Permission::AssignRole,
+            4 => Permission::RevokeRole,
+            5 => Permission::TransferAdmin,
+            6 => Permission::CreditFunds,
+            7 => Permission::DebitFunds,
+            8 => Permission::TransferFunds,
+            9 => Permission::Stake,
+            10 => Permission::Unstake,
+            11 => Permission::SetLockPeriod,
+            12 => Permission::ReadBalance,
+            13 => Permission::ReadAuditLog,
+            _ => Permission::DelegatePermission,
+        };
+
+        Some(perm)
+    }
+
     /// Returns all addresses with assigned roles as (Address, Role) pairs.
     pub fn list_roles(env: Env) -> Vec<(Address, Role)> {
         let roles = roles_map(&env);

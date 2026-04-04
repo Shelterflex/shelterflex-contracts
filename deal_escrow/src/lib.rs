@@ -43,6 +43,7 @@ pub enum ContractError {
     Paused = 3,
     InvalidAmount = 4,
     InsufficientBalance = 5,
+    EmptyString = 10,
     // Cross-contract communication errors (#390)
     /// Reentrancy detected
     ReentrancyDetected = 6,

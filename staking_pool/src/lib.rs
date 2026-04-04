@@ -26,6 +26,8 @@ pub mod formal_properties;
 #[derive(Clone)]
 pub enum DataKey {
     ContractVersion,
+    /// State schema version used to validate upgrade compatibility (#382)
+    StateSchemaVersion,
     Admin,
     Operator,
     Token,
@@ -59,6 +61,8 @@ pub enum ContractError {
     Paused = 3,
     /// Amount is invalid (zero or negative)
     InvalidAmount = 4,
+    /// Lock period is invalid (out of range)
+    InvalidLockPeriod = 14,
     /// Insufficient staked balance
     InsufficientBalance = 5,
     /// Tokens are locked and cannot be unstaked yet
@@ -77,6 +81,8 @@ pub enum ContractError {
     UpgradeDelayNotMet = 11,
     /// Upgrade version must be strictly greater than current version
     InvalidUpgradeVersion = 12,
+    /// Stored state schema is incompatible with this contract version
+    IncompatibleStateSchema = 13,
 }
 
 /// Input parameters for computing metadata hash
@@ -103,6 +109,28 @@ pub struct ReceiptInput {
 
 #[contract]
 pub struct StakingPool;
+
+fn get_state_schema_version(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get::<_, u32>(&DataKey::StateSchemaVersion)
+        .unwrap_or(0u32)
+}
+
+fn validate_upgrade_safety(env: &Env, new_version: u32) -> Result<(), ContractError> {
+    let current_version = StakingPool::contract_version(env.clone());
+    let schema_version = get_state_schema_version(env);
+
+    if schema_version != current_version {
+        return Err(ContractError::IncompatibleStateSchema);
+    }
+
+    if new_version != current_version.saturating_add(1) {
+        return Err(ContractError::InvalidUpgradeVersion);
+    }
+
+    Ok(())
+}
 
 fn get_admin(env: &Env) -> Address {
     env.storage()
@@ -327,6 +355,9 @@ impl StakingPool {
         env.storage()
             .instance()
             .set(&DataKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::StateSchemaVersion, &1u32);
         env.storage().instance().set(&DataKey::TotalStaked, &0i128);
         env.storage().instance().set(&DataKey::LockPeriod, &0u64);
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -345,6 +376,11 @@ impl StakingPool {
             .instance()
             .get::<_, u32>(&DataKey::ContractVersion)
             .unwrap_or(0u32)
+    }
+
+    /// Current state schema version stored on-chain.
+    pub fn state_schema_version(env: Env) -> u32 {
+        get_state_schema_version(&env)
     }
 
     pub fn version(env: Env) -> u32 {
@@ -576,15 +612,11 @@ impl StakingPool {
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(&env, &current_admin, &admin, "propose_upgrade")?;
-        
-        let current_version = StakingPool::contract_version(env.clone());
-        if new_version <= current_version {
-            return Err(ContractError::InvalidUpgradeVersion);
-        }
-
         if env.storage().instance().has(&DataKey::PendingUpgradeHash) {
             return Err(ContractError::UpgradeAlreadyPending);
         }
+
+        validate_upgrade_safety(&env, new_version)?;
         let now = env.ledger().timestamp();
         env.storage()
             .instance()
@@ -630,11 +662,8 @@ impl StakingPool {
             .instance()
             .get(&DataKey::PendingUpgradeVersion)
             .unwrap_or(0);
-            
-        let current_version = StakingPool::contract_version(env.clone());
-        if proposed_version <= current_version {
-            return Err(ContractError::InvalidUpgradeVersion);
-        }
+
+        validate_upgrade_safety(&env, proposed_version)?;
 
         let delay: u64 = env
             .storage()
@@ -678,11 +707,8 @@ impl StakingPool {
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(&env, &current_admin, &admin, "emergency_upgrade")?;
-        
-        let current_version = StakingPool::contract_version(env.clone());
-        if new_version <= current_version {
-            return Err(ContractError::InvalidUpgradeVersion);
-        }
+
+        validate_upgrade_safety(&env, new_version)?;
 
         if let Some(guardian) = env
             .storage()
@@ -861,6 +887,58 @@ mod test {
             .unwrap();
 
         (contract_id, client, admin, user, token_contract_id)
+    }
+
+    #[test]
+    fn propose_upgrade_fails_for_non_sequential_version() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _token_id) = setup_contract(&env);
+        let hash = BytesN::from_array(&env, &[0u8; 32]);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone(), 3u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err = client
+            .try_propose_upgrade(&admin, &hash, &3u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidUpgradeVersion);
+    }
+
+    #[test]
+    fn propose_upgrade_fails_when_state_schema_mismatched() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _token_id) = setup_contract(&env);
+        let hash = BytesN::from_array(&env, &[0u8; 32]);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&super::DataKey::StateSchemaVersion, &0u32);
+        });
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err = client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::IncompatibleStateSchema);
     }
 
     // ============================================================================

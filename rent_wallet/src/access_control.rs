@@ -21,7 +21,7 @@
 //!
 //! ## Closes: #383 (access-control integration for rent_wallet)
 
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{Address, Env};
 
 use crate::ContractError;
 
@@ -31,15 +31,7 @@ use crate::ContractError;
 /// off-chain indexers can detect and alert on unauthorized calls.
 #[inline]
 pub fn deny(env: &Env, caller: &Address, operation: &str) -> ContractError {
-    env.events().publish(
-        (
-            Symbol::new(env, "access_control"),
-            Symbol::new(env, "unauthorized"),
-            caller.clone(),
-        ),
-        Symbol::new(env, operation),
-    );
-    ContractError::NotAuthorized
+    soroban_access_control::deny(env, caller, operation, ContractError::NotAuthorized)
 }
 
 /// Require that `caller` is the current `admin`.
@@ -51,11 +43,13 @@ pub fn require_admin_permission(
     caller: &Address,
     operation: &str,
 ) -> Result<(), ContractError> {
-    caller.require_auth();
-    if caller != admin {
-        return Err(deny(env, caller, operation));
-    }
-    Ok(())
+    soroban_access_control::require_admin_permission(
+        env,
+        admin,
+        caller,
+        operation,
+        ContractError::NotAuthorized,
+    )
 }
 
 /// Require that `caller` is either the `admin` OR an optional `operator`.
@@ -68,14 +62,12 @@ pub fn require_admin_or_operator_permission(
     caller: &Address,
     operation: &str,
 ) -> Result<(), ContractError> {
-    caller.require_auth();
-    if caller == admin {
-        return Ok(());
-    }
-    if let Some(op) = operator {
-        if caller == op {
-            return Ok(());
-        }
-    }
-    Err(deny(env, caller, operation))
+    soroban_access_control::require_admin_or_operator_permission(
+        env,
+        admin,
+        operator,
+        caller,
+        operation,
+        ContractError::NotAuthorized,
+    )
 }
