@@ -269,6 +269,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
+name = "contract_access"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -428,6 +435,15 @@ name = "data-encoding"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
+
+[[package]]
+name = "deal_escrow"
+version = "0.1.0"
+dependencies = [
+ "soroban-pausable",
+ "soroban-sdk",
+ "soroban_access_control",
+]
 
 [[package]]
 name = "der"
@@ -896,6 +912,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 name = "mvp-staking-pool"
 version = "0.1.0"
 dependencies = [
+ "soroban-pausable",
  "soroban-sdk",
 ]
 
@@ -1159,6 +1176,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 name = "rent_payments"
 version = "0.1.0"
 dependencies = [
+ "soroban-pausable",
  "soroban-sdk",
 ]
 
@@ -1166,7 +1184,9 @@ dependencies = [
 name = "rent_wallet"
 version = "0.1.0"
 dependencies = [
+ "soroban-pausable",
  "soroban-sdk",
+ "soroban_access_control",
 ]
 
 [[package]]
@@ -1486,6 +1506,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "soroban-pausable"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "soroban-sdk"
 version = "22.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1569,6 +1596,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "soroban_access_control"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1590,13 +1624,16 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "soroban-pausable",
  "soroban-sdk",
+ "soroban_access_control",
 ]
 
 [[package]]
 name = "staking_rewards"
 version = "0.1.0"
 dependencies = [
+ "soroban-pausable",
  "soroban-sdk",
 ]
 
@@ -1732,12 +1769,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "timelock"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "transaction-receipt-contract"
 version = "0.1.0"
 dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "soroban-pausable",
  "soroban-sdk",
 ]
 
@@ -1924,6 +1969,7 @@ dependencies = [
 name = "whistleblower_rewards"
 version = "0.1.0"
 dependencies = [
+ "soroban-pausable",
  "soroban-sdk",
 ]
 

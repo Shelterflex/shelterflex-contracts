@@ -2,8 +2,10 @@
 
 extern crate alloc;
 
+use soroban_pausable::{Pausable, PausableError};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Env, String, Symbol,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, String,
+    Symbol,
 };
 
 #[contracttype]
@@ -16,6 +18,11 @@ pub enum StorageKey {
     Paused,
     TotalAllocated(Address, String),
     TotalClaimed(Address, String),
+    // ── Upgrade governance (#392) ─────────────────────────────────────────
+    Guardian,
+    UpgradeDelay,
+    PendingUpgradeHash,
+    PendingUpgradeAt,
 }
 
 #[contracterror]
@@ -28,6 +35,12 @@ pub enum ContractError {
     InvalidAmount = 4,
     NothingToClaim = 5,
     AmountExceedsClaimable = 6,
+    EmptyString = 10,
+    StringTooLong = 11,
+    // Upgrade governance errors (#392)
+    UpgradeAlreadyPending = 7,
+    NoUpgradePending = 8,
+    UpgradeDelayNotMet = 9,
 }
 
 #[contract]
@@ -64,6 +77,22 @@ fn get_paused(env: &Env) -> bool {
 fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     if get_paused(env) {
         return Err(ContractError::Paused);
+    }
+    Ok(())
+}
+
+const MAX_STRING_LEN: u32 = 256;
+
+fn require_non_empty_string(s: &String) -> Result<(), ContractError> {
+    if s.len() == 0 {
+        return Err(ContractError::EmptyString);
+    }
+    Ok(())
+}
+
+fn require_string_max_len(s: &String) -> Result<(), ContractError> {
+    if s.len() > MAX_STRING_LEN {
+        return Err(ContractError::StringTooLong);
     }
     Ok(())
 }
@@ -172,6 +201,10 @@ impl WhistleblowerRewards {
     ) -> Result<(), ContractError> {
         require_operator(&env, &operator)?;
         require_not_paused(&env)?;
+        require_non_empty_string(&listing_id)?;
+        require_string_max_len(&listing_id)?;
+        require_non_empty_string(&deal_id)?;
+        require_string_max_len(&deal_id)?;
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
@@ -207,6 +240,8 @@ impl WhistleblowerRewards {
     ) -> Result<i128, ContractError> {
         to.require_auth();
         require_not_paused(&env)?;
+        require_non_empty_string(&listing_id)?;
+        require_string_max_len(&listing_id)?;
 
         let claimable = claimable_get(&env, &to, &listing_id);
         if claimable <= 0 {
@@ -255,37 +290,218 @@ impl WhistleblowerRewards {
     }
 
     pub fn claimable(env: Env, whistleblower: Address, listing_id: String) -> i128 {
+        if require_non_empty_string(&listing_id).is_err() {
+            return 0;
+        }
+        if require_string_max_len(&listing_id).is_err() {
+            return 0;
+        }
         claimable_get(&env, &whistleblower, &listing_id)
     }
-
-    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+    pub fn set_operator(
+        env: Env,
+        admin: Address,
+        new_operator: Address,
+    ) -> Result<(), ContractError> {
         require_admin(&env, &admin)?;
+        let old_operator = get_operator(&env);
+        env.storage()
+            .instance()
+            .set(&StorageKey::Operator, &new_operator);
+        env.events().publish(
+            (
+                Symbol::new(&env, "whistleblower_rewards"),
+                Symbol::new(&env, "set_operator"),
+            ),
+            (old_operator, new_operator),
+        );
+        Ok(())
+    }
+}
+
+#[contractimpl]
+impl Pausable for WhistleblowerRewards {
+    fn pause(env: Env, _admin: Address) -> Result<(), PausableError> {
+        if require_admin(&env, &_admin).is_err() {
+            return Err(PausableError::NotAuthorized);
+        }
         env.storage().instance().set(&StorageKey::Paused, &true);
         env.events().publish(
-            (
-                Symbol::new(&env, "whistleblower_rewards"),
-                Symbol::new(&env, "pause"),
-            ),
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
             (),
         );
         Ok(())
     }
 
-    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+    fn unpause(env: Env, _admin: Address) -> Result<(), PausableError> {
+        if require_admin(&env, &_admin).is_err() {
+            return Err(PausableError::NotAuthorized);
+        }
         env.storage().instance().set(&StorageKey::Paused, &false);
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")),
+            (),
+        );
+        Ok(())
+    }
+
+    fn is_paused(env: Env) -> bool {
+        get_paused(&env)
+    }
+}
+
+#[contractimpl]
+impl WhistleblowerRewards {
+    pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&StorageKey::Guardian, &guardian);
         env.events().publish(
             (
                 Symbol::new(&env, "whistleblower_rewards"),
-                Symbol::new(&env, "unpause"),
+                Symbol::new(&env, "set_guardian"),
             ),
-            (),
+            guardian,
         );
         Ok(())
     }
 
-    pub fn is_paused(env: Env) -> bool {
-        get_paused(&env)
+    pub fn set_upgrade_delay(env: Env, admin: Address, delay: u64) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&StorageKey::UpgradeDelay, &delay);
+        env.events().publish(
+            (
+                Symbol::new(&env, "whistleblower_rewards"),
+                Symbol::new(&env, "set_upgrade_delay"),
+            ),
+            delay,
+        );
+        Ok(())
+    }
+
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+        if env
+            .storage()
+            .instance()
+            .has(&StorageKey::PendingUpgradeHash)
+        {
+            return Err(ContractError::UpgradeAlreadyPending);
+        }
+        let delay: u64 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::UpgradeDelay)
+            .unwrap_or(0);
+        let execute_at = env.ledger().timestamp() + delay;
+        env.storage()
+            .instance()
+            .set(&StorageKey::PendingUpgradeHash, &new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&StorageKey::PendingUpgradeAt, &execute_at);
+        env.events().publish(
+            (
+                Symbol::new(&env, "whistleblower_rewards"),
+                Symbol::new(&env, "propose_upgrade"),
+            ),
+            (new_wasm_hash, execute_at),
+        );
+        Ok(())
+    }
+
+    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+        let hash = env
+            .storage()
+            .instance()
+            .get::<_, BytesN<32>>(&StorageKey::PendingUpgradeHash)
+            .ok_or(ContractError::NoUpgradePending)?;
+        let execute_at: u64 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::PendingUpgradeAt)
+            .ok_or(ContractError::NoUpgradePending)?;
+        if env.ledger().timestamp() < execute_at {
+            return Err(ContractError::UpgradeDelayNotMet);
+        }
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeHash);
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "whistleblower_rewards"),
+                Symbol::new(&env, "execute_upgrade"),
+            ),
+            hash.clone(),
+        );
+        env.deployer().update_current_contract_wasm(hash);
+        Ok(())
+    }
+
+    pub fn emergency_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+        if let Some(guardian) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&StorageKey::Guardian)
+        {
+            guardian.require_auth();
+        }
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeHash);
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "whistleblower_rewards"),
+                Symbol::new(&env, "emergency_upgrade"),
+            ),
+            (admin.clone(), new_wasm_hash.clone()),
+        );
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+        if !env
+            .storage()
+            .instance()
+            .has(&StorageKey::PendingUpgradeHash)
+        {
+            return Err(ContractError::NoUpgradePending);
+        }
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeHash);
+        env.storage()
+            .instance()
+            .remove(&StorageKey::PendingUpgradeAt);
+        env.events().publish(
+            (
+                Symbol::new(&env, "whistleblower_rewards"),
+                Symbol::new(&env, "cancel_upgrade"),
+            ),
+            admin.clone(),
+        );
+        Ok(())
     }
 }
 
@@ -308,7 +524,7 @@ mod test {
         Address,
     ) {
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, WhistleblowerRewards);
+        let contract_id = env.register(WhistleblowerRewards, ());
         let client = WhistleblowerRewardsClient::new(env, &contract_id);
 
         let admin = Address::generate(env);
@@ -326,9 +542,74 @@ mod test {
     }
 
     #[test]
+    fn allocate_rejects_empty_strings() {
+        let env = Env::default();
+        let (contract_id, client, _admin, operator, _token_id, _token_admin) = setup(&env);
+        let wb = Address::generate(&env);
+        let empty = SString::from_str(&env, "");
+        let deal = SString::from_str(&env, "deal-A");
+
+        env.mock_auths(&[MockAuth {
+            address: &operator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "allocate",
+                args: (
+                    operator.clone(),
+                    wb.clone(),
+                    empty.clone(),
+                    deal.clone(),
+                    10i128,
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err = client
+            .try_allocate(&operator, &wb, &empty, &deal, &10i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::EmptyString);
+    }
+
+    #[test]
+    fn allocate_rejects_overly_long_strings() {
+        let env = Env::default();
+        let (contract_id, client, _admin, operator, _token_id, _token_admin) = setup(&env);
+        let wb = Address::generate(&env);
+        let long: std::string::String = "a".repeat(257);
+        let listing = SString::from_str(&env, &long);
+        let deal = SString::from_str(&env, "deal-A");
+
+        env.mock_auths(&[MockAuth {
+            address: &operator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "allocate",
+                args: (
+                    operator.clone(),
+                    wb.clone(),
+                    listing.clone(),
+                    deal.clone(),
+                    10i128,
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err = client
+            .try_allocate(&operator, &wb, &listing, &deal, &10i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::StringTooLong);
+    }
+
+    #[test]
     fn init_sets_fields() {
         let env = Env::default();
-        let (contract_id, client, admin, operator, token_id, _token_admin) = setup(&env);
+        let (contract_id, client, admin, _operator, _token_id, _token_admin) = setup(&env);
 
         assert_eq!(client.contract_version(), 1u32);
 
@@ -630,7 +911,7 @@ mod test {
         assert_eq!(action, Symbol::new(&env, "allocate"));
 
         let sac = token::StellarAssetClient::new(&env, &token_id);
-        let token_client = token::Client::new(&env, &token_id);
+        let _token_client = token::Client::new(&env, &token_id);
         env.mock_auths(&[MockAuth {
             address: &token_admin,
             invoke: &MockAuthInvoke {

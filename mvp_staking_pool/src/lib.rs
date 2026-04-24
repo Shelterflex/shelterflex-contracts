@@ -271,6 +271,7 @@ impl StakingPool {
         let token_address = get_token(&env);
         let token_client = TokenClient::new(&env, &token_address);
 
+        // Update staked balance
         env.storage().persistent().set(
             &DataKey::StakedBalance(user.clone()),
             &(current_balance - amount),
