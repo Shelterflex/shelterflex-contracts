@@ -263,7 +263,12 @@ impl StakingPool {
                     Symbol::new(&env, "mvp_staking_pool"),
                     Symbol::new(&env, "unstake_rejected"),
                 ),
-                (user.clone(), amount, unused, Symbol::new(&env, "insufficient_unused")),
+                (
+                    user.clone(),
+                    amount,
+                    unused,
+                    Symbol::new(&env, "insufficient_unused"),
+                ),
             );
             return Err(ContractError::InsufficientUnusedStake);
         }
@@ -949,10 +954,7 @@ mod test {
             },
         }]);
 
-        let e = client
-            .try_unstake(&user, &100i128)
-            .unwrap_err()
-            .unwrap();
+        let e = client.try_unstake(&user, &100i128).unwrap_err().unwrap();
         assert_eq!(e, super::ContractError::InsufficientUnusedStake);
     }
 
@@ -971,10 +973,7 @@ mod test {
             },
         }]);
 
-        let e = client
-            .try_unstake(&user, &100i128)
-            .unwrap_err()
-            .unwrap();
+        let e = client.try_unstake(&user, &100i128).unwrap_err().unwrap();
         assert_eq!(e, super::ContractError::InsufficientUnusedStake);
     }
 
