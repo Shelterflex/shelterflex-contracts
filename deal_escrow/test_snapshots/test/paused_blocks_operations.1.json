@@ -232,6 +232,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "StorageSchemaVersion"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 3
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "Token"
                             }
                           ]
