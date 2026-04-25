@@ -2,10 +2,17 @@ use super::migration_test_helpers::{
     seed_contract_with_data, setup_test_contract, test_scenarios, verify_storage_integrity,
     EXTREME_STAKE_VALUE, MAX_CAPACITY_USERS,
 };
+use soroban_sdk::{testutils::EnvTestConfig, Env};
+
+fn migration_env() -> Env {
+    Env::new_with_config(EnvTestConfig {
+        capture_snapshot_at_drop: false,
+    })
+}
 
 #[test]
 fn empty_migration_scenario_is_stable() {
-    let env = soroban_sdk::Env::default();
+    let env = migration_env();
     let contract = setup_test_contract(&env);
     let scenario = test_scenarios::create_empty_contract_scenario(&env);
 
@@ -20,7 +27,7 @@ fn empty_migration_scenario_is_stable() {
 
 #[test]
 fn migration_max_capacity_scenario_preserves_storage_invariants() {
-    let env = soroban_sdk::Env::default();
+    let env = migration_env();
     env.cost_estimate().budget().reset_unlimited();
     let contract = setup_test_contract(&env);
     let scenario = test_scenarios::create_max_capacity_scenario(&env);
@@ -37,7 +44,7 @@ fn migration_max_capacity_scenario_preserves_storage_invariants() {
 
 #[test]
 fn migration_edge_case_scenario_preserves_zero_and_extreme_stakes() {
-    let env = soroban_sdk::Env::default();
+    let env = migration_env();
     let contract = setup_test_contract(&env);
     let scenario = test_scenarios::create_edge_case_scenario(&env);
 
@@ -77,7 +84,7 @@ fn migration_edge_case_scenario_preserves_zero_and_extreme_stakes() {
 
 #[test]
 fn storage_integrity_reports_total_mismatches_with_debug_details() {
-    let env = soroban_sdk::Env::default();
+    let env = migration_env();
     let contract = setup_test_contract(&env);
     let scenario = test_scenarios::create_multi_user_scenario(&env, 4);
 
@@ -95,7 +102,7 @@ fn storage_integrity_reports_total_mismatches_with_debug_details() {
 
 #[test]
 fn migration_helper_is_reusable_across_seeded_scenarios() {
-    let env = soroban_sdk::Env::default();
+    let env = migration_env();
     let contract = setup_test_contract(&env);
     let scenario = test_scenarios::create_single_user_scenario(&env);
 
