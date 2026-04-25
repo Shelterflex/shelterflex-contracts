@@ -60,13 +60,13 @@ export class MigrationRunner {
         return result.hash;
     }
 
-    async migrate(toVersion: number, data: Buffer = Buffer.alloc(0)): Promise<string> {
+    async migrate(toVersion: number, data: Buffer = Buffer.alloc(0)): Promise<any> {
         console.log(`Running migration to version ${toVersion}`);
         const result = await this.invoke('migrate', [
             xdr.ScVal.scvU32(toVersion),
             xdr.ScVal.scvBytes(data)
         ]);
-        return result.hash;
+        return result;
     }
 
     async invoke(fnName: string, args: any[], simulate: boolean = false): Promise<any> {
@@ -116,7 +116,7 @@ export class MigrationRunner {
         return txResult;
     }
 
-    async dryRun(toVersion: number, data: Buffer = Buffer.alloc(0)): Promise<void> {
+    async dryRun(toVersion: number, data: Buffer = Buffer.alloc(0)): Promise<any> {
         console.log(`[Dry Run] Simulating migration to version ${toVersion}`);
         const result = await this.invoke('migrate', [
             xdr.ScVal.scvU32(toVersion),
@@ -124,6 +124,7 @@ export class MigrationRunner {
         ], true);
 
         console.log(`[Dry Run] Success. Estimated resources:`, result.minResourceFee);
+        return result;
     }
 
     async rollback(oldWasmHash: string, fromVersion: number, toVersion: number, data: Buffer = Buffer.alloc(0)): Promise<string> {
