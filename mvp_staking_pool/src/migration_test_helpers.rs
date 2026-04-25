@@ -135,8 +135,7 @@ impl ContractStateSnapshot {
     pub fn capture(env: &Env, contract_id: &Address, users: &Vec<Address>) -> Self {
         let client = StakingPoolClient::new(env, contract_id);
         let total_staked = client.total_staked();
-        let global_reward_index =
-            env.as_contract(contract_id, || get_global_reward_index(env));
+        let global_reward_index = env.as_contract(contract_id, || get_global_reward_index(env));
 
         let mut user_stakes = Map::new(env);
         let mut user_rewards = Map::new(env);
@@ -163,11 +162,7 @@ pub fn verify_state_integrity(
     contract_id: &Address,
     expected: &ContractStateSnapshot,
 ) -> IntegrityReport {
-    let actual = ContractStateSnapshot::capture(
-        env,
-        contract_id,
-        &expected.user_stakes.keys(),
-    );
+    let actual = ContractStateSnapshot::capture(env, contract_id, &expected.user_stakes.keys());
     let mut issues = Vec::new(env);
     let mut total_verified = 0i128;
     let mut user_index = 0u32;
@@ -178,7 +173,9 @@ pub fn verify_state_integrity(
         if act_stake != exp_stake {
             let message = std::format!(
                 "user {} stake mismatch: expected {}, found {}",
-                user_index, exp_stake, act_stake
+                user_index,
+                exp_stake,
+                act_stake
             );
             issues.push_back(String::from_str(env, &message));
         }
@@ -196,7 +193,9 @@ pub fn verify_state_integrity(
         if act_reward != exp_reward {
             let message = std::format!(
                 "user {} reward mismatch: expected {}, found {}",
-                user_index, exp_reward, act_reward
+                user_index,
+                exp_reward,
+                act_reward
             );
             issues.push_back(String::from_str(env, &message));
         }
@@ -207,7 +206,8 @@ pub fn verify_state_integrity(
     if actual.total_staked != expected.total_staked {
         let message = std::format!(
             "total staked mismatch: expected {}, found {}",
-            expected.total_staked, actual.total_staked
+            expected.total_staked,
+            actual.total_staked
         );
         issues.push_back(String::from_str(env, &message));
     }
@@ -215,7 +215,8 @@ pub fn verify_state_integrity(
     if actual.global_reward_index != expected.global_reward_index {
         let message = std::format!(
             "global reward index mismatch: expected {}, found {}",
-            expected.global_reward_index, actual.global_reward_index
+            expected.global_reward_index,
+            actual.global_reward_index
         );
         issues.push_back(String::from_str(env, &message));
     }
