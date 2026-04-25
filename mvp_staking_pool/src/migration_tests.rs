@@ -1,12 +1,12 @@
 use super::migration_test_helpers::{
-    seed_contract_with_data, setup_test_contract, test_scenarios, verify_storage_integrity,
-    EXTREME_STAKE_VALUE, MAX_CAPACITY_USERS,
+    seed_contract_with_data, setup_test_contract, test_scenarios, verify_state_integrity,
+    verify_storage_integrity, ContractStateSnapshot, EXTREME_STAKE_VALUE, MAX_CAPACITY_USERS,
 };
 use soroban_sdk::{testutils::EnvTestConfig, Env};
 
 fn migration_env() -> Env {
     Env::new_with_config(EnvTestConfig {
-        capture_snapshot_at_drop: false,
+        capture_snapshot_at_drop: true,
     })
 }
 
@@ -98,6 +98,26 @@ fn storage_integrity_reports_total_mismatches_with_debug_details() {
     assert!(!report.passed);
     assert!(!report.issues.is_empty());
     assert_eq!(report.total_users_checked, 4);
+}
+
+#[test]
+fn state_snapshot_captures_before_and_after_migration() {
+    let env = migration_env();
+    let contract = setup_test_contract(&env);
+    let scenario = test_scenarios::create_multi_user_scenario(&env, 3);
+
+    let before = ContractStateSnapshot::capture(&env, &contract.contract_id, &scenario.users);
+    assert_eq!(before.total_staked, 0);
+
+    seed_contract_with_data(&env, &contract, &scenario);
+
+    let after = ContractStateSnapshot::capture(&env, &contract.contract_id, &scenario.users);
+    assert_eq!(after.total_staked, scenario.total_staked);
+
+    let report = verify_state_integrity(&env, &contract.contract_id, &after);
+    assert!(report.passed, "post-migration state integrity check failed");
+    assert_eq!(report.total_users_checked, 3);
+    assert_eq!(report.total_stake_verified, scenario.total_staked);
 }
 
 #[test]
