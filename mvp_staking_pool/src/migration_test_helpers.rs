@@ -1,267 +1,226 @@
-use soroban_sdk::{contractimpl, Address, Env, Bytes, BytesN, Map, Vec, i128, u32, xdr::ScVal};
+extern crate std;
 
-#[contractimpl]
-pub trait MigrationTestHelpers {
-    /// Create a test contract with specified version
-    fn create_test_contract(env: &Env, version: u32) -> Address;
-    
-    /// Generate test data for migration testing
-    fn generate_test_data(env: &Env, num_users: u32) -> TestData;
-    
-    /// Verify contract state integrity
-    fn verify_state_integrity(env: &Env, contract_id: &Address, expected_data: &TestData) -> bool;
-    
-    /// Backup contract state before migration
-    fn backup_state(env: &Env, contract_id: &Address) -> StateBackup;
-    
-    /// Restore contract state from backup (for rollback testing)
-    fn restore_state(env: &Env, contract_id: &Address, backup: &StateBackup) -> bool;
-    
-    /// Measure migration performance
-    fn benchmark_migration(env: &Env, contract_id: &Address, data_size: u32) -> MigrationBenchmark;
-}
+use super::{
+    get_claimable_reward, get_global_reward_index, get_staked_balance, get_total_staked,
+    StakingPool, StakingPoolClient,
+};
+use soroban_sdk::{
+    testutils::Address as _, token::StellarAssetClient, Address, Env, Map, String, Vec,
+};
+use std::format;
 
+pub const MAX_CAPACITY_USERS: u32 = 1_000;
+pub const EXTREME_STAKE_VALUE: i128 = i128::MAX / 32;
+
+#[derive(Clone)]
 pub struct TestData {
     pub users: Vec<Address>,
     pub stakes: Map<Address, i128>,
-    pub rewards: Map<Address, i128>,
+    pub claimable_rewards: Map<Address, i128>,
     pub total_staked: i128,
     pub global_reward_index: i128,
 }
 
-pub struct StateBackup {
-    pub version: u32,
-    pub timestamp: u64,
-    pub storage_data: Map<Bytes, ScVal>,
-    pub contract_data: Map<Bytes, ScVal>,
+pub struct TestContract<'a> {
+    pub contract_id: Address,
+    pub client: StakingPoolClient<'a>,
+    pub token: Address,
 }
 
-pub struct MigrationBenchmark {
-    pub data_size: u32,
-    pub execution_time: u64,
-    pub gas_used: u64,
-    pub storage_operations: u32,
-    pub memory_usage: u64,
+pub struct IntegrityReport {
+    pub passed: bool,
+    pub issues: Vec<String>,
+    pub verification_time: u64,
+    pub total_users_checked: u32,
+    pub total_stake_verified: i128,
 }
 
-#[contractimpl]
-impl MigrationTestHelpers {
-    fn create_test_contract(env: &Env, version: u32) -> Address {
-        // Implementation would deploy a test contract with the specified version
-        // This is a placeholder for the actual implementation
-        Address::generate(env)
+pub fn setup_test_contract(env: &Env) -> TestContract<'_> {
+    let contract_id = env.register(StakingPool, ());
+    let client = StakingPoolClient::new(env, &contract_id);
+
+    let admin = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    client.init(&admin, &token);
+
+    TestContract {
+        contract_id,
+        client,
+        token,
     }
+}
 
-    fn generate_test_data(env: &Env, num_users: u32) -> TestData {
-        let mut users = Vec::new(env);
-        let mut stakes = Map::new(env);
-        let mut rewards = Map::new(env);
-        let mut total_staked = 0i128;
+pub fn seed_contract_with_data(env: &Env, contract: &TestContract<'_>, data: &TestData) {
+    let token_client = StellarAssetClient::new(env, &contract.token);
 
-        // Generate test users and stakes
-        for i in 0..num_users {
-            let user = Address::generate(env);
-            users.push_back(user.clone());
-            
-            let stake_amount = (i as i128 + 1) * 1000;
-            stakes.set(user.clone(), stake_amount);
-            total_staked += stake_amount;
-            
-            // Random rewards for some users
-            if i % 2 == 0 {
-                let reward_amount = (i as i128 + 1) * 100;
-                rewards.set(user, reward_amount);
-            }
-        }
+    env.mock_all_auths();
 
-        TestData {
-            users,
-            stakes,
-            rewards,
-            total_staked,
-            global_reward_index: 1000000,
-        }
-    }
-
-    fn verify_state_integrity(env: &Env, contract_id: &Address, expected_data: &TestData) -> bool {
-        // Implementation would verify that the contract state matches expected data
-        // This would involve reading contract storage and comparing with expected values
-        true // Placeholder
-    }
-
-    fn backup_state(env: &Env, contract_id: &Address) -> StateBackup {
-        // Implementation would capture all relevant contract state
-        // This is a placeholder for the actual implementation
-        StateBackup {
-            version: 1,
-            timestamp: env.ledger().timestamp(),
-            storage_data: Map::new(env),
-            contract_data: Map::new(env),
-        }
-    }
-
-    fn restore_state(env: &Env, contract_id: &Address, backup: &StateBackup) -> bool {
-        // Implementation would restore contract state from backup
-        // This would be used for rollback testing
-        true // Placeholder
-    }
-
-    fn benchmark_migration(env: &Env, contract_id: &Address, data_size: u32) -> MigrationBenchmark {
-        let start_time = env.ledger().timestamp();
-        
-        // Perform migration with specified data size
-        // This would call the actual migration function
-        
-        let end_time = env.ledger().timestamp();
-        
-        MigrationBenchmark {
-            data_size,
-            execution_time: end_time - start_time,
-            gas_used: 0, // Would be measured from transaction
-            storage_operations: 0, // Would be counted
-            memory_usage: 0, // Would be estimated
+    for user in data.users.iter() {
+        let stake = data.stakes.get(user.clone()).unwrap_or(0);
+        if stake > 0 {
+            token_client.mint(&user, &stake);
+            contract.client.stake(&user, &stake);
         }
     }
 }
 
-// Test utilities for migration scenarios
 pub mod test_scenarios {
     use super::*;
+
+    fn push_user(data: &mut TestData, user: Address, stake: i128) {
+        data.users.push_back(user.clone());
+        data.stakes.set(user, stake);
+        data.total_staked = data
+            .total_staked
+            .checked_add(stake)
+            .expect("test scenario total must not overflow");
+    }
 
     pub fn create_empty_contract_scenario(env: &Env) -> TestData {
         TestData {
             users: Vec::new(env),
             stakes: Map::new(env),
-            rewards: Map::new(env),
+            claimable_rewards: Map::new(env),
             total_staked: 0,
             global_reward_index: 0,
         }
     }
 
     pub fn create_single_user_scenario(env: &Env) -> TestData {
-        let mut users = Vec::new(env);
-        let mut stakes = Map::new(env);
-        let user = Address::generate(env);
-        
-        users.push_back(user.clone());
-        stakes.set(user, 1000);
-
-        TestData {
-            users,
-            stakes,
-            rewards: Map::new(env),
-            total_staked: 1000,
-            global_reward_index: 0,
-        }
+        let mut data = create_empty_contract_scenario(env);
+        push_user(&mut data, Address::generate(env), 1_000);
+        data
     }
 
     pub fn create_multi_user_scenario(env: &Env, num_users: u32) -> TestData {
-        MigrationTestHelpers::generate_test_data(env, num_users)
+        let mut data = create_empty_contract_scenario(env);
+
+        for index in 0..num_users {
+            let user = Address::generate(env);
+            let stake_amount = (index as i128 + 1) * 1_000;
+            push_user(&mut data, user, stake_amount);
+        }
+
+        data
     }
 
     pub fn create_max_capacity_scenario(env: &Env) -> TestData {
-        // Create data that tests the limits of contract storage
-        let num_users = 1000; // Adjust based on actual limits
-        MigrationTestHelpers::generate_test_data(env, num_users)
+        create_multi_user_scenario(env, MAX_CAPACITY_USERS)
     }
 
     pub fn create_edge_case_scenario(env: &Env) -> TestData {
-        let mut data = MigrationTestHelpers::generate_test_data(env, 10);
-        
-        // Add edge cases: maximum values, zero values, etc.
-        let max_user = Address::generate(env);
-        data.stakes.set(max_user.clone(), i128::MAX);
-        data.users.push_back(max_user);
-        
-        let zero_user = Address::generate(env);
-        data.stakes.set(zero_user.clone(), 0);
-        data.users.push_back(zero_user);
-        
+        let mut data = create_multi_user_scenario(env, 8);
+
+        push_user(&mut data, Address::generate(env), 0);
+        push_user(&mut data, Address::generate(env), 1);
+        push_user(&mut data, Address::generate(env), EXTREME_STAKE_VALUE);
+
         data
     }
 }
 
-// Performance measurement utilities
-pub mod performance {
-    use super::*;
+pub fn verify_storage_integrity(
+    env: &Env,
+    contract_id: &Address,
+    expected_data: &TestData,
+) -> IntegrityReport {
+    let client = StakingPoolClient::new(env, contract_id);
+    let mut issues = Vec::new(env);
+    let mut seen_users = Map::new(env);
+    let mut total_calculated = 0i128;
+    let mut user_index = 0u32;
 
-    pub struct PerformanceMetrics {
-        pub migration_time: u64,
-        pub gas_consumption: u64,
-        pub storage_reads: u32,
-        pub storage_writes: u32,
-        pub memory_peak: u64,
-    }
+    let actual_total_staked = client.total_staked();
+    let actual_global_reward_index = env.as_contract(contract_id, || get_global_reward_index(env));
 
-    pub fn measure_migration_performance<F>(env: &Env, migration_fn: F) -> PerformanceMetrics 
-    where 
-        F: FnOnce(&Env) -> ()
-    {
-        let start_time = env.ledger().timestamp();
-        
-        // Execute migration
-        migration_fn(env);
-        
-        let end_time = env.ledger().timestamp();
-        
-        PerformanceMetrics {
-            migration_time: end_time - start_time,
-            gas_consumption: 0, // Would be measured from actual transaction
-            storage_reads: 0,   // Would be counted during execution
-            storage_writes: 0,  // Would be counted during execution
-            memory_peak: 0,     // Would be estimated
+    for user in expected_data.users.iter() {
+        if seen_users.contains_key(user.clone()) {
+            issues.push_back(String::from_str(
+                env,
+                "duplicate user found in migration scenario",
+            ));
+            continue;
         }
-    }
+        seen_users.set(user.clone(), true);
 
-    pub fn compare_performance(before: &PerformanceMetrics, after: &PerformanceMetrics) -> PerformanceComparison {
-        PerformanceComparison {
-            time_improvement: before.migration_time.saturating_sub(after.migration_time),
-            gas_improvement: before.gas_consumption.saturating_sub(after.gas_consumption),
-            storage_efficiency: before.storage_writes.saturating_sub(after.storage_writes),
-            memory_efficiency: before.memory_peak.saturating_sub(after.memory_peak),
+        let expected_stake = expected_data.stakes.get(user.clone()).unwrap_or(0);
+        let actual_stake = env.as_contract(contract_id, || get_staked_balance(env, &user));
+        if actual_stake != expected_stake {
+            let message = format!(
+                "user {} stake mismatch: expected {}, found {}",
+                user_index, expected_stake, actual_stake
+            );
+            issues.push_back(String::from_str(env, &message));
         }
-    }
 
-    pub struct PerformanceComparison {
-        pub time_improvement: u64,
-        pub gas_improvement: u64,
-        pub storage_efficiency: u32,
-        pub memory_efficiency: u64,
-    }
-}
+        total_calculated = total_calculated
+            .checked_add(expected_stake)
+            .unwrap_or_else(|| {
+                issues.push_back(String::from_str(
+                    env,
+                    "stake total overflow while verifying migration state",
+                ));
+                total_calculated
+            });
 
-// Data integrity verification utilities
-pub mod integrity {
-    use super::*;
-
-    pub fn verify_storage_integrity(
-        env: &Env,
-        contract_id: &Address,
-        expected_data: &TestData,
-    ) -> IntegrityReport {
-        let mut issues = Vec::new(env);
-        
-        // Verify total staked amount
-        // Verify individual user stakes
-        // Verify reward indices
-        // Verify global state consistency
-        
-        IntegrityReport {
-            passed: issues.is_empty(),
-            issues,
-            verification_time: env.ledger().timestamp(),
+        let expected_claimable = expected_data
+            .claimable_rewards
+            .get(user.clone())
+            .unwrap_or(0);
+        let actual_claimable = env.as_contract(contract_id, || get_claimable_reward(env, &user));
+        if actual_claimable != expected_claimable {
+            let message = format!(
+                "user {} claimable mismatch: expected {}, found {}",
+                user_index, expected_claimable, actual_claimable
+            );
+            issues.push_back(String::from_str(env, &message));
         }
+
+        user_index += 1;
     }
 
-    pub struct IntegrityReport {
-        pub passed: bool,
-        pub issues: Vec<String>,
-        pub verification_time: u64,
+    if total_calculated != expected_data.total_staked {
+        let message = format!(
+            "scenario total mismatch: expected {}, calculated {}",
+            expected_data.total_staked, total_calculated
+        );
+        issues.push_back(String::from_str(env, &message));
     }
 
-    pub fn generate_state_hash(env: &Env, contract_id: &Address) -> BytesN<32> {
-        // Generate a hash of the entire contract state
-        // This can be used to verify state hasn't changed unexpectedly
-        BytesN::random(env)
+    if actual_total_staked != expected_data.total_staked {
+        let message = format!(
+            "contract total mismatch: expected {}, found {}",
+            expected_data.total_staked, actual_total_staked
+        );
+        issues.push_back(String::from_str(env, &message));
+    }
+
+    let direct_total_staked = env.as_contract(contract_id, || get_total_staked(env));
+    if direct_total_staked != actual_total_staked {
+        let message = format!(
+            "client/storage total mismatch: client {}, storage {}",
+            actual_total_staked, direct_total_staked
+        );
+        issues.push_back(String::from_str(env, &message));
+    }
+
+    if actual_global_reward_index != expected_data.global_reward_index {
+        let message = format!(
+            "global reward index mismatch: expected {}, found {}",
+            expected_data.global_reward_index, actual_global_reward_index
+        );
+        issues.push_back(String::from_str(env, &message));
+    }
+
+    IntegrityReport {
+        passed: issues.is_empty(),
+        issues,
+        verification_time: env.ledger().timestamp(),
+        total_users_checked: expected_data.users.len(),
+        total_stake_verified: total_calculated,
     }
 }
