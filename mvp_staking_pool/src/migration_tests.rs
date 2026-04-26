@@ -1,6 +1,7 @@
 use super::migration_test_helpers::{
-    create_test_contract, seed_contract_with_data, setup_test_contract, test_scenarios, verify_state_integrity,
-    verify_storage_integrity, ContractStateSnapshot, EXTREME_STAKE_VALUE, MAX_CAPACITY_USERS,
+    create_test_contract, seed_contract_with_data, setup_test_contract, test_scenarios,
+    verify_state_integrity, verify_storage_integrity, ContractStateSnapshot, EXTREME_STAKE_VALUE,
+    MAX_CAPACITY_USERS,
 };
 use soroban_sdk::{testutils::EnvTestConfig, Env};
 
@@ -172,6 +173,9 @@ fn create_test_contract_creates_usable_contracts_for_migration() {
 
     // Verify the contract is fully functional
     let report = verify_storage_integrity(&env, &contract.contract_id, &scenario);
-    assert!(report.passed, "contract created with create_test_contract should be fully functional");
+    assert!(
+        report.passed,
+        "contract created with create_test_contract should be fully functional"
+    );
     assert_eq!(contract.client.total_staked(), scenario.total_staked);
 }
