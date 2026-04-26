@@ -1,5 +1,5 @@
 use super::migration_test_helpers::{
-    seed_contract_with_data, setup_test_contract, test_scenarios, verify_state_integrity,
+    create_test_contract, seed_contract_with_data, setup_test_contract, test_scenarios, verify_state_integrity,
     verify_storage_integrity, ContractStateSnapshot, EXTREME_STAKE_VALUE, MAX_CAPACITY_USERS,
 };
 use soroban_sdk::{testutils::EnvTestConfig, Env};
@@ -143,4 +143,35 @@ fn migration_helper_is_reusable_across_seeded_scenarios() {
         first_report.total_users_checked,
         second_report.total_users_checked
     );
+}
+
+#[test]
+fn create_test_contract_creates_version_specific_contracts() {
+    let env = migration_env();
+
+    // Create contract with version 1
+    let contract_v1 = create_test_contract(&env, 1);
+    assert_eq!(contract_v1.client.contract_version(), 1);
+
+    // Create contract with version 2
+    let contract_v2 = create_test_contract(&env, 2);
+    assert_eq!(contract_v2.client.contract_version(), 2);
+
+    // Create contract with version 3 (future version)
+    let contract_v3 = create_test_contract(&env, 3);
+    assert_eq!(contract_v3.client.contract_version(), 3);
+}
+
+#[test]
+fn create_test_contract_creates_usable_contracts_for_migration() {
+    let env = migration_env();
+    let contract = create_test_contract(&env, 1);
+    let scenario = test_scenarios::create_single_user_scenario(&env);
+
+    seed_contract_with_data(&env, &contract, &scenario);
+
+    // Verify the contract is fully functional
+    let report = verify_storage_integrity(&env, &contract.contract_id, &scenario);
+    assert!(report.passed, "contract created with create_test_contract should be fully functional");
+    assert_eq!(contract.client.total_staked(), scenario.total_staked);
 }

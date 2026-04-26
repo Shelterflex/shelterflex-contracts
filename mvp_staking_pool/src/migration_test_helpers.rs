@@ -36,6 +36,13 @@ pub struct IntegrityReport {
 }
 
 pub fn setup_test_contract(env: &Env) -> TestContract<'_> {
+    create_test_contract(env, 2) // Default to version 2 for current tests
+}
+
+/// Creates a test contract with a specific version for migration scenarios.
+/// This function allows migration tests to create contracts with different versions
+/// to test version-specific migration logic.
+pub fn create_test_contract(env: &Env, version: u32) -> TestContract<'_> {
     let contract_id = env.register(StakingPool, ());
     let client = StakingPoolClient::new(env, &contract_id);
 
@@ -46,6 +53,13 @@ pub fn setup_test_contract(env: &Env) -> TestContract<'_> {
         .address();
 
     client.init(&admin, &token);
+
+    // Set the contract version for migration testing
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .set(&super::DataKey::ContractVersion, &version);
+    });
 
     TestContract {
         contract_id,
