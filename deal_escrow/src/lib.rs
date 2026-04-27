@@ -40,6 +40,11 @@ pub enum DataKey {
     UpgradeDelay,
     PendingUpgradeHash,
     PendingUpgradeAt,
+    // ── Circuit breaker (#393) ──────────────────────────────────────────
+    CircuitBreakerState,
+    PendingDrainHash,
+    PendingDrainAt,
+    RecoveryDelaySeconds,
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -71,6 +76,11 @@ pub enum ContractError {
     DisputeNotAllowed = 18,
     InvalidEvidenceRef = 19,
     InvalidSettlement = 20,
+    // Circuit breaker errors (#393)
+    Frozen = 21,
+    DrainRestricted = 22,
+    InvalidGovernanceDrain = 23,
+    RecoveryDelayNotMet = 24,
 }
 
 #[contracttype]
@@ -111,9 +121,22 @@ pub enum SettlementOutcome {
     RefundToDepositor = 2,
 }
 
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u32)]
+pub enum CircuitBreakerState {
+    Unfrozen = 0,
+    Frozen = 1,
+    RecoveryAwaiting = 2,
+}
+
 const STORAGE_SCHEMA_V1: u32 = 1;
 const STORAGE_SCHEMA_V2: u32 = 2;
 const STORAGE_SCHEMA_V3: u32 = 3;
+
+// ── Default values ───────────────────────────────────────────────────────
+
+const DEFAULT_CIRCUIT_BREAKER_STATE: CircuitBreakerState = CircuitBreakerState::Unfrozen;
 
 // ── Contract ─────────────────────────────────────────────────────────────────
 
@@ -175,6 +198,47 @@ fn get_paused(env: &Env) -> bool {
         .instance()
         .get::<_, bool>(&DataKey::Paused)
         .unwrap_or(false)
+}
+
+fn get_circuit_breaker_state(env: &Env) -> CircuitBreakerState {
+    env.storage()
+        .instance()
+        .get::<_, CircuitBreakerState>(&DataKey::CircuitBreakerState)
+        .unwrap_or(CircuitBreakerState::Unfrozen)
+}
+
+fn get_recovery_delay_seconds(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get::<_, u64>(&DataKey::RecoveryDelaySeconds)
+        .unwrap_or(24 * 60 * 60) // Default 24 hours
+}
+
+fn get_pending_drain_hash(env: &Env) -> Option<BytesN<32>> {
+    env.storage()
+        .instance()
+        .get::<_, BytesN<32>>(&DataKey::PendingDrainHash)
+}
+
+fn get_pending_drain_at(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get::<_, u64>(&DataKey::PendingDrainAt)
+}
+
+fn require_not_frozen(env: &Env, is_governance_drain: bool) -> Result<(), ContractError> {
+    let state = get_circuit_breaker_state(env);
+    match state {
+        CircuitBreakerState::Unfrozen => Ok(()),
+        CircuitBreakerState::Frozen => {
+            if is_governance_drain {
+                Ok(()) // Allow governance drain path
+            } else {
+                Err(ContractError::Frozen)
+            }
+        }
+        CircuitBreakerState::RecoveryAwaiting => Err(ContractError::RecoveryDelayNotMet),
+    }
 }
 
 fn require_not_paused(env: &Env) -> Result<(), ContractError> {
@@ -412,6 +476,7 @@ impl DealEscrow {
         external_ref: String,
     ) -> Result<i128, ContractError> {
         require_not_paused(&env)?;
+        require_not_frozen(&env, false)?;
         validation::require_non_empty_string(&env, &deal_id)?;
         validation::require_non_empty_string(&env, &external_ref)?;
         let admin = get_admin(&env);
@@ -1006,6 +1071,117 @@ impl DealEscrow {
         );
 
         Ok(())
+    }
+}
+
+// ── Circuit Breaker Functions (#393) ───────────────────────────────
+
+#[contractimpl]
+impl DealEscrow {
+    pub fn freeze(env: Env, admin: Address) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "freeze")?;
+        
+        let state = get_circuit_breaker_state(&env);
+        if state == CircuitBreakerState::Frozen {
+            return Err(ContractError::Frozen); // Already frozen
+        }
+        
+        env.storage().instance().set(&DataKey::CircuitBreakerState, &CircuitBreakerState::Frozen);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "freeze"),
+            ),
+            (admin, env.ledger().timestamp()),
+        );
+        Ok(())
+    }
+
+    pub fn is_frozen(env: Env) -> bool {
+        get_circuit_breaker_state(&env) == CircuitBreakerState::Frozen
+    }
+
+    pub fn propose_drain(env: Env, admin: Address, drain_hash: BytesN<32>) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "propose_drain")?;
+        
+        let state = get_circuit_breaker_state(&env);
+        if state != CircuitBreakerState::Frozen {
+            return Err(ContractError::InvalidGovernanceDrain); // Must be frozen to propose drain
+        }
+        
+        let now = env.ledger().timestamp();
+        env.storage().instance().set(&DataKey::PendingDrainHash, &drain_hash);
+        env.storage().instance().set(&DataKey::PendingDrainAt, &now);
+        
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "propose_drain"),
+            ),
+            (drain_hash, now),
+        );
+        Ok(())
+    }
+
+    pub fn execute_drain(env: Env, admin: Address, drain_hash: BytesN<32>) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "execute_drain")?;
+        
+        let pending_hash = get_pending_drain_hash(&env)
+            .ok_or(ContractError::NoPendingRelease)?;
+        if pending_hash != drain_hash {
+            return Err(ContractError::NoPendingRelease);
+        }
+        
+        let proposed_at = get_pending_drain_at(&env)
+            .ok_or(ContractError::NoPendingRelease)?;
+        let delay = get_recovery_delay_seconds(&env);
+        if env.ledger().timestamp() < proposed_at + delay {
+            return Err(ContractError::RecoveryDelayNotMet);
+        }
+        
+        // Execute drain - only during governance-controlled recovery
+        let state = get_circuit_breaker_state(&env);
+        if state != CircuitBreakerState::Frozen {
+            return Err(ContractError::InvalidGovernanceDrain);
+        }
+        
+        // Clear pending drain
+        env.storage().instance().remove(&DataKey::PendingDrainHash);
+        env.storage().instance().remove(&DataKey::PendingDrainAt);
+        
+        // Allow recovery by unfreezing
+        env.storage().instance().set(&DataKey::CircuitBreakerState, &CircuitBreakerState::Unfrozen);
+        
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "execute_drain"),
+            ),
+            (admin, drain_hash, env.ledger().timestamp()),
+        );
+        Ok(())
+    }
+
+    pub fn set_recovery_delay(env: Env, admin: Address, delay_seconds: u64) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_recovery_delay")?;
+        
+        env.storage().instance().set(&DataKey::RecoveryDelaySeconds, &delay_seconds);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "set_recovery_delay"),
+            ),
+            delay_seconds,
+        );
+        Ok(())
+    }
+
+    pub fn get_circuit_breaker_state(env: Env) -> u32 {
+        get_circuit_breaker_state(&env) as u32
     }
 
     fn is_paused(env: Env) -> bool {
