@@ -1081,10 +1081,10 @@ impl DealEscrow {
     pub fn freeze(env: Env, admin: Address) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(&env, &current_admin, &admin, "freeze")?;
-        
+
         let state = get_circuit_breaker_state(&env);
         if state == CircuitBreakerState::Frozen {
-            return Err(ContractError::Frozen); // Already frozen
+            return Err(ContractError::Frozen);
         }
         
         env.storage().instance().set(&DataKey::CircuitBreakerState, &CircuitBreakerState::Frozen);
