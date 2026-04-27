@@ -595,6 +595,12 @@ impl Pausable for StakingPool {
 }
 
 #[cfg(test)]
+mod migration_test_helpers;
+
+#[cfg(test)]
+mod migration_tests;
+
+#[cfg(test)]
 mod test {
     extern crate std;
 
