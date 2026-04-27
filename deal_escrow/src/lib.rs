@@ -1086,8 +1086,10 @@ impl DealEscrow {
         if state == CircuitBreakerState::Frozen {
             return Err(ContractError::Frozen);
         }
-        
-        env.storage().instance().set(&DataKey::CircuitBreakerState, &CircuitBreakerState::Frozen);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CircuitBreakerState, &CircuitBreakerState::Frozen);
         env.events().publish(
             (
                 Symbol::new(&env, "deal_escrow"),
@@ -1102,19 +1104,25 @@ impl DealEscrow {
         get_circuit_breaker_state(&env) == CircuitBreakerState::Frozen
     }
 
-    pub fn propose_drain(env: Env, admin: Address, drain_hash: BytesN<32>) -> Result<(), ContractError> {
+    pub fn propose_drain(
+        env: Env,
+        admin: Address,
+        drain_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(&env, &current_admin, &admin, "propose_drain")?;
-        
+
         let state = get_circuit_breaker_state(&env);
         if state != CircuitBreakerState::Frozen {
             return Err(ContractError::InvalidGovernanceDrain); // Must be frozen to propose drain
         }
-        
+
         let now = env.ledger().timestamp();
-        env.storage().instance().set(&DataKey::PendingDrainHash, &drain_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingDrainHash, &drain_hash);
         env.storage().instance().set(&DataKey::PendingDrainAt, &now);
-        
+
         env.events().publish(
             (
                 Symbol::new(&env, "deal_escrow"),
@@ -1125,36 +1133,41 @@ impl DealEscrow {
         Ok(())
     }
 
-    pub fn execute_drain(env: Env, admin: Address, drain_hash: BytesN<32>) -> Result<(), ContractError> {
+    pub fn execute_drain(
+        env: Env,
+        admin: Address,
+        drain_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(&env, &current_admin, &admin, "execute_drain")?;
-        
-        let pending_hash = get_pending_drain_hash(&env)
-            .ok_or(ContractError::NoPendingRelease)?;
+
+        let pending_hash = get_pending_drain_hash(&env).ok_or(ContractError::NoPendingRelease)?;
         if pending_hash != drain_hash {
             return Err(ContractError::NoPendingRelease);
         }
-        
-        let proposed_at = get_pending_drain_at(&env)
-            .ok_or(ContractError::NoPendingRelease)?;
+
+        let proposed_at = get_pending_drain_at(&env).ok_or(ContractError::NoPendingRelease)?;
         let delay = get_recovery_delay_seconds(&env);
         if env.ledger().timestamp() < proposed_at + delay {
             return Err(ContractError::RecoveryDelayNotMet);
         }
-        
+
         // Execute drain - only during governance-controlled recovery
         let state = get_circuit_breaker_state(&env);
         if state != CircuitBreakerState::Frozen {
             return Err(ContractError::InvalidGovernanceDrain);
         }
-        
+
         // Clear pending drain
         env.storage().instance().remove(&DataKey::PendingDrainHash);
         env.storage().instance().remove(&DataKey::PendingDrainAt);
-        
+
         // Allow recovery by unfreezing
-        env.storage().instance().set(&DataKey::CircuitBreakerState, &CircuitBreakerState::Unfrozen);
-        
+        env.storage().instance().set(
+            &DataKey::CircuitBreakerState,
+            &CircuitBreakerState::Unfrozen,
+        );
+
         env.events().publish(
             (
                 Symbol::new(&env, "deal_escrow"),
@@ -1165,11 +1178,22 @@ impl DealEscrow {
         Ok(())
     }
 
-    pub fn set_recovery_delay(env: Env, admin: Address, delay_seconds: u64) -> Result<(), ContractError> {
+    pub fn set_recovery_delay(
+        env: Env,
+        admin: Address,
+        delay_seconds: u64,
+    ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
-        access_control::require_admin_permission(&env, &current_admin, &admin, "set_recovery_delay")?;
-        
-        env.storage().instance().set(&DataKey::RecoveryDelaySeconds, &delay_seconds);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "set_recovery_delay",
+        )?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryDelaySeconds, &delay_seconds);
         env.events().publish(
             (
                 Symbol::new(&env, "deal_escrow"),
