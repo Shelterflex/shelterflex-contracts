@@ -1,8 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, Symbol,
-};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
 
 // ── Storage Keys ─────────────────────────────────────────────────────────────
 
@@ -59,8 +57,8 @@ pub struct EpochInfo {
     pub start_ts: u64,
     /// Minimum duration in seconds before this epoch can be sealed
     pub duration_secs: u64,
-    pub end_ts: u64,       // 0 until sealed
-    pub seal_ts: u64,      // 0 until sealed
+    pub end_ts: u64,  // 0 until sealed
+    pub seal_ts: u64, // 0 until sealed
     pub sealed: bool,
     /// Total rewards allocated in this epoch
     pub total_rewards: i128,
@@ -87,19 +85,19 @@ impl EpochRewards {
     // ── Init ──────────────────────────────────────────────────────────────────
 
     /// Initialize the contract and start epoch 1.
-    pub fn init(
-        env: Env,
-        admin: Address,
-        epoch_duration_secs: u64,
-    ) -> Result<(), ContractError> {
+    pub fn init(env: Env, admin: Address, epoch_duration_secs: u64) -> Result<(), ContractError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::CurrentEpoch, &1u64);
-        env.storage().persistent().set(&DataKey::RewardIndex, &0i128);
-        env.storage().persistent().set(&DataKey::TotalStaked, &0i128);
+        env.storage()
+            .persistent()
+            .set(&DataKey::RewardIndex, &0i128);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalStaked, &0i128);
 
         // Initialise epoch 1
         let epoch1 = EpochInfo {
@@ -113,9 +111,7 @@ impl EpochRewards {
             carried_forward: 0,
             reward_index_at_seal: 0,
         };
-        env.storage()
-            .persistent()
-            .set(&DataKey::Epoch(1), &epoch1);
+        env.storage().persistent().set(&DataKey::Epoch(1), &epoch1);
 
         env.events().publish(
             (
@@ -142,11 +138,7 @@ impl EpochRewards {
         Ok(())
     }
 
-    pub fn set_operator(
-        env: Env,
-        admin: Address,
-        operator: Address,
-    ) -> Result<(), ContractError> {
+    pub fn set_operator(env: Env, admin: Address, operator: Address) -> Result<(), ContractError> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Operator, &operator);
         Ok(())
@@ -401,12 +393,7 @@ impl EpochRewards {
                 Symbol::new(&env, "epoch_rewards"),
                 Symbol::new(&env, "epoch_sealed"),
             ),
-            (
-                target_epoch,
-                now,
-                reward_index_at_seal,
-                epoch.total_rewards,
-            ),
+            (target_epoch, now, reward_index_at_seal, epoch.total_rewards),
         );
 
         // Emit carry-forward event if non-zero
@@ -630,7 +617,10 @@ mod tests {
 
         // Cannot seal epoch 2 while epoch 1 is current
         let result = client.try_seal_epoch(&admin, &2, &100);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::OutOfOrderSealing);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::OutOfOrderSealing
+        );
     }
 
     // ── Already-sealed rejection ──────────────────────────────────────────────
@@ -645,6 +635,9 @@ mod tests {
 
         // Move to epoch 2, then try to seal epoch 1 again (would be out-of-order)
         let result = client.try_seal_epoch(&admin, &1, &100);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::OutOfOrderSealing);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::OutOfOrderSealing
+        );
     }
 }

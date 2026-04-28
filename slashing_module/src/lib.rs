@@ -105,10 +105,7 @@ impl SlashingModule {
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.events().publish(
-            (
-                Symbol::new(&env, "slashing"),
-                Symbol::new(&env, "init"),
-            ),
+            (Symbol::new(&env, "slashing"), Symbol::new(&env, "init")),
             admin,
         );
         Ok(())
@@ -257,9 +254,10 @@ impl SlashingModule {
             .persistent()
             .get(&DataKey::SlashedAmount(actor.clone()))
             .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&DataKey::SlashedAmount(actor.clone()), &(prev_total + slash_amount));
+        env.storage().persistent().set(
+            &DataKey::SlashedAmount(actor.clone()),
+            &(prev_total + slash_amount),
+        );
 
         // Increment slash count
         let prev_count: u32 = env
@@ -280,9 +278,10 @@ impl SlashingModule {
             penalty_bps,
             slashed_amount: slash_amount,
         };
-        env.storage()
-            .persistent()
-            .set(&DataKey::SlashRecord(evidence_hash.clone()), &evidence_record);
+        env.storage().persistent().set(
+            &DataKey::SlashRecord(evidence_hash.clone()),
+            &evidence_record,
+        );
 
         // Emit slash event
         env.events().publish(
@@ -337,11 +336,7 @@ impl SlashingModule {
     // ── Governance unjail ─────────────────────────────────────────────────────
 
     /// Admin pre-approves unjail for an actor (governance step).
-    pub fn approve_unjail(
-        env: Env,
-        admin: Address,
-        actor: Address,
-    ) -> Result<(), ContractError> {
+    pub fn approve_unjail(env: Env, admin: Address, actor: Address) -> Result<(), ContractError> {
         Self::require_admin(&env, &admin)?;
         let jailed: bool = env
             .storage()
@@ -413,10 +408,7 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::{
-        testutils::Address as _,
-        Bytes, Env,
-    };
+    use soroban_sdk::{testutils::Address as _, Bytes, Env};
 
     fn evidence(env: &Env, tag: &str) -> Bytes {
         Bytes::from_slice(env, tag.as_bytes())
@@ -434,7 +426,12 @@ mod tests {
     }
 
     // Seed the actor's staked balance directly via admin helper.
-    fn seed_balance(client: &SlashingModuleClient<'_>, admin: &Address, actor: &Address, amount: i128) {
+    fn seed_balance(
+        client: &SlashingModuleClient<'_>,
+        admin: &Address,
+        actor: &Address,
+        amount: i128,
+    ) {
         client.set_staked_balance(admin, actor, &amount);
     }
 
@@ -498,7 +495,10 @@ mod tests {
 
         // Second submission with same hash must fail
         let result = client.try_submit_evidence(&submitter, &ev, &actor2, &Offence::Downtime);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::DuplicateEvidence);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::DuplicateEvidence
+        );
     }
 
     // ── over-slash boundary ───────────────────────────────────────────────────
@@ -532,7 +532,12 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        client.submit_evidence(&submitter, &evidence(&env, "ev_j1"), &actor, &Offence::Downtime);
+        client.submit_evidence(
+            &submitter,
+            &evidence(&env, "ev_j1"),
+            &actor,
+            &Offence::Downtime,
+        );
         assert!(client.is_jailed(&actor));
 
         let result = client.try_submit_evidence(
@@ -554,12 +559,20 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        client.submit_evidence(&submitter, &evidence(&env, "ev_u1"), &actor, &Offence::Downtime);
+        client.submit_evidence(
+            &submitter,
+            &evidence(&env, "ev_u1"),
+            &actor,
+            &Offence::Downtime,
+        );
         assert!(client.is_jailed(&actor));
 
         // Unjail without approval must fail
         let result = client.try_unjail(&actor);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::UnjailNotApproved);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::UnjailNotApproved
+        );
 
         // Admin approves
         client.approve_unjail(&admin, &actor);
@@ -576,7 +589,12 @@ mod tests {
         let actor = Address::generate(&env);
 
         seed_balance(&client, &admin, &actor, 10_000);
-        client.submit_evidence(&submitter, &evidence(&env, "ev_u2"), &actor, &Offence::Downtime);
+        client.submit_evidence(
+            &submitter,
+            &evidence(&env, "ev_u2"),
+            &actor,
+            &Offence::Downtime,
+        );
         client.approve_unjail(&admin, &actor);
         client.unjail(&actor);
 

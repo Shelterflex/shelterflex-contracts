@@ -1,8 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec,
-};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec};
 
 // ── Storage Keys ─────────────────────────────────────────────────────────────
 
@@ -15,7 +13,7 @@ pub enum DataKey {
     /// Current epoch number (sourced externally / via init)
     CurrentEpoch,
     /// Per-delegatee delegation list (Vec of Delegation)
-    Delegations(Address),      // delegator → list of delegations
+    Delegations(Address), // delegator → list of delegations
     /// Per-user staked balance (managed by this contract for reward routing)
     StakedBalance(Address),
     /// Global reward index (scaled)
@@ -74,11 +72,7 @@ pub struct StakeDelegation;
 impl StakeDelegation {
     // ── Init ──────────────────────────────────────────────────────────────────
 
-    pub fn init(
-        env: Env,
-        admin: Address,
-        epoch_duration_secs: u64,
-    ) -> Result<(), ContractError> {
+    pub fn init(env: Env, admin: Address, epoch_duration_secs: u64) -> Result<(), ContractError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
@@ -87,14 +81,15 @@ impl StakeDelegation {
             .instance()
             .set(&DataKey::EpochDuration, &epoch_duration_secs);
         env.storage().instance().set(&DataKey::CurrentEpoch, &1u64);
-        env.storage().persistent().set(&DataKey::RewardIndex, &0i128);
-        env.storage().persistent().set(&DataKey::TotalStaked, &0i128);
+        env.storage()
+            .persistent()
+            .set(&DataKey::RewardIndex, &0i128);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalStaked, &0i128);
 
         env.events().publish(
-            (
-                Symbol::new(&env, "delegation"),
-                Symbol::new(&env, "init"),
-            ),
+            (Symbol::new(&env, "delegation"), Symbol::new(&env, "init")),
             (admin, epoch_duration_secs),
         );
         Ok(())
@@ -257,9 +252,10 @@ impl StakeDelegation {
 
         // Update delegatee stake
         let current_stake = Self::get_delegatee_stake(&env, &delegatee);
-        env.storage()
-            .persistent()
-            .set(&DataKey::DelegateeStake(delegatee.clone()), &(current_stake + amount));
+        env.storage().persistent().set(
+            &DataKey::DelegateeStake(delegatee.clone()),
+            &(current_stake + amount),
+        );
 
         // Add to delegations list
         let delegations: Vec<Delegation> = env
@@ -372,7 +368,10 @@ impl StakeDelegation {
         let requested_epoch: u64 = env
             .storage()
             .persistent()
-            .get(&DataKey::RevocationRequest(delegator.clone(), delegatee.clone()))
+            .get(&DataKey::RevocationRequest(
+                delegator.clone(),
+                delegatee.clone(),
+            ))
             .ok_or(ContractError::DelegationNotFound)?;
 
         // Must have crossed an epoch boundary
@@ -397,9 +396,10 @@ impl StakeDelegation {
             }
         }
         let current_stake = Self::get_delegatee_stake(&env, &delegatee);
-        env.storage()
-            .persistent()
-            .set(&DataKey::DelegateeStake(delegatee.clone()), &(current_stake - amount_to_remove));
+        env.storage().persistent().set(
+            &DataKey::DelegateeStake(delegatee.clone()),
+            &(current_stake - amount_to_remove),
+        );
 
         // Remove delegation
         let delegations: Vec<Delegation> = env
@@ -420,7 +420,10 @@ impl StakeDelegation {
         // Clear revocation request
         env.storage()
             .persistent()
-            .remove(&DataKey::RevocationRequest(delegator.clone(), delegatee.clone()));
+            .remove(&DataKey::RevocationRequest(
+                delegator.clone(),
+                delegatee.clone(),
+            ));
 
         env.events().publish(
             (
@@ -458,10 +461,7 @@ impl StakeDelegation {
     }
 
     /// Claim rewards as a delegatee (rewards are credited to delegatee, not delegator).
-    pub fn claim_delegatee_rewards(
-        env: Env,
-        delegatee: Address,
-    ) -> Result<i128, ContractError> {
+    pub fn claim_delegatee_rewards(env: Env, delegatee: Address) -> Result<i128, ContractError> {
         delegatee.require_auth();
 
         let reward_index = Self::get_reward_index(&env);
@@ -565,14 +565,16 @@ impl StakeDelegation {
                     .persistent()
                     .get(&DataKey::PendingRewards(addr.clone()))
                     .unwrap_or(0);
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::PendingRewards(addr.clone()), &(banked + live_pending));
+                env.storage().persistent().set(
+                    &DataKey::PendingRewards(addr.clone()),
+                    &(banked + live_pending),
+                );
             }
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::DelegateeRewardIndex(addr.clone()), &current_reward_index);
+        env.storage().persistent().set(
+            &DataKey::DelegateeRewardIndex(addr.clone()),
+            &current_reward_index,
+        );
     }
 
     /// Settle all delegatees of a delegator (called before stake changes).
@@ -601,7 +603,6 @@ impl StakeDelegation {
         }
         total
     }
-
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -611,10 +612,7 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::{
-        testutils::{Address as _},
-        Env,
-    };
+    use soroban_sdk::{testutils::Address as _, Env};
 
     fn setup(env: &Env) -> (Address, StakeDelegationClient<'_>) {
         env.mock_all_auths();
@@ -662,7 +660,10 @@ mod tests {
 
         // Cannot delegate more than free balance
         let result = client.try_delegate(&delegator, &d1, &400); // would exceed 1000 total
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::InsufficientStake);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::InsufficientStake
+        );
     }
 
     // ── reward routing to delegatee ───────────────────────────────────────────
@@ -705,7 +706,10 @@ mod tests {
 
         // Finalize in same epoch must fail
         let result = client.try_finalize_revocation(&delegator, &delegatee);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::RevocationTooEarly);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::RevocationTooEarly
+        );
 
         // Advance epoch
         client.advance_epoch(&admin);
