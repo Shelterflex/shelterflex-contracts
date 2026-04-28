@@ -15,6 +15,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "allowlist_registry"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -214,6 +221,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "bond_collateral"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "soroban_access_control",
 ]
 
 [[package]]
@@ -442,6 +457,7 @@ version = "0.1.0"
 dependencies = [
  "soroban-pausable",
  "soroban-sdk",
+ "soroban_access_control",
 ]
 
 [[package]]
@@ -1146,6 +1162,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "reentrancy_guard"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "soroban_access_control",
+]
+
+[[package]]
 name = "ref-cast"
 version = "1.0.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1185,6 +1209,7 @@ version = "0.1.0"
 dependencies = [
  "soroban-pausable",
  "soroban-sdk",
+ "soroban_access_control",
 ]
 
 [[package]]
@@ -1235,6 +1260,13 @@ dependencies = [
  "quick-error",
  "tempfile",
  "wait-timeout",
+]
+
+[[package]]
+name = "schema-registry"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1594,6 +1626,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "soroban_access_control"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1617,6 +1656,7 @@ dependencies = [
  "serde_json",
  "soroban-pausable",
  "soroban-sdk",
+ "soroban_access_control",
 ]
 
 [[package]]
