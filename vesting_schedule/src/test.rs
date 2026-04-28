@@ -1,0 +1,49 @@
+use soroban_sdk::{Address, Env};
+
+use crate::{
+    VestingScheduleContract, VestingSchedule, DataKey,
+    calculate_vested_amount, calculate_claimable_amount,
+};
+
+#[test]
+fn test_calculate_vested_amount() {
+    let schedule = VestingSchedule {
+        beneficiary: Address::generate(&soroban_sdk::Env::default()),
+        total_amount: 1000,
+        claimed_amount: 0,
+        start_time: 1000,
+        end_time: 2000,
+        cliff_time: 1200,
+        revocable: true,
+        revoked: false,
+    };
+
+    // Before cliff
+    assert_eq!(calculate_vested_amount(&schedule, 1100), 0);
+
+    // At cliff
+    assert_eq!(calculate_vested_amount(&schedule, 1200), 100);
+
+    // Halfway
+    assert_eq!(calculate_vested_amount(&schedule, 1500), 500);
+
+    // After end
+    assert_eq!(calculate_vested_amount(&schedule, 2500), 1000);
+}
+
+#[test]
+fn test_calculate_claimable_amount() {
+    let schedule = VestingSchedule {
+        beneficiary: Address::generate(&soroban_sdk::Env::default()),
+        total_amount: 1000,
+        claimed_amount: 200,
+        start_time: 1000,
+        end_time: 2000,
+        cliff_time: 1200,
+        revocable: true,
+        revoked: false,
+    };
+
+    // Halfway, already claimed 200
+    assert_eq!(calculate_claimable_amount(&schedule, 1500), 300);
+}
