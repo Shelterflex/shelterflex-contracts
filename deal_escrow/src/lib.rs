@@ -509,10 +509,18 @@ impl DealEscrow {
             token_client.transfer(&env.current_contract_address(), &to, &principal_amount);
         }
         if platform_amount > 0 {
-            token_client.transfer(&env.current_contract_address(), &platform_addr, &platform_amount);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &platform_addr,
+                &platform_amount,
+            );
         }
         if reporter_amount > 0 {
-            token_client.transfer(&env.current_contract_address(), &reporter_addr, &reporter_amount);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &reporter_addr,
+                &reporter_amount,
+            );
         }
         exit_nonreentrant(&env);
 
@@ -521,7 +529,17 @@ impl DealEscrow {
                 Symbol::new(&env, "deal_escrow"),
                 Symbol::new(&env, "release"),
             ),
-            (deal_id, to, principal_amount, platform_addr, platform_amount, reporter_addr, reporter_amount, external_ref_source, tx_id),
+            (
+                deal_id,
+                to,
+                principal_amount,
+                platform_addr,
+                platform_amount,
+                reporter_addr,
+                reporter_amount,
+                external_ref_source,
+                tx_id,
+            ),
         );
         Ok(cur)
     }
@@ -1494,7 +1512,7 @@ mod test {
             },
         }]);
         token_sac.mint(&from, &300i128);
-        
+
         env.mock_auths(&[MockAuth {
             address: &from,
             invoke: &MockAuthInvoke {
@@ -1509,7 +1527,10 @@ mod test {
                 }],
             },
         }]);
-        client.try_deposit(&from, &deal_id, &250i128).unwrap().unwrap();
+        client
+            .try_deposit(&from, &deal_id, &250i128)
+            .unwrap()
+            .unwrap();
 
         env.mock_auths(&[MockAuth {
             address: &operator,
@@ -1527,7 +1548,8 @@ mod test {
                     10i128,
                     Symbol::new(&env, "manual_admin"),
                     String::from_str(&env, "ext1"),
-                ).into_val(&env),
+                )
+                    .into_val(&env),
                 sub_invokes: &[],
             },
         }]);
