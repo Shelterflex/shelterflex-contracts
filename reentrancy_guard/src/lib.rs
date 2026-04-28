@@ -1,8 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env,
-    Symbol,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
 };
 
 pub mod access_control;
