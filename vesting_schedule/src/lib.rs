@@ -125,7 +125,7 @@ fn calculate_vested_amount(schedule: &VestingSchedule, current_time: u64) -> i12
 
     let elapsed = current_time - schedule.start_time;
     let total_duration = schedule.end_time - schedule.start_time;
-    
+
     // Linear vesting: (elapsed / total_duration) * total_amount
     let vested = (elapsed as i128) * schedule.total_amount / (total_duration as i128);
     vested.min(schedule.total_amount)
@@ -149,12 +149,8 @@ impl VestingScheduleContract {
 
         admin.require_auth();
 
-        env.storage()
-            .instance()
-            .set(&DataKey::Admin, &admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::Token, &token);
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Token, &token);
         env.storage()
             .instance()
             .set(&DataKey::ContractVersion, &1u32);
@@ -206,8 +202,8 @@ impl VestingScheduleContract {
     pub fn claim(env: Env, beneficiary: Address) {
         beneficiary.require_auth();
 
-        let mut schedule = get_vesting_schedule(&env, &beneficiary)
-            .expect("vesting schedule not found");
+        let mut schedule =
+            get_vesting_schedule(&env, &beneficiary).expect("vesting schedule not found");
 
         if schedule.revoked {
             panic!("schedule revoked");
@@ -234,8 +230,8 @@ impl VestingScheduleContract {
     pub fn revoke(env: Env, beneficiary: Address) {
         require_admin(&env, &env.current_contract_address()).unwrap();
 
-        let mut schedule = get_vesting_schedule(&env, &beneficiary)
-            .expect("vesting schedule not found");
+        let mut schedule =
+            get_vesting_schedule(&env, &beneficiary).expect("vesting schedule not found");
 
         if !schedule.revocable {
             panic!("not revocable");
@@ -258,9 +254,9 @@ impl VestingScheduleContract {
 
     /// Get claimable amount for a beneficiary
     pub fn get_claimable_amount(env: Env, beneficiary: Address) -> i128 {
-        let schedule = get_vesting_schedule(&env, &beneficiary)
-            .expect("vesting schedule not found");
-        
+        let schedule =
+            get_vesting_schedule(&env, &beneficiary).expect("vesting schedule not found");
+
         if schedule.revoked {
             return 0;
         }
@@ -272,25 +268,19 @@ impl VestingScheduleContract {
     /// Update admin address
     pub fn set_admin(env: Env, new_admin: Address) {
         require_admin(&env, &env.current_contract_address()).unwrap();
-        env.storage()
-            .instance()
-            .set(&DataKey::Admin, &new_admin);
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
     }
 
     /// Pause the contract
     pub fn pause(env: Env) {
         require_admin(&env, &env.current_contract_address()).unwrap();
-        env.storage()
-            .instance()
-            .set(&DataKey::Paused, &true);
+        env.storage().instance().set(&DataKey::Paused, &true);
     }
 
     /// Unpause the contract
     pub fn unpause(env: Env) {
         require_admin(&env, &env.current_contract_address()).unwrap();
-        env.storage()
-            .instance()
-            .set(&DataKey::Paused, &false);
+        env.storage().instance().set(&DataKey::Paused, &false);
     }
 }
 

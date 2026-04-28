@@ -1,8 +1,8 @@
 use soroban_sdk::{Address, Env};
 
 use crate::{
-    VestingScheduleContract, VestingSchedule, DataKey,
-    calculate_vested_amount, calculate_claimable_amount,
+    calculate_claimable_amount, calculate_vested_amount, DataKey, VestingSchedule,
+    VestingScheduleContract,
 };
 
 #[test]
