@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype,
-    token, Address, BytesN, Env, Map, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Map, String,
+    Symbol, Vec,
 };
 
 pub mod access_control;
@@ -124,7 +124,9 @@ fn get_total_collateral(env: &Env) -> i128 {
 }
 
 fn put_total_collateral(env: &Env, total: i128) {
-    env.storage().instance().set(&DataKey::TotalCollateral, &total);
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalCollateral, &total);
 }
 
 #[contractimpl]
@@ -138,14 +140,27 @@ impl BondCollateral {
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
-        env.storage().instance().set(&DataKey::ContractVersion, &1u32);
-        env.storage().instance().set(&DataKey::TotalCollateral, &0i128);
-        env.storage().instance().set(&DataKey::WarningThreshold, &150u32);
-        env.storage().instance().set(&DataKey::LiquidationThreshold, &120u32);
-        env.storage().instance().set(&DataKey::KeeperRewardCap, &500u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalCollateral, &0i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::WarningThreshold, &150u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::LiquidationThreshold, &120u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::KeeperRewardCap, &500u32);
 
         env.events().publish(
-            (Symbol::new(&env, "bond_collateral"), Symbol::new(&env, "init")),
+            (
+                Symbol::new(&env, "bond_collateral"),
+                Symbol::new(&env, "init"),
+            ),
             admin,
         );
 
@@ -185,7 +200,9 @@ impl BondCollateral {
             return Err(ContractError::InvalidThreshold);
         }
 
-        env.storage().instance().set(&DataKey::WarningThreshold, &warning);
+        env.storage()
+            .instance()
+            .set(&DataKey::WarningThreshold, &warning);
         env.storage()
             .instance()
             .set(&DataKey::LiquidationThreshold, &liquidation);
@@ -277,7 +294,12 @@ impl BondCollateral {
                 Symbol::new(&env, "collateral_deposited"),
                 owner.clone(),
             ),
-            (position_id.clone(), amount, position.collateral_amount, ratio),
+            (
+                position_id.clone(),
+                amount,
+                position.collateral_amount,
+                ratio,
+            ),
         );
 
         if ratio < get_warning_threshold(&env) {
@@ -319,8 +341,7 @@ impl BondCollateral {
 
         position.bond_amount += bond_amount;
 
-        let ratio =
-            calculate_collateral_ratio(position.collateral_amount, position.bond_amount);
+        let ratio = calculate_collateral_ratio(position.collateral_amount, position.bond_amount);
 
         if ratio < get_liquidation_threshold(&env) {
             position.bond_amount -= bond_amount;
@@ -335,7 +356,12 @@ impl BondCollateral {
                 Symbol::new(&env, "bond_issued"),
                 owner.clone(),
             ),
-            (position_id.clone(), bond_amount, position.bond_amount, ratio),
+            (
+                position_id.clone(),
+                bond_amount,
+                position.bond_amount,
+                ratio,
+            ),
         );
 
         if ratio < get_warning_threshold(&env) {
@@ -364,7 +390,8 @@ impl BondCollateral {
             return Err(ContractError::InvalidAmount);
         }
 
-        let mut position = get_position(&env, &position_id).ok_or(ContractError::PositionNotFound)?;
+        let mut position =
+            get_position(&env, &position_id).ok_or(ContractError::PositionNotFound)?;
 
         if position.owner != owner {
             return Err(ContractError::NotAuthorized);
@@ -401,7 +428,8 @@ impl BondCollateral {
             return Err(ContractError::InvalidAmount);
         }
 
-        let mut position = get_position(&env, &position_id).ok_or(ContractError::PositionNotFound)?;
+        let mut position =
+            get_position(&env, &position_id).ok_or(ContractError::PositionNotFound)?;
 
         if position.owner != owner {
             return Err(ContractError::NotAuthorized);
@@ -449,8 +477,7 @@ impl BondCollateral {
 
         let position = get_position(&env, &position_id).ok_or(ContractError::PositionNotFound)?;
 
-        let ratio =
-            calculate_collateral_ratio(position.collateral_amount, position.bond_amount);
+        let ratio = calculate_collateral_ratio(position.collateral_amount, position.bond_amount);
 
         if ratio >= get_liquidation_threshold(&env) {
             return Err(ContractError::CannotLiquidate);
@@ -517,9 +544,8 @@ impl BondCollateral {
     }
 
     pub fn get_collateral_ratio(env: Env, position_id: BytesN<32>) -> Option<u32> {
-        get_position(&env, &position_id).map(|p| {
-            calculate_collateral_ratio(p.collateral_amount, p.bond_amount)
-        })
+        get_position(&env, &position_id)
+            .map(|p| calculate_collateral_ratio(p.collateral_amount, p.bond_amount))
     }
 
     pub fn get_thresholds(env: Env) -> (u32, u32) {

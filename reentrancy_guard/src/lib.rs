@@ -1,8 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype,
-    Address, BytesN, Env, Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Map, Symbol, Vec,
 };
 
 pub mod access_control;
@@ -87,15 +86,11 @@ fn get_call_depth(env: &Env, contract: &Address, entry_point: &BytesN<32>) -> u3
         .unwrap_or(0u32)
 }
 
-fn set_call_depth(
-    env: &Env,
-    contract: &Address,
-    entry_point: &BytesN<32>,
-    depth: u32,
-) {
-    env.storage()
-        .instance()
-        .set(&DataKey::CallDepth(contract.clone(), entry_point.clone()), &depth);
+fn set_call_depth(env: &Env, contract: &Address, entry_point: &BytesN<32>, depth: u32) {
+    env.storage().instance().set(
+        &DataKey::CallDepth(contract.clone(), entry_point.clone()),
+        &depth,
+    );
 }
 
 fn is_locked(env: &Env, contract: &Address) -> bool {
@@ -121,7 +116,9 @@ impl ReentrancyGuard {
         admin.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &1u32);
         env.storage().instance().set(&DataKey::MaxCallDepth, &5u32);
 
         env.events().publish(
@@ -193,12 +190,7 @@ impl ReentrancyGuard {
         contract: Address,
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
-        access_control::require_admin_permission(
-            &env,
-            &current_admin,
-            &admin,
-            "activate_guard",
-        )?;
+        access_control::require_admin_permission(&env, &current_admin, &admin, "activate_guard")?;
 
         env.storage()
             .instance()
@@ -221,12 +213,7 @@ impl ReentrancyGuard {
         contract: Address,
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
-        access_control::require_admin_permission(
-            &env,
-            &current_admin,
-            &admin,
-            "deactivate_guard",
-        )?;
+        access_control::require_admin_permission(&env, &current_admin, &admin, "deactivate_guard")?;
 
         env.storage()
             .instance()
@@ -249,12 +236,7 @@ impl ReentrancyGuard {
         pattern_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
-        access_control::require_admin_permission(
-            &env,
-            &current_admin,
-            &admin,
-            "allow_pattern",
-        )?;
+        access_control::require_admin_permission(&env, &current_admin, &admin, "allow_pattern")?;
 
         if is_pattern_allowed(&env, &pattern_hash) {
             return Err(ContractError::PatternAlreadyAllowed);
@@ -281,12 +263,7 @@ impl ReentrancyGuard {
         pattern_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
         let current_admin = get_admin(&env);
-        access_control::require_admin_permission(
-            &env,
-            &current_admin,
-            &admin,
-            "disallow_pattern",
-        )?;
+        access_control::require_admin_permission(&env, &current_admin, &admin, "disallow_pattern")?;
 
         env.storage()
             .instance()
@@ -350,11 +327,7 @@ impl ReentrancyGuard {
         Ok(())
     }
 
-    pub fn exit(
-        env: Env,
-        contract: Address,
-        entry_point: BytesN<32>,
-    ) -> Result<(), ContractError> {
+    pub fn exit(env: Env, contract: Address, entry_point: BytesN<32>) -> Result<(), ContractError> {
         if !is_guard_active(&env, &contract) {
             return Err(ContractError::GuardNotActive);
         }
@@ -388,11 +361,7 @@ impl ReentrancyGuard {
         is_locked(&env, &contract)
     }
 
-    pub fn get_call_depth(
-        env: Env,
-        contract: Address,
-        entry_point: BytesN<32>,
-    ) -> u32 {
+    pub fn get_call_depth(env: Env, contract: Address, entry_point: BytesN<32>) -> u32 {
         get_call_depth(&env, &contract, &entry_point)
     }
 
