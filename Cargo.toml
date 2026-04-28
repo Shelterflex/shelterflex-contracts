@@ -15,7 +15,8 @@ members = [
   "timelock",
   "schema_registry",
   "allowlist_registry",
-
+  "bond_collateral",
+  "reentrancy_guard",
 ]
 
 [profile.release-with-logs]
