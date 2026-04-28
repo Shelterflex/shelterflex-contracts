@@ -13,6 +13,8 @@ members = [
   "deal_escrow",
   "contract_access",
   "timelock",
+  "vesting_schedule",
+
   "schema_registry",
   "allowlist_registry",
   "bond_collateral",
