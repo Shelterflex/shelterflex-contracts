@@ -9,8 +9,23 @@ This folder contains Soroban smart contracts written in Rust.
 
 ## Workspace
 
-- `rent_wallet/` - Minimal reference contract for wallet-like credit/debit flows
-- `rent_payments/` - Contract for managing deals and receipts with paginated queries
+The contracts directory is a Cargo workspace. Each subdirectory is a separate contract crate:
+
+| Contract | Purpose |
+|---|---|
+| `rent_wallet/` | Custodial wallet for credit/debit flows (tenant rent balances) |
+| `rent_payments/` | Deal receipts and paginated payment history |
+| `deal_escrow/` | Escrow logic holding funds until deal conditions are met |
+| `staking_pool/` | Staking pool for platform liquidity providers |
+| `mvp_staking_pool/` | Minimal staking pool reference implementation |
+| `staking_rewards/` | Reward distribution for stakers |
+| `timelock/` | Time-locked governance actions |
+| `transaction-receipt-contract/` | On-chain transaction receipts with canonical tx_id |
+| `whistleblower_rewards/` | Reward allocation and claiming for whistleblowers who report fraudulent listings |
+| `upgradeable_proxy/` | Proxy pattern for contract upgrades |
+| `soroban_access_control/` | Shared access-control primitives |
+| `soroban_pausable/` | Shared pausable primitive used across contracts |
+| `contract_access/` | Contract-level access helpers |
 
 ## Build & test
 
