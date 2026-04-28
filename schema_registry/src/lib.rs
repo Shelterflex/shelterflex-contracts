@@ -334,14 +334,15 @@ mod tests {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
-    fn setup() -> (Env, SchemaRegistryClient<'static>) {
+    /// Returns (env, client, admin) — each test gets a fresh contract instance.
+    fn setup() -> (Env, SchemaRegistryClient<'static>, Address) {
         let env = Env::default();
         env.mock_all_auths();
         let id = env.register(SchemaRegistry, ());
         let client = SchemaRegistryClient::new(&env, &id);
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        (env, client)
+        (env, client, admin)
     }
 
     fn v(major: u32, minor: u32, patch: u32) -> SchemaVersion {
@@ -363,9 +364,7 @@ mod tests {
 
     #[test]
     fn test_version_id_ordering() {
-        let env = Env::default();
-        let (_, client) = setup();
-        // Registry initialises at 1.0.0
+        let (_, client, _) = setup();
         let rv = client.registry_version();
         assert_eq!(rv.major, 1);
         assert_eq!(rv.minor, 0);
@@ -374,89 +373,48 @@ mod tests {
 
     #[test]
     fn test_register_and_query_transition() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        let _ = client.initialize(&admin); // second init will panic — create fresh env
-        let env2 = Env::default();
-        env2.mock_all_auths();
-        let id2 = env2.register(SchemaRegistry, ());
-        let c2 = SchemaRegistryClient::new(&env2, &id2);
-        let admin2 = Address::generate(&env2);
-        c2.initialize(&admin2);
+        let (env, client, admin) = setup();
+        client.register_transition(&admin, &meta(&env, v(1, 0, 0), v(2, 0, 0)));
 
-        let m = meta(&env2, v(1, 0, 0), v(2, 0, 0));
-        c2.register_transition(&admin2, &m);
-
-        assert!(c2.is_transition_supported(&v(1, 0, 0), &v(2, 0, 0)));
-        assert!(!c2.is_transition_supported(&v(1, 0, 0), &v(3, 0, 0)));
+        assert!(client.is_transition_supported(&v(1, 0, 0), &v(2, 0, 0)));
+        assert!(!client.is_transition_supported(&v(1, 0, 0), &v(3, 0, 0)));
     }
 
     #[test]
     fn test_dry_run_pass() {
-        let (env, client) = setup();
-        let env2 = Env::default();
-        env2.mock_all_auths();
-        let id2 = env2.register(SchemaRegistry, ());
-        let c2 = SchemaRegistryClient::new(&env2, &id2);
-        let admin2 = Address::generate(&env2);
-        c2.initialize(&admin2);
-        c2.register_transition(&admin2, &meta(&env2, v(1, 0, 0), v(1, 1, 0)));
+        let (env, client, admin) = setup();
+        client.register_transition(&admin, &meta(&env, v(1, 0, 0), v(1, 1, 0)));
 
-        let result = c2.dry_run(&v(1, 0, 0), &v(1, 1, 0));
+        let result = client.dry_run(&v(1, 0, 0), &v(1, 1, 0));
         assert_eq!(result, InvariantResult::Pass);
     }
 
     #[test]
     fn test_unsupported_transition_rejected() {
-        let (env, client) = setup();
-        let env2 = Env::default();
-        env2.mock_all_auths();
-        let id2 = env2.register(SchemaRegistry, ());
-        let c2 = SchemaRegistryClient::new(&env2, &id2);
-        let admin2 = Address::generate(&env2);
-        c2.initialize(&admin2);
-
-        let result = c2.try_dry_run(&v(1, 0, 0), &v(9, 0, 0));
+        let (_, client, _) = setup();
+        // No transition registered for 1.0.0 → 9.0.0
+        let result = client.try_dry_run(&v(1, 0, 0), &v(9, 0, 0));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_migration_idempotency_guard() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let id = env.register(SchemaRegistry, ());
-        let client = SchemaRegistryClient::new(&env, &id);
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
+        let (env, client, admin) = setup();
         client.register_transition(&admin, &meta(&env, v(1, 0, 0), v(1, 1, 0)));
 
         let hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
         let exec = Address::generate(&env);
         client.execute_migration(&exec, &v(1, 0, 0), &v(1, 1, 0), &hash);
 
-        // Second execution must fail
+        // Second execution must fail with AlreadyExecuted
         let result = client.try_execute_migration(&exec, &v(1, 0, 0), &v(1, 1, 0), &hash);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_invariant_downgrade_blocked() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let id = env.register(SchemaRegistry, ());
-        let client = SchemaRegistryClient::new(&env, &id);
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-        // Register a downgrade transition (should pass registration but fail dry-run)
-        let bad_meta = CompatibilityMeta {
-            source: v(2, 0, 0),
-            target: v(1, 0, 0),
-            requires_dry_run: false,
-            description: soroban_sdk::String::from_str(&env, "bad"),
-        };
-        // register_transition does not validate semantics; execution will fail invariant
-        // Here we just verify version_id ordering is enforced in check_invariants.
-        // Direct call to dry_run with unregistered transition returns UnsupportedTransition.
+        let (_, client, _) = setup();
+        // No transition registered for 2.0.0 → 1.0.0; dry_run must fail
         let result = client.try_dry_run(&v(2, 0, 0), &v(1, 0, 0));
         assert!(result.is_err());
     }
