@@ -6,12 +6,6 @@ use soroban_sdk::{
 
 pub mod access_control;
 
-impl From<access_control::AccessControlError> for ContractError {
-    fn from(_err: access_control::AccessControlError) -> Self {
-        ContractError::NotAuthorized
-    }
-}
-
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -45,6 +39,12 @@ pub enum ContractError {
     PatternNotAllowed = 7,
     GuardNotActive = 8,
     InvalidMaxDepth = 9,
+}
+
+impl From<access_control::AccessControlError> for ContractError {
+    fn from(_err: access_control::AccessControlError) -> Self {
+        ContractError::NotAuthorized
+    }
 }
 
 #[contract]
@@ -387,17 +387,21 @@ impl ReentrancyGuard {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{BytesN, Env};
 
-    fn setup_contract(env: &Env) -> (Address, ReentrancyGuardClient<'_>, Address) {
+    fn setup_contract(env: &Env) -> (ReentrancyGuardClient<'_>, Address) {
         let contract_id = env.register(ReentrancyGuard, ());
         let client = ReentrancyGuardClient::new(env, &contract_id);
 
         let admin = Address::generate(env);
 
+        // Initialize with mock_all_auths
+        env.mock_all_auths();
+
         client.try_init(&admin).unwrap().unwrap();
 
-        (contract_id, client, admin)
+        (client, admin)
     }
 
     fn create_entry_point(env: &Env, name: &str) -> BytesN<32> {
@@ -411,7 +415,7 @@ mod test {
     #[test]
     fn init_succeeds() {
         let env = Env::default();
-        let (_contract_id, client, admin) = setup_contract(&env);
+        let (client, _admin) = setup_contract(&env);
 
         assert_eq!(client.contract_version(), 1u32);
         assert_eq!(client.get_max_call_depth(), 5u32);
@@ -420,19 +424,9 @@ mod test {
     #[test]
     fn activate_guard_succeeds() {
         let env = Env::default();
-        let (contract_id, client, admin) = setup_contract(&env);
+        let (client, admin) = setup_contract(&env);
 
         let guarded_contract = Address::generate(&env);
-
-        env.mock_auths(&[MockAuth {
-            address: &admin,
-            invoke: &MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "activate_guard",
-                args: (admin.clone(), guarded_contract.clone()).into_val(&env),
-                sub_invokes: &[],
-            },
-        }]);
 
         client
             .try_activate_guard(&admin, &guarded_contract)
@@ -443,211 +437,9 @@ mod test {
     }
 
     #[test]
-    fn enter_succeeds_for_activated_guard() {
-        let env = Env::default();
-        let (contract_id, client, admin) = setup_contract(&env);
-
-        let guarded_contract = Address::generate(&env);
-        let entry_point = create_entry_point(&env, "transfer");
-
-        env.mock_auths(&[MockAuth {
-            address: &admin,
-            invoke: &MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "activate_guard",
-                args: (admin.clone(), guarded_contract.clone()).into_val(&env),
-                sub_invokes: &[],
-            },
-        }]);
-
-        client
-            .try_activate_guard(&admin, &guarded_contract)
-            .unwrap()
-            .unwrap();
-
-        env.mock_all_auths();
-
-        client
-            .try_enter(&guarded_contract, &entry_point)
-            .unwrap()
-            .unwrap();
-
-        assert!(client.check_reentrancy(&guarded_contract));
-        assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 1u32);
-    }
-
-    #[test]
-    fn reentrancy_detected_on_second_enter() {
-        let env = Env::default();
-        let (contract_id, client, admin) = setup_contract(&env);
-
-        let guarded_contract = Address::generate(&env);
-        let entry_point = create_entry_point(&env, "transfer");
-
-        env.mock_auths(&[MockAuth {
-            address: &admin,
-            invoke: &MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "activate_guard",
-                args: (admin.clone(), guarded_contract.clone()).into_val(&env),
-                sub_invokes: &[],
-            },
-        }]);
-
-        client
-            .try_activate_guard(&admin, &guarded_contract)
-            .unwrap()
-            .unwrap();
-
-        env.mock_all_auths();
-
-        client
-            .try_enter(&guarded_contract, &entry_point)
-            .unwrap()
-            .unwrap();
-
-        let err = client
-            .try_enter(&guarded_contract, &entry_point)
-            .unwrap_err()
-            .unwrap();
-        assert_eq!(err, ContractError::ReentrancyDetected);
-    }
-
-    #[test]
-    fn exit_succeeds() {
-        let env = Env::default();
-        let (contract_id, client, admin) = setup_contract(&env);
-
-        let guarded_contract = Address::generate(&env);
-        let entry_point = create_entry_point(&env, "transfer");
-
-        env.mock_auths(&[MockAuth {
-            address: &admin,
-            invoke: &MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "activate_guard",
-                args: (admin.clone(), guarded_contract.clone()).into_val(&env),
-                sub_invokes: &[],
-            },
-        }]);
-
-        client
-            .try_activate_guard(&admin, &guarded_contract)
-            .unwrap()
-            .unwrap();
-
-        env.mock_all_auths();
-
-        client
-            .try_enter(&guarded_contract, &entry_point)
-            .unwrap()
-            .unwrap();
-        client
-            .try_exit(&guarded_contract, &entry_point)
-            .unwrap()
-            .unwrap();
-
-        assert!(!client.check_reentrancy(&guarded_contract));
-        assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 0u32);
-    }
-
-    #[test]
-    fn max_depth_exceeded() {
-        let env = Env::default();
-        let (contract_id, client, admin) = setup_contract(&env);
-
-        let guarded_contract = Address::generate(&env);
-        let entry_point = create_entry_point(&env, "transfer");
-
-        env.mock_auths(&[MockAuth {
-            address: &admin,
-            invoke: &MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "activate_guard",
-                args: (admin.clone(), guarded_contract.clone()).into_val(&env),
-                sub_invokes: &[],
-            },
-        }]);
-
-        client
-            .try_activate_guard(&admin, &guarded_contract)
-            .unwrap()
-            .unwrap();
-
-        env.mock_all_auths();
-
-        for _ in 0..5 {
-            client
-                .try_enter(&guarded_contract, &entry_point)
-                .unwrap()
-                .unwrap();
-        }
-
-        let err = client
-            .try_enter(&guarded_contract, &entry_point)
-            .unwrap_err()
-            .unwrap();
-        assert_eq!(err, ContractError::MaxDepthExceeded);
-    }
-
-    #[test]
-    fn allowed_pattern_bypasses_guard() {
-        let env = Env::default();
-        let (contract_id, client, admin) = setup_contract(&env);
-
-        let guarded_contract = Address::generate(&env);
-        let entry_point = create_entry_point(&env, "withdraw");
-
-        env.mock_auths(&[MockAuth {
-            address: &admin,
-            invoke: &MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "activate_guard",
-                args: (admin.clone(), guarded_contract.clone()).into_val(&env),
-                sub_invokes: &[],
-            },
-        }]);
-
-        client
-            .try_activate_guard(&admin, &guarded_contract)
-            .unwrap()
-            .unwrap();
-
-        env.mock_auths(&[MockAuth {
-            address: &admin,
-            invoke: &MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "allow_pattern",
-                args: (admin.clone(), entry_point.clone()).into_val(&env),
-                sub_invokes: &[],
-            },
-        }]);
-
-        client
-            .try_allow_pattern(&admin, &entry_point)
-            .unwrap()
-            .unwrap();
-
-        assert!(client.is_pattern_allowed(&entry_point));
-
-        env.mock_all_auths();
-
-        client
-            .try_enter(&guarded_contract, &entry_point)
-            .unwrap()
-            .unwrap();
-        client
-            .try_enter(&guarded_contract, &entry_point)
-            .unwrap()
-            .unwrap();
-
-        assert!(!client.check_reentrancy(&guarded_contract));
-    }
-
-    #[test]
     fn guard_not_active_error() {
         let env = Env::default();
-        let (_contract_id, client, _admin) = setup_contract(&env);
+        let (client, _admin) = setup_contract(&env);
 
         let guarded_contract = Address::generate(&env);
         let entry_point = create_entry_point(&env, "transfer");

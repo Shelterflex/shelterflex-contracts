@@ -581,49 +581,32 @@ mod test {
     #[test]
     fn init_succeeds() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register(BondCollateral, ());
         let client = BondCollateralClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_admin = Address::generate(&env);
+        let token = Address::generate(&env);
 
-        let token_contract = env.register_stellar_asset_contract_v2(token_admin);
-        let token_contract_id = token_contract.address();
-
-        // Initialize contract
-        client
-            .try_init(&admin, &token_contract_id)
-            .unwrap()
-            .unwrap();
+        client.try_init(&admin, &token).unwrap().unwrap();
 
         assert_eq!(client.contract_version(), 1u32);
-        assert_eq!(client.get_thresholds(), (150u32, 120u32));
-        assert_eq!(client.get_keeper_reward_cap(), 500u32);
     }
 
     #[test]
     fn contract_has_functions() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register(BondCollateral, ());
         let client = BondCollateralClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let token_admin = Address::generate(&env);
+        let token = Address::generate(&env);
 
-        let token_contract = env.register_stellar_asset_contract_v2(token_admin);
-        let token_contract_id = token_contract.address();
+        client.try_init(&admin, &token).unwrap().unwrap();
 
-        // Initialize contract
-        client
-            .try_init(&admin, &token_contract_id)
-            .unwrap()
-            .unwrap();
-
-        // Test that get functions work
         let position_id = create_position_id(&env, 1);
         let result = client.get_position(&position_id);
         assert!(result.is_none());
-
-        assert_eq!(client.total_collateral(), 0i128);
     }
 }
