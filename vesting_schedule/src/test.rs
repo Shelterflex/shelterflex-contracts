@@ -1,14 +1,14 @@
 use soroban_sdk::{Address, Env};
+use soroban_sdk::testutils::Address as _;
 
 use crate::{
-    calculate_claimable_amount, calculate_vested_amount, DataKey, VestingSchedule,
-    VestingScheduleContract,
+    calculate_claimable_amount, calculate_vested_amount, VestingSchedule,
 };
 
 #[test]
 fn test_calculate_vested_amount() {
     let schedule = VestingSchedule {
-        beneficiary: Address::generate(&soroban_sdk::Env::default()),
+        beneficiary: Address::generate(&Env::default()),
         total_amount: 1000,
         claimed_amount: 0,
         start_time: 1000,
@@ -34,7 +34,7 @@ fn test_calculate_vested_amount() {
 #[test]
 fn test_calculate_claimable_amount() {
     let schedule = VestingSchedule {
-        beneficiary: Address::generate(&soroban_sdk::Env::default()),
+        beneficiary: Address::generate(&Env::default()),
         total_amount: 1000,
         claimed_amount: 200,
         start_time: 1000,

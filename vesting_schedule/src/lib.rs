@@ -1,8 +1,7 @@
 #![no_std]
 
-use soroban_pausable::{Pausable, PausableError};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, Map, Symbol, U256,
+    contract, contracterror, contractimpl, contracttype, Address, Env,
 };
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -221,7 +220,7 @@ impl VestingScheduleContract {
         set_vesting_schedule(&env, &beneficiary, &schedule);
 
         // Transfer tokens from contract to beneficiary
-        let token = get_token(&env);
+        let _token = get_token(&env);
         // Note: In a real implementation, you would use the token contract's transfer function
         // This is a simplified version that assumes the contract holds the tokens
     }
