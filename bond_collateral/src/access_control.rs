@@ -1,4 +1,4 @@
-use soroban_sdk::{contracterror, Address, Env, Symbol};
+use soroban_sdk::{contracterror, Address, Env};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -9,7 +9,7 @@ pub enum AccessControlError {
 
 /// Helper: require that `caller` is the expected admin; otherwise error.
 pub fn require_admin_permission(
-    env: &Env,
+    _env: &Env,
     expected_admin: &Address,
     caller: &Address,
     _fn_name: &str,

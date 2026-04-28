@@ -224,6 +224,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bond_collateral"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "soroban_access_control",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1151,6 +1159,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.5",
+]
+
+[[package]]
+name = "reentrancy_guard"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "soroban_access_control",
 ]
 
 [[package]]

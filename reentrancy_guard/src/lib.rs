@@ -1,10 +1,17 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env,
+    Symbol,
 };
 
 pub mod access_control;
+
+impl From<access_control::AccessControlError> for ContractError {
+    fn from(_err: access_control::AccessControlError) -> Self {
+        ContractError::NotAuthorized
+    }
+}
 
 #[contracttype]
 #[derive(Clone)]
