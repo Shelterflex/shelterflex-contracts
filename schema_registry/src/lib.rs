@@ -19,7 +19,7 @@
 //! If any step fails the contract panics and the ledger transaction reverts,
 //! leaving the state unchanged.
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec, Map, String};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, String, Symbol, Vec};
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
@@ -87,12 +87,12 @@ pub enum InvariantResult {
 #[derive(Clone, Debug, PartialEq)]
 #[repr(u32)]
 pub enum RegistryError {
-    Unauthorized         = 1,
+    Unauthorized = 1,
     UnsupportedTransition = 2,
-    InvariantViolation   = 3,
-    AlreadyExecuted      = 4,
-    DryRunRequired       = 5,
-    InvalidVersion       = 6,
+    InvariantViolation = 3,
+    AlreadyExecuted = 4,
+    DryRunRequired = 5,
+    InvalidVersion = 6,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -108,8 +108,14 @@ impl SchemaRegistry {
         if env.storage().persistent().has(&DataKey::Admin) {
             panic!("already initialized");
         }
-        let initial = SchemaVersion { major: 1, minor: 0, patch: 0 };
-        env.storage().persistent().set(&DataKey::RegistrySchemaVersion, &initial);
+        let initial = SchemaVersion {
+            major: 1,
+            minor: 0,
+            patch: 0,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::RegistrySchemaVersion, &initial);
         env.storage().persistent().set(&DataKey::Admin, &admin);
         env.storage().persistent().set(
             &DataKey::CompatibilityMatrix,
@@ -131,14 +137,19 @@ impl SchemaRegistry {
             return Err(RegistryError::InvalidVersion);
         }
 
-        let key = (Self::version_id(&meta.source), Self::version_id(&meta.target));
+        let key = (
+            Self::version_id(&meta.source),
+            Self::version_id(&meta.target),
+        );
         let mut matrix: Map<(u32, u32), CompatibilityMeta> = env
             .storage()
             .persistent()
             .get(&DataKey::CompatibilityMatrix)
             .unwrap_or_else(|| Map::new(&env));
         matrix.set(key, meta);
-        env.storage().persistent().set(&DataKey::CompatibilityMatrix, &matrix);
+        env.storage()
+            .persistent()
+            .set(&DataKey::CompatibilityMatrix, &matrix);
         Ok(())
     }
 
@@ -189,7 +200,9 @@ impl SchemaRegistry {
             .get(&DataKey::CompatibilityMatrix)
             .unwrap_or_else(|| Map::new(&env));
 
-        let meta = matrix.get(key).ok_or(RegistryError::UnsupportedTransition)?;
+        let meta = matrix
+            .get(key)
+            .ok_or(RegistryError::UnsupportedTransition)?;
 
         // 2. Idempotency guard — replay protection
         let receipt_key = DataKey::MigrationReceipt(src_id, tgt_id);
@@ -234,11 +247,7 @@ impl SchemaRegistry {
 
     // ── Queries ───────────────────────────────────────────────────────────────
 
-    pub fn is_transition_supported(
-        env: Env,
-        source: SchemaVersion,
-        target: SchemaVersion,
-    ) -> bool {
+    pub fn is_transition_supported(env: Env, source: SchemaVersion, target: SchemaVersion) -> bool {
         let key = (Self::version_id(&source), Self::version_id(&target));
         let matrix: Map<(u32, u32), CompatibilityMeta> = env
             .storage()
@@ -261,7 +270,11 @@ impl SchemaRegistry {
         env.storage()
             .persistent()
             .get(&DataKey::RegistrySchemaVersion)
-            .unwrap_or(SchemaVersion { major: 1, minor: 0, patch: 0 })
+            .unwrap_or(SchemaVersion {
+                major: 1,
+                minor: 0,
+                patch: 0,
+            })
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
@@ -295,16 +308,18 @@ impl SchemaRegistry {
         let src_id = Self::version_id(source);
         let tgt_id = Self::version_id(target);
         if tgt_id <= src_id {
-            return InvariantResult::Fail(
-                soroban_sdk::String::from_str(_env, "target version must exceed source version"),
-            );
+            return InvariantResult::Fail(soroban_sdk::String::from_str(
+                _env,
+                "target version must exceed source version",
+            ));
         }
 
         // Invariant 2: major version bumps are permitted only when minor == 0
         if target.major > source.major && target.minor != 0 {
-            return InvariantResult::Fail(
-                soroban_sdk::String::from_str(_env, "major bump must reset minor to 0"),
-            );
+            return InvariantResult::Fail(soroban_sdk::String::from_str(
+                _env,
+                "major bump must reset minor to 0",
+            ));
         }
 
         InvariantResult::Pass
@@ -330,7 +345,11 @@ mod tests {
     }
 
     fn v(major: u32, minor: u32, patch: u32) -> SchemaVersion {
-        SchemaVersion { major, minor, patch }
+        SchemaVersion {
+            major,
+            minor,
+            patch,
+        }
     }
 
     fn meta(env: &Env, src: SchemaVersion, tgt: SchemaVersion) -> CompatibilityMeta {
