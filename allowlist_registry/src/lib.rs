@@ -10,8 +10,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype,
-    Address, Env, Map, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, Map, String, Symbol, Vec,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -22,12 +21,12 @@ use soroban_sdk::{
 #[derive(Clone, Debug)]
 pub struct Entry {
     /// Human-readable label (role, tier, etc.)
-    pub label:      String,
+    pub label: String,
     /// Unix timestamp (seconds) after which the entry is considered expired.
     /// 0 means no expiry.
     pub expires_at: u64,
     /// When this entry was added (ledger sequence number for auditability).
-    pub added_at:   u32,
+    pub added_at: u32,
 }
 
 #[contracttype]
@@ -40,12 +39,12 @@ pub enum DataKey {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Error {
-    NotInitialized    = 1,
+    NotInitialized = 1,
     AlreadyInitialized = 2,
-    Unauthorized      = 3,
-    EntryNotFound     = 4,
-    AlreadyExists     = 5,
-    InvalidExpiry     = 6,
+    Unauthorized = 3,
+    EntryNotFound = 4,
+    AlreadyExists = 5,
+    InvalidExpiry = 6,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,10 +148,8 @@ impl AllowlistRegistry {
         reg.remove(address.clone());
         save_registry(&env, &reg);
 
-        env.events().publish(
-            (Symbol::new(&env, "remove"), address),
-            (),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "remove"), address), ());
         Ok(())
     }
 
@@ -187,10 +184,8 @@ impl AllowlistRegistry {
         }
 
         save_registry(&env, &reg);
-        env.events().publish(
-            (Symbol::new(&env, "bulk_add"),),
-            count,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "bulk_add"),), count);
         Ok(count)
     }
 
@@ -317,12 +312,7 @@ mod tests {
         let stranger = Address::generate(&env);
         let target = Address::generate(&env);
 
-        let result = client.try_add(
-            &stranger,
-            &target,
-            &String::from_str(&env, "x"),
-            &0,
-        );
+        let result = client.try_add(&stranger, &target, &String::from_str(&env, "x"), &0);
         assert!(result.is_err());
     }
 
