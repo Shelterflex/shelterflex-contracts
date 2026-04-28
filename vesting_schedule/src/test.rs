@@ -16,11 +16,17 @@ fn test_calculate_vested_amount() {
         revoked: false,
     };
 
-    // Before cliff
-    assert_eq!(calculate_vested_amount(&schedule, 1100), 0);
+    // Before start
+    assert_eq!(calculate_vested_amount(&schedule, 900), 0);
+
+    // At start
+    assert_eq!(calculate_vested_amount(&schedule, 1000), 0);
+
+    // Before cliff (vesting accrues from start)
+    assert_eq!(calculate_vested_amount(&schedule, 1100), 100);
 
     // At cliff
-    assert_eq!(calculate_vested_amount(&schedule, 1200), 100);
+    assert_eq!(calculate_vested_amount(&schedule, 1200), 200);
 
     // Halfway
     assert_eq!(calculate_vested_amount(&schedule, 1500), 500);

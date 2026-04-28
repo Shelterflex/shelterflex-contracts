@@ -109,8 +109,9 @@ fn set_vesting_schedule(env: &Env, beneficiary: &Address, schedule: &VestingSche
 }
 
 /// Calculate the vested amount at a given timestamp
+/// Vesting accrues from start_time, but cannot be claimed until cliff_time
 fn calculate_vested_amount(schedule: &VestingSchedule, current_time: u64) -> i128 {
-    if current_time < schedule.cliff_time {
+    if current_time < schedule.start_time {
         return 0;
     }
     if current_time >= schedule.end_time {
@@ -120,10 +121,10 @@ fn calculate_vested_amount(schedule: &VestingSchedule, current_time: u64) -> i12
         return 0;
     }
 
+    // Linear vesting from start to end: (elapsed / total_duration) * total_amount
     let elapsed = current_time - schedule.start_time;
     let total_duration = schedule.end_time - schedule.start_time;
 
-    // Linear vesting: (elapsed / total_duration) * total_amount
     let vested = (elapsed as i128) * schedule.total_amount / (total_duration as i128);
     vested.min(schedule.total_amount)
 }
