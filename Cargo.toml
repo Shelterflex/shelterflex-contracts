@@ -17,6 +17,9 @@ members = [
   "allowlist_registry",
   "bond_collateral",
   "reentrancy_guard",
+  "epoch_rewards",
+  "slashing_module",
+  "stake_delegation",
 ]
 
 [profile.release-with-logs]
