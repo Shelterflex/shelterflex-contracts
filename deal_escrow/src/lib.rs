@@ -5,22 +5,34 @@ extern crate alloc;
 use soroban_pausable::{Pausable, PausableError};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token::Client as TokenClient, Address,
-    BytesN, Env, String, Symbol,
+    BytesN, Env, String, Symbol, Vec,
 };
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
+pub mod access_control;
+pub mod validation;
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     ContractVersion,
+    StorageSchemaVersion,
     Admin,
     Operator,
+    Resolver,
+    ChallengeWindowSeconds,
+    DisputeTimeoutSeconds,
     Token,
     ReceiptContract,
     Paused,
     /// Per-deal balance in persistent storage (#386 gas optimisation)
     DealBalance(String),
+    DealDepositor(String),
+    DealState(String),
+    PendingRentRelease(String),
+    RentDispute(String),
+    LegacyLockedAmountV2(String),
+    LegacyPendingPayoutV2(String),
     /// Reentrancy lock (#390)
     Reentrancy,
     // ── Upgrade governance (#392) ─────────────────────────────────────────
@@ -28,6 +40,11 @@ pub enum DataKey {
     UpgradeDelay,
     PendingUpgradeHash,
     PendingUpgradeAt,
+    // ── Circuit breaker (#393) ──────────────────────────────────────────
+    CircuitBreakerState,
+    PendingDrainHash,
+    PendingDrainAt,
+    RecoveryDelaySeconds,
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -41,6 +58,7 @@ pub enum ContractError {
     Paused = 3,
     InvalidAmount = 4,
     InsufficientBalance = 5,
+    EmptyString = 10,
     // Cross-contract communication errors (#390)
     /// Reentrancy detected
     ReentrancyDetected = 6,
@@ -48,7 +66,77 @@ pub enum ContractError {
     UpgradeAlreadyPending = 7,
     NoUpgradePending = 8,
     UpgradeDelayNotMet = 9,
+    InvalidSchemaVersion = 11,
+    MigrationInvariantViolation = 12,
+    MigrationNotRequired = 13,
+    PendingReleaseExists = 14,
+    NoPendingRelease = 15,
+    InvalidReleaseWindow = 16,
+    NoOpenDispute = 17,
+    DisputeNotAllowed = 18,
+    InvalidEvidenceRef = 19,
+    InvalidSettlement = 20,
+    // Circuit breaker errors (#393)
+    Frozen = 21,
+    DrainRestricted = 22,
+    InvalidGovernanceDrain = 23,
+    RecoveryDelayNotMet = 24,
 }
+
+#[contracttype]
+#[derive(Clone)]
+pub struct DealState {
+    pub total_balance: i128,
+    pub locked_amount: i128,
+    pub pending_payout: i128,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingRentRelease {
+    pub to: Address,
+    pub amount: i128,
+    pub requested_by: Address,
+    pub requested_at: u64,
+    pub challenge_end_at: u64,
+    pub external_ref_source: Symbol,
+    pub external_ref: String,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct RentDispute {
+    pub opened_by: Address,
+    pub opened_at: u64,
+    pub evidence_ref: String,
+    pub challenge_evidence_ref: String,
+    pub resolved: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SettlementOutcome {
+    ReleaseToRecipient = 1,
+    RefundToDepositor = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u32)]
+pub enum CircuitBreakerState {
+    Unfrozen = 0,
+    Frozen = 1,
+    RecoveryAwaiting = 2,
+}
+
+const STORAGE_SCHEMA_V1: u32 = 1;
+const STORAGE_SCHEMA_V2: u32 = 2;
+const STORAGE_SCHEMA_V3: u32 = 3;
+
+// ── Default values ───────────────────────────────────────────────────────
+
+const DEFAULT_CIRCUIT_BREAKER_STATE: CircuitBreakerState = CircuitBreakerState::Unfrozen;
 
 // ── Contract ─────────────────────────────────────────────────────────────────
 
@@ -64,11 +152,38 @@ fn get_admin(env: &Env) -> Address {
         .expect("admin not set")
 }
 
+fn get_storage_schema_version(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get::<_, u32>(&DataKey::StorageSchemaVersion)
+        .unwrap_or(STORAGE_SCHEMA_V1)
+}
+
 fn get_operator(env: &Env) -> Address {
     env.storage()
         .instance()
         .get::<_, Address>(&DataKey::Operator)
         .expect("operator not set")
+}
+
+fn get_resolver(env: &Env) -> Option<Address> {
+    env.storage()
+        .instance()
+        .get::<_, Address>(&DataKey::Resolver)
+}
+
+fn get_challenge_window_seconds(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get::<_, u64>(&DataKey::ChallengeWindowSeconds)
+        .unwrap_or(24 * 60 * 60)
+}
+
+fn get_dispute_timeout_seconds(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get::<_, u64>(&DataKey::DisputeTimeoutSeconds)
+        .unwrap_or(48 * 60 * 60)
 }
 
 fn get_token(env: &Env) -> Address {
@@ -83,6 +198,47 @@ fn get_paused(env: &Env) -> bool {
         .instance()
         .get::<_, bool>(&DataKey::Paused)
         .unwrap_or(false)
+}
+
+fn get_circuit_breaker_state(env: &Env) -> CircuitBreakerState {
+    env.storage()
+        .instance()
+        .get::<_, CircuitBreakerState>(&DataKey::CircuitBreakerState)
+        .unwrap_or(CircuitBreakerState::Unfrozen)
+}
+
+fn get_recovery_delay_seconds(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get::<_, u64>(&DataKey::RecoveryDelaySeconds)
+        .unwrap_or(24 * 60 * 60) // Default 24 hours
+}
+
+fn get_pending_drain_hash(env: &Env) -> Option<BytesN<32>> {
+    env.storage()
+        .instance()
+        .get::<_, BytesN<32>>(&DataKey::PendingDrainHash)
+}
+
+fn get_pending_drain_at(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get::<_, u64>(&DataKey::PendingDrainAt)
+}
+
+fn require_not_frozen(env: &Env, is_governance_drain: bool) -> Result<(), ContractError> {
+    let state = get_circuit_breaker_state(env);
+    match state {
+        CircuitBreakerState::Unfrozen => Ok(()),
+        CircuitBreakerState::Frozen => {
+            if is_governance_drain {
+                Ok(()) // Allow governance drain path
+            } else {
+                Err(ContractError::Frozen)
+            }
+        }
+        CircuitBreakerState::RecoveryAwaiting => Err(ContractError::RecoveryDelayNotMet),
+    }
 }
 
 fn require_not_paused(env: &Env) -> Result<(), ContractError> {
@@ -106,13 +262,87 @@ fn put_deal_balance(env: &Env, deal_id: &String, amount: i128) {
         .set(&DataKey::DealBalance(deal_id.clone()), &amount);
 }
 
-fn require_admin_or_operator(env: &Env, caller: &Address) -> Result<(), ContractError> {
-    let admin = get_admin(env);
-    let operator = get_operator(env);
-    if caller != &admin && caller != &operator {
-        return Err(ContractError::NotAuthorized);
+fn get_deal_depositor(env: &Env, deal_id: &String) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get::<_, Address>(&DataKey::DealDepositor(deal_id.clone()))
+}
+
+fn set_deal_depositor_if_missing(env: &Env, deal_id: &String, depositor: &Address) {
+    let key = DataKey::DealDepositor(deal_id.clone());
+    if !env.storage().persistent().has(&key) {
+        env.storage().persistent().set(&key, depositor);
+    }
+}
+
+fn get_deal_state(env: &Env, deal_id: &String) -> DealState {
+    if let Some(state) = env
+        .storage()
+        .persistent()
+        .get::<_, DealState>(&DataKey::DealState(deal_id.clone()))
+    {
+        return state;
+    }
+    DealState {
+        total_balance: get_deal_balance(env, deal_id),
+        locked_amount: 0,
+        pending_payout: 0,
+    }
+}
+
+fn set_deal_state(env: &Env, deal_id: &String, state: &DealState) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::DealState(deal_id.clone()), state);
+}
+
+fn assert_deal_invariants(state: &DealState) -> Result<(), ContractError> {
+    if state.total_balance < 0 || state.locked_amount < 0 || state.pending_payout < 0 {
+        return Err(ContractError::MigrationInvariantViolation);
+    }
+    if state.locked_amount != state.pending_payout {
+        return Err(ContractError::MigrationInvariantViolation);
+    }
+    if state.locked_amount > state.total_balance {
+        return Err(ContractError::MigrationInvariantViolation);
     }
     Ok(())
+}
+
+fn get_pending_release(env: &Env, deal_id: &String) -> Option<PendingRentRelease> {
+    env.storage()
+        .persistent()
+        .get::<_, PendingRentRelease>(&DataKey::PendingRentRelease(deal_id.clone()))
+}
+
+fn set_pending_release(env: &Env, deal_id: &String, release: &PendingRentRelease) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::PendingRentRelease(deal_id.clone()), release);
+}
+
+fn clear_pending_release(env: &Env, deal_id: &String) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingRentRelease(deal_id.clone()));
+}
+
+fn get_dispute(env: &Env, deal_id: &String) -> Option<RentDispute> {
+    env.storage()
+        .persistent()
+        .get::<_, RentDispute>(&DataKey::RentDispute(deal_id.clone()))
+}
+
+fn set_dispute(env: &Env, deal_id: &String, dispute: &RentDispute) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::RentDispute(deal_id.clone()), dispute);
+}
+
+fn clear_dispute(env: &Env, deal_id: &String) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::RentDispute(deal_id.clone()));
 }
 
 /// Reentrancy guard (#390)
@@ -180,6 +410,9 @@ impl DealEscrow {
             .set(&DataKey::ContractVersion, &1u32);
         env.storage()
             .instance()
+            .set(&DataKey::StorageSchemaVersion, &STORAGE_SCHEMA_V3);
+        env.storage()
+            .instance()
             .set(&DataKey::ReceiptContract, &receipt_contract);
         env.storage().instance().set(&DataKey::Paused, &false);
         // #389: consistent init event with version
@@ -204,9 +437,8 @@ impl DealEscrow {
         amount: i128,
     ) -> Result<(), ContractError> {
         require_not_paused(&env)?;
-        if amount <= 0 {
-            return Err(ContractError::InvalidAmount);
-        }
+        validation::require_valid_amount(amount)?;
+        validation::require_non_empty_string(&env, &deal_id)?;
         from.require_auth();
         let token_addr = get_token(&env);
         let token_client = TokenClient::new(&env, &token_addr);
@@ -219,6 +451,11 @@ impl DealEscrow {
         // #386: per-key persistent storage
         let cur = get_deal_balance(&env, &deal_id);
         put_deal_balance(&env, &deal_id, cur + amount);
+        set_deal_depositor_if_missing(&env, &deal_id, &from);
+        let mut state = get_deal_state(&env, &deal_id);
+        state.total_balance = cur + amount;
+        assert_deal_invariants(&state)?;
+        set_deal_state(&env, &deal_id, &state);
 
         env.events().publish(
             (
@@ -239,8 +476,14 @@ impl DealEscrow {
         external_ref: String,
     ) -> Result<i128, ContractError> {
         require_not_paused(&env)?;
-        caller.require_auth();
-        require_admin_or_operator(&env, &caller)?;
+        require_not_frozen(&env, false)?;
+        validation::require_non_empty_string(&env, &deal_id)?;
+        validation::require_non_empty_string(&env, &external_ref)?;
+        let admin = get_admin(&env);
+        let operator = get_operator(&env);
+        access_control::require_admin_or_operator_permission(
+            &env, &admin, &operator, &caller, "release",
+        )?;
 
         // #386: per-key persistent storage
         let cur = get_deal_balance(&env, &deal_id);
@@ -251,6 +494,12 @@ impl DealEscrow {
         let token_client = TokenClient::new(&env, &token_addr);
 
         put_deal_balance(&env, &deal_id, 0);
+        let mut state = get_deal_state(&env, &deal_id);
+        state.total_balance = 0;
+        state.locked_amount = 0;
+        state.pending_payout = 0;
+        assert_deal_invariants(&state)?;
+        set_deal_state(&env, &deal_id, &state);
 
         let tx_id = generate_tx_id(&env, &external_ref_source, &external_ref);
 
@@ -272,18 +521,347 @@ impl DealEscrow {
     pub fn balance(env: Env, deal_id: String) -> i128 {
         get_deal_balance(&env, &deal_id)
     }
+
+    pub fn storage_schema_version(env: Env) -> u32 {
+        get_storage_schema_version(&env)
+    }
+
+    pub fn configure_dispute_windows(
+        env: Env,
+        admin: Address,
+        challenge_window_seconds: u64,
+        dispute_timeout_seconds: u64,
+    ) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "configure_dispute_windows",
+        )?;
+        if challenge_window_seconds == 0 || dispute_timeout_seconds == 0 {
+            return Err(ContractError::InvalidReleaseWindow);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ChallengeWindowSeconds, &challenge_window_seconds);
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeTimeoutSeconds, &dispute_timeout_seconds);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "configure_dispute_windows"),
+            ),
+            (challenge_window_seconds, dispute_timeout_seconds),
+        );
+        Ok(())
+    }
+
+    pub fn set_resolver(env: Env, admin: Address, resolver: Address) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_resolver")?;
+        env.storage().instance().set(&DataKey::Resolver, &resolver);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "set_resolver"),
+            ),
+            resolver,
+        );
+        Ok(())
+    }
+
+    pub fn migrate_storage_schema(
+        env: Env,
+        admin: Address,
+        from_version: u32,
+        deal_ids: Vec<String>,
+    ) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "migrate_storage_schema",
+        )?;
+        let current = get_storage_schema_version(&env);
+        if current == STORAGE_SCHEMA_V3 {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "deal_escrow"),
+                    Symbol::new(&env, "migration_noop"),
+                ),
+                (current, STORAGE_SCHEMA_V3),
+            );
+            return Ok(());
+        }
+        if current != from_version
+            || !(from_version == STORAGE_SCHEMA_V1 || from_version == STORAGE_SCHEMA_V2)
+        {
+            return Err(ContractError::InvalidSchemaVersion);
+        }
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "migration_started"),
+            ),
+            (from_version, STORAGE_SCHEMA_V3, deal_ids.len()),
+        );
+
+        for deal_id in deal_ids.iter() {
+            let balance = get_deal_balance(&env, &deal_id);
+            let mut locked = 0i128;
+            let mut pending = 0i128;
+            if from_version == STORAGE_SCHEMA_V2 {
+                locked = env
+                    .storage()
+                    .persistent()
+                    .get::<_, i128>(&DataKey::LegacyLockedAmountV2(deal_id.clone()))
+                    .unwrap_or(0);
+                pending = env
+                    .storage()
+                    .persistent()
+                    .get::<_, i128>(&DataKey::LegacyPendingPayoutV2(deal_id.clone()))
+                    .unwrap_or(0);
+            }
+            let state = DealState {
+                total_balance: balance,
+                locked_amount: locked,
+                pending_payout: pending,
+            };
+            assert_deal_invariants(&state)?;
+            set_deal_state(&env, &deal_id, &state);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageSchemaVersion, &STORAGE_SCHEMA_V3);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "migration_completed"),
+            ),
+            (from_version, STORAGE_SCHEMA_V3),
+        );
+        Ok(())
+    }
+
+    pub fn request_rent_release(
+        env: Env,
+        caller: Address,
+        deal_id: String,
+        to: Address,
+        amount: i128,
+        external_ref_source: Symbol,
+        external_ref: String,
+    ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
+        validation::require_valid_amount(amount)?;
+        validation::require_non_empty_string(&env, &deal_id)?;
+        validation::require_non_empty_string(&env, &external_ref)?;
+        let admin = get_admin(&env);
+        let operator = get_operator(&env);
+        access_control::require_admin_or_operator_permission(
+            &env,
+            &admin,
+            &operator,
+            &caller,
+            "request_rent_release",
+        )?;
+        if get_pending_release(&env, &deal_id).is_some() {
+            return Err(ContractError::PendingReleaseExists);
+        }
+        let mut state = get_deal_state(&env, &deal_id);
+        if state.total_balance < amount {
+            return Err(ContractError::InsufficientBalance);
+        }
+        state.locked_amount = amount;
+        state.pending_payout = amount;
+        assert_deal_invariants(&state)?;
+        set_deal_state(&env, &deal_id, &state);
+        let now = env.ledger().timestamp();
+        let pending = PendingRentRelease {
+            to,
+            amount,
+            requested_by: caller.clone(),
+            requested_at: now,
+            challenge_end_at: now + get_challenge_window_seconds(&env),
+            external_ref_source,
+            external_ref,
+        };
+        set_pending_release(&env, &deal_id, &pending);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "rent_release_requested"),
+            ),
+            (deal_id, caller, pending.amount, pending.challenge_end_at),
+        );
+        Ok(())
+    }
+
+    pub fn challenge_rent_release(
+        env: Env,
+        caller: Address,
+        deal_id: String,
+        challenge_evidence_ref: String,
+    ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
+        validation::require_non_empty_string(&env, &deal_id)?;
+        validation::require_non_empty_string(&env, &challenge_evidence_ref)?;
+        caller.require_auth();
+        let pending = get_pending_release(&env, &deal_id).ok_or(ContractError::NoPendingRelease)?;
+        let now = env.ledger().timestamp();
+        if now > pending.challenge_end_at {
+            return Err(ContractError::DisputeNotAllowed);
+        }
+        let depositor =
+            get_deal_depositor(&env, &deal_id).ok_or(ContractError::DisputeNotAllowed)?;
+        if caller != depositor && caller != pending.to {
+            return Err(ContractError::NotAuthorized);
+        }
+        let dispute = RentDispute {
+            opened_by: caller.clone(),
+            opened_at: now,
+            evidence_ref: pending.external_ref.clone(),
+            challenge_evidence_ref,
+            resolved: false,
+        };
+        set_dispute(&env, &deal_id, &dispute);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "rent_release_challenged"),
+            ),
+            (deal_id, caller, now),
+        );
+        Ok(())
+    }
+
+    pub fn resolve_rent_dispute(
+        env: Env,
+        caller: Address,
+        deal_id: String,
+        outcome: SettlementOutcome,
+        resolution_evidence_ref: String,
+    ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
+        validation::require_non_empty_string(&env, &deal_id)?;
+        validation::require_non_empty_string(&env, &resolution_evidence_ref)?;
+        let resolver = get_resolver(&env).ok_or(ContractError::NotAuthorized)?;
+        if caller != resolver {
+            return Err(ContractError::NotAuthorized);
+        }
+        caller.require_auth();
+        let dispute = get_dispute(&env, &deal_id).ok_or(ContractError::NoOpenDispute)?;
+        if dispute.resolved {
+            return Err(ContractError::InvalidSettlement);
+        }
+        Self::settle_release_inner(&env, &deal_id, outcome, &resolution_evidence_ref, true)
+    }
+
+    pub fn settle_rent_release_timeout(env: Env, deal_id: String) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
+        validation::require_non_empty_string(&env, &deal_id)?;
+        if get_dispute(&env, &deal_id).is_some() {
+            return Err(ContractError::DisputeNotAllowed);
+        }
+        let pending = get_pending_release(&env, &deal_id).ok_or(ContractError::NoPendingRelease)?;
+        if env.ledger().timestamp() < pending.challenge_end_at {
+            return Err(ContractError::InvalidReleaseWindow);
+        }
+        Self::settle_release_inner(
+            &env,
+            &deal_id,
+            SettlementOutcome::ReleaseToRecipient,
+            &String::from_str(&env, "timeout_auto_release"),
+            false,
+        )
+    }
+
+    pub fn settle_dispute_timeout(env: Env, deal_id: String) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
+        validation::require_non_empty_string(&env, &deal_id)?;
+        let dispute = get_dispute(&env, &deal_id).ok_or(ContractError::NoOpenDispute)?;
+        if dispute.resolved {
+            return Err(ContractError::InvalidSettlement);
+        }
+        if env.ledger().timestamp() < dispute.opened_at + get_dispute_timeout_seconds(&env) {
+            return Err(ContractError::InvalidReleaseWindow);
+        }
+        Self::settle_release_inner(
+            &env,
+            &deal_id,
+            SettlementOutcome::RefundToDepositor,
+            &String::from_str(&env, "dispute_timeout_refund"),
+            false,
+        )
+    }
+
+    fn settle_release_inner(
+        env: &Env,
+        deal_id: &String,
+        outcome: SettlementOutcome,
+        resolution_evidence_ref: &String,
+        resolved_by_resolver: bool,
+    ) -> Result<(), ContractError> {
+        let pending = get_pending_release(env, deal_id).ok_or(ContractError::NoPendingRelease)?;
+        let depositor = get_deal_depositor(env, deal_id).ok_or(ContractError::InvalidSettlement)?;
+        let mut state = get_deal_state(env, deal_id);
+        if state.locked_amount != pending.amount || state.pending_payout != pending.amount {
+            return Err(ContractError::MigrationInvariantViolation);
+        }
+        let recipient = match outcome {
+            SettlementOutcome::ReleaseToRecipient => pending.to.clone(),
+            SettlementOutcome::RefundToDepositor => depositor.clone(),
+        };
+        let token_addr = get_token(env);
+        let token_client = TokenClient::new(env, &token_addr);
+        enter_nonreentrant(env)?;
+        token_client.transfer(&env.current_contract_address(), &recipient, &pending.amount);
+        exit_nonreentrant(env);
+
+        state.total_balance -= pending.amount;
+        state.locked_amount = 0;
+        state.pending_payout = 0;
+        assert_deal_invariants(&state)?;
+        set_deal_state(env, deal_id, &state);
+        put_deal_balance(env, deal_id, state.total_balance);
+        clear_pending_release(env, deal_id);
+        if let Some(mut dispute) = get_dispute(env, deal_id) {
+            dispute.resolved = true;
+            set_dispute(env, deal_id, &dispute);
+            clear_dispute(env, deal_id);
+        }
+        let tx_id = generate_tx_id(env, &pending.external_ref_source, resolution_evidence_ref);
+        env.events().publish(
+            (
+                Symbol::new(env, "deal_escrow"),
+                Symbol::new(env, "rent_release_settled"),
+            ),
+            (
+                deal_id.clone(),
+                recipient,
+                pending.amount,
+                outcome as u32,
+                tx_id,
+                resolved_by_resolver,
+            ),
+        );
+        Ok(())
+    }
 }
 
 #[contractimpl]
 impl Pausable for DealEscrow {
     fn pause(env: Env, _admin: Address) -> Result<(), PausableError> {
-        _admin.require_auth();
         let stored: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .expect("admin not set");
-        if _admin != stored {
+        if access_control::require_admin_permission(&env, &stored, &_admin, "pause").is_err() {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -295,13 +873,12 @@ impl Pausable for DealEscrow {
     }
 
     fn unpause(env: Env, _admin: Address) -> Result<(), PausableError> {
-        _admin.require_auth();
         let stored: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .expect("admin not set");
-        if _admin != stored {
+        if access_control::require_admin_permission(&env, &stored, &_admin, "unpause").is_err() {
             return Err(PausableError::NotAuthorized);
         }
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -324,10 +901,8 @@ impl Pausable for DealEscrow {
 #[contractimpl]
 impl DealEscrow {
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
-        admin.require_auth();
-        if admin != get_admin(&env) {
-            return Err(ContractError::NotAuthorized);
-        }
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_guardian")?;
         env.storage().instance().set(&DataKey::Guardian, &guardian);
         env.events().publish(
             (
@@ -344,10 +919,13 @@ impl DealEscrow {
         admin: Address,
         delay_seconds: u64,
     ) -> Result<(), ContractError> {
-        admin.require_auth();
-        if admin != get_admin(&env) {
-            return Err(ContractError::NotAuthorized);
-        }
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "set_upgrade_delay",
+        )?;
         env.storage()
             .instance()
             .set(&DataKey::UpgradeDelay, &delay_seconds);
@@ -366,10 +944,8 @@ impl DealEscrow {
         admin: Address,
         new_wasm_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
-        admin.require_auth();
-        if admin != get_admin(&env) {
-            return Err(ContractError::NotAuthorized);
-        }
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "propose_upgrade")?;
         if env.storage().instance().has(&DataKey::PendingUpgradeHash) {
             return Err(ContractError::UpgradeAlreadyPending);
         }
@@ -395,10 +971,8 @@ impl DealEscrow {
         admin: Address,
         new_wasm_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
-        admin.require_auth();
-        if admin != get_admin(&env) {
-            return Err(ContractError::NotAuthorized);
-        }
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "execute_upgrade")?;
         let pending: BytesN<32> = env
             .storage()
             .instance()
@@ -447,10 +1021,13 @@ impl DealEscrow {
         admin: Address,
         new_wasm_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
-        admin.require_auth();
-        if admin != get_admin(&env) {
-            return Err(ContractError::NotAuthorized);
-        }
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "emergency_upgrade",
+        )?;
         if let Some(guardian) = env
             .storage()
             .instance()
@@ -474,10 +1051,8 @@ impl DealEscrow {
     }
 
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
-        admin.require_auth();
-        if admin != get_admin(&env) {
-            return Err(ContractError::NotAuthorized);
-        }
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "cancel_upgrade")?;
         let hash: BytesN<32> = env
             .storage()
             .instance()
@@ -497,6 +1072,141 @@ impl DealEscrow {
 
         Ok(())
     }
+}
+
+// ── Circuit Breaker Functions (#393) ───────────────────────────────
+
+#[contractimpl]
+impl DealEscrow {
+    pub fn freeze(env: Env, admin: Address) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "freeze")?;
+
+        let state = get_circuit_breaker_state(&env);
+        if state == CircuitBreakerState::Frozen {
+            return Err(ContractError::Frozen);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CircuitBreakerState, &CircuitBreakerState::Frozen);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "freeze"),
+            ),
+            (admin, env.ledger().timestamp()),
+        );
+        Ok(())
+    }
+
+    pub fn is_frozen(env: Env) -> bool {
+        get_circuit_breaker_state(&env) == CircuitBreakerState::Frozen
+    }
+
+    pub fn propose_drain(
+        env: Env,
+        admin: Address,
+        drain_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "propose_drain")?;
+
+        let state = get_circuit_breaker_state(&env);
+        if state != CircuitBreakerState::Frozen {
+            return Err(ContractError::InvalidGovernanceDrain); // Must be frozen to propose drain
+        }
+
+        let now = env.ledger().timestamp();
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingDrainHash, &drain_hash);
+        env.storage().instance().set(&DataKey::PendingDrainAt, &now);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "propose_drain"),
+            ),
+            (drain_hash, now),
+        );
+        Ok(())
+    }
+
+    pub fn execute_drain(
+        env: Env,
+        admin: Address,
+        drain_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "execute_drain")?;
+
+        let pending_hash = get_pending_drain_hash(&env).ok_or(ContractError::NoPendingRelease)?;
+        if pending_hash != drain_hash {
+            return Err(ContractError::NoPendingRelease);
+        }
+
+        let proposed_at = get_pending_drain_at(&env).ok_or(ContractError::NoPendingRelease)?;
+        let delay = get_recovery_delay_seconds(&env);
+        if env.ledger().timestamp() < proposed_at + delay {
+            return Err(ContractError::RecoveryDelayNotMet);
+        }
+
+        // Execute drain - only during governance-controlled recovery
+        let state = get_circuit_breaker_state(&env);
+        if state != CircuitBreakerState::Frozen {
+            return Err(ContractError::InvalidGovernanceDrain);
+        }
+
+        // Clear pending drain
+        env.storage().instance().remove(&DataKey::PendingDrainHash);
+        env.storage().instance().remove(&DataKey::PendingDrainAt);
+
+        // Allow recovery by unfreezing
+        env.storage().instance().set(
+            &DataKey::CircuitBreakerState,
+            &CircuitBreakerState::Unfrozen,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "execute_drain"),
+            ),
+            (admin, drain_hash, env.ledger().timestamp()),
+        );
+        Ok(())
+    }
+
+    pub fn set_recovery_delay(
+        env: Env,
+        admin: Address,
+        delay_seconds: u64,
+    ) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "set_recovery_delay",
+        )?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryDelaySeconds, &delay_seconds);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "set_recovery_delay"),
+            ),
+            delay_seconds,
+        );
+        Ok(())
+    }
+
+    pub fn get_circuit_breaker_state(env: Env) -> u32 {
+        get_circuit_breaker_state(&env) as u32
+    }
 
     fn is_paused(env: Env) -> bool {
         env.storage()
@@ -511,8 +1221,10 @@ impl DealEscrow {
 #[cfg(test)]
 mod test {
     extern crate std;
-    use super::{ContractError, DealEscrow, DealEscrowClient, TokenClient};
-    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+    use super::{
+        ContractError, DataKey, DealEscrow, DealEscrowClient, SettlementOutcome, TokenClient,
+    };
+    use soroban_sdk::testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke};
     use soroban_sdk::token::StellarAssetClient;
     use soroban_sdk::{Address, BytesN, Env, IntoVal, String, Symbol};
 
@@ -931,5 +1643,348 @@ mod test {
             },
         }]);
         client.try_cancel_upgrade(&admin).unwrap().unwrap();
+    }
+
+    #[test]
+    fn migrate_from_v1_to_v3_is_applied_once() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, client, admin, _operator, token, token_admin, _rcpt) = setup(&env);
+        let from = Address::generate(&env);
+        let deal_id = String::from_str(&env, "legacy-v1-deal");
+        let token_sac = StellarAssetClient::new(&env, &token);
+        env.mock_auths(&[MockAuth {
+            address: &token_admin,
+            invoke: &MockAuthInvoke {
+                contract: &token,
+                fn_name: "mint",
+                args: (from.clone(), 120i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        token_sac.mint(&from, &120i128);
+        env.mock_auths(&[MockAuth {
+            address: &from,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (from.clone(), deal_id.clone(), 120i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (from.clone(), contract_id.clone(), 120i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&from, &deal_id, &120i128)
+            .unwrap()
+            .unwrap();
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::StorageSchemaVersion, &1u32);
+        });
+
+        let deal_ids = soroban_sdk::Vec::from_array(&env, [deal_id.clone()]);
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "migrate_storage_schema",
+                args: (admin.clone(), 1u32, deal_ids.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client
+            .try_migrate_storage_schema(&admin, &1u32, &deal_ids)
+            .unwrap()
+            .unwrap();
+        assert_eq!(client.storage_schema_version(), 3u32);
+
+        env.mock_all_auths();
+        client
+            .try_migrate_storage_schema(&admin, &1u32, &deal_ids)
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_invariant_violation_halts() {
+        let env = Env::default();
+        let (contract_id, client, admin, _operator, _token, _token_admin, _rcpt) = setup(&env);
+        let deal_id = String::from_str(&env, "legacy-v2-bad");
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::StorageSchemaVersion, &2u32);
+            env.storage()
+                .persistent()
+                .set(&DataKey::DealBalance(deal_id.clone()), &100i128);
+            env.storage()
+                .persistent()
+                .set(&DataKey::LegacyLockedAmountV2(deal_id.clone()), &80i128);
+            env.storage()
+                .persistent()
+                .set(&DataKey::LegacyPendingPayoutV2(deal_id.clone()), &10i128);
+        });
+
+        let deal_ids = soroban_sdk::Vec::from_array(&env, [deal_id.clone()]);
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "migrate_storage_schema",
+                args: (admin.clone(), 2u32, deal_ids.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_migrate_storage_schema(&admin, &2u32, &deal_ids)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::MigrationInvariantViolation);
+        assert_eq!(client.storage_schema_version(), 2u32);
+    }
+
+    #[test]
+    fn disputed_rent_release_resolves_once_without_double_settlement() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, client, admin, operator, token, token_admin, _rcpt) = setup(&env);
+        let depositor = Address::generate(&env);
+        let landlord = Address::generate(&env);
+        let resolver = Address::generate(&env);
+        let deal_id = String::from_str(&env, "rent-dispute-1");
+        let token_sac = StellarAssetClient::new(&env, &token);
+        let token_client = TokenClient::new(&env, &token);
+
+        env.mock_auths(&[MockAuth {
+            address: &token_admin,
+            invoke: &MockAuthInvoke {
+                contract: &token,
+                fn_name: "mint",
+                args: (depositor.clone(), 200i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        token_sac.mint(&depositor, &200i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (depositor.clone(), deal_id.clone(), 150i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (depositor.clone(), contract_id.clone(), 150i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&depositor, &deal_id, &150i128)
+            .unwrap()
+            .unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_resolver",
+                args: (admin.clone(), resolver.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_set_resolver(&admin, &resolver).unwrap().unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &operator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "request_rent_release",
+                args: (
+                    operator.clone(),
+                    deal_id.clone(),
+                    landlord.clone(),
+                    100i128,
+                    Symbol::new(&env, "rent_cycle"),
+                    String::from_str(&env, "invoice-1"),
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client
+            .try_request_rent_release(
+                &operator,
+                &deal_id,
+                &landlord,
+                &100i128,
+                &Symbol::new(&env, "rent_cycle"),
+                &String::from_str(&env, "invoice-1"),
+            )
+            .unwrap()
+            .unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "challenge_rent_release",
+                args: (
+                    depositor.clone(),
+                    deal_id.clone(),
+                    String::from_str(&env, "bank_statement_mismatch"),
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client
+            .try_challenge_rent_release(
+                &depositor,
+                &deal_id,
+                &String::from_str(&env, "bank_statement_mismatch"),
+            )
+            .unwrap()
+            .unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &resolver,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "resolve_rent_dispute",
+                args: (
+                    resolver.clone(),
+                    deal_id.clone(),
+                    SettlementOutcome::RefundToDepositor,
+                    String::from_str(&env, "resolver-ruling-1"),
+                )
+                    .into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (contract_id.clone(), depositor.clone(), 100i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_resolve_rent_dispute(
+                &resolver,
+                &deal_id,
+                &SettlementOutcome::RefundToDepositor,
+                &String::from_str(&env, "resolver-ruling-1"),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(token_client.balance(&depositor), 150i128);
+        let second_attempt = client.try_resolve_rent_dispute(
+            &resolver,
+            &deal_id,
+            &SettlementOutcome::RefundToDepositor,
+            &String::from_str(&env, "resolver-ruling-2"),
+        );
+        assert!(second_attempt.is_err());
+    }
+
+    #[test]
+    fn uncontested_timeout_release_is_deterministic() {
+        let env = Env::default();
+        let (contract_id, client, admin, operator, token, token_admin, _rcpt) = setup(&env);
+        let depositor = Address::generate(&env);
+        let landlord = Address::generate(&env);
+        let deal_id = String::from_str(&env, "rent-timeout-1");
+        let token_sac = StellarAssetClient::new(&env, &token);
+        let token_client = TokenClient::new(&env, &token);
+
+        env.mock_auths(&[MockAuth {
+            address: &token_admin,
+            invoke: &MockAuthInvoke {
+                contract: &token,
+                fn_name: "mint",
+                args: (depositor.clone(), 120i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        token_sac.mint(&depositor, &120i128);
+        env.mock_auths(&[MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (depositor.clone(), deal_id.clone(), 120i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (depositor.clone(), contract_id.clone(), 120i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&depositor, &deal_id, &120i128)
+            .unwrap()
+            .unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "configure_dispute_windows",
+                args: (admin.clone(), 1u64, 10u64).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client
+            .try_configure_dispute_windows(&admin, &1u64, &10u64)
+            .unwrap()
+            .unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &operator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "request_rent_release",
+                args: (
+                    operator.clone(),
+                    deal_id.clone(),
+                    landlord.clone(),
+                    90i128,
+                    Symbol::new(&env, "rent_cycle"),
+                    String::from_str(&env, "invoice-timeout"),
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client
+            .try_request_rent_release(
+                &operator,
+                &deal_id,
+                &landlord,
+                &90i128,
+                &Symbol::new(&env, "rent_cycle"),
+                &String::from_str(&env, "invoice-timeout"),
+            )
+            .unwrap()
+            .unwrap();
+
+        env.ledger().set_timestamp(env.ledger().timestamp() + 2);
+        client
+            .try_settle_rent_release_timeout(&deal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(token_client.balance(&landlord), 90i128);
+        let err = client
+            .try_settle_rent_release_timeout(&deal_id)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::NoPendingRelease);
     }
 }
