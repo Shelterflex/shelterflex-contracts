@@ -1,9 +1,7 @@
-use soroban_sdk::{Address, Env};
 use soroban_sdk::testutils::Address as _;
+use soroban_sdk::{Address, Env};
 
-use crate::{
-    calculate_claimable_amount, calculate_vested_amount, VestingSchedule,
-};
+use crate::{calculate_claimable_amount, calculate_vested_amount, VestingSchedule};
 
 #[test]
 fn test_calculate_vested_amount() {
