@@ -212,6 +212,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "StateSchemaVersion"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 1
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "Token"
                             }
                           ]
@@ -488,15 +500,13 @@
           "v0": {
             "topics": [
               {
-                "symbol": "staking_pool"
+                "symbol": "Pausable"
               },
               {
                 "symbol": "unpause"
               }
             ],
-            "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-            }
+            "data": "void"
           }
         }
       },

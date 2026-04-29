@@ -1,7 +1,11 @@
 #![no_std]
+use soroban_pausable::{Pausable, PausableError};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
 };
+
+#[cfg(kani)]
+pub mod formal_properties;
 
 #[contracttype]
 #[derive(Clone)]
@@ -24,6 +28,7 @@ pub enum ContractError {
     AlreadyInitialized = 1,
     NotAuthorized = 2,
     Paused = 3,
+    InvalidAmount = 7,
     // Upgrade governance errors (#392)
     UpgradeAlreadyPending = 4,
     NoUpgradePending = 5,
@@ -41,6 +46,7 @@ const REWARD_INDEX: &str = "REWARD_IDX";
 const TOTAL_STAKED: &str = "TOTAL_STK";
 const SCALE: i128 = 1_000_000_000;
 
+pub mod formal_properties;
 #[contract]
 pub struct StakingRewards;
 
@@ -150,53 +156,6 @@ impl StakingRewards {
             .unwrap_or(false)
     }
 
-    pub fn pause(env: Env) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&StorageKey::Admin)
-            .expect("admin not set");
-        env.storage().instance().set(&StorageKey::Paused, &true);
-
-        env.events().publish(
-            (
-                Symbol::new(&env, "staking_rewards"),
-                Symbol::new(&env, "pause"),
-            ),
-            admin,
-        );
-
-        Ok(())
-    }
-
-    pub fn unpause(env: Env) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&StorageKey::Admin)
-            .expect("admin not set");
-        env.storage().instance().set(&StorageKey::Paused, &false);
-
-        env.events().publish(
-            (
-                Symbol::new(&env, "staking_rewards"),
-                Symbol::new(&env, "unpause"),
-            ),
-            admin,
-        );
-
-        Ok(())
-    }
-
-    pub fn is_paused(env: &Env) -> bool {
-        env.storage()
-            .instance()
-            .get::<_, bool>(&StorageKey::Paused)
-            .unwrap_or(false)
-    }
-
     fn require_admin(env: &Env) -> Result<(), ContractError> {
         let admin = env
             .storage()
@@ -226,7 +185,12 @@ impl StakingRewards {
     }
 
     fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-        if Self::is_paused(env) {
+        let paused = env
+            .storage()
+            .instance()
+            .get::<_, bool>(&StorageKey::Paused)
+            .unwrap_or(false);
+        if paused {
             Err(ContractError::Paused)
         } else {
             Ok(())
@@ -236,6 +200,10 @@ impl StakingRewards {
     pub fn stake(env: Env, user: Address, amount: i128) -> Result<(), ContractError> {
         Self::require_not_paused(&env)?;
         user.require_auth();
+
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
 
         let mut user_stake = Self::get_user_stake(&env, &user);
         let reward_index = Self::get_reward_index(&env);
@@ -264,6 +232,10 @@ impl StakingRewards {
     pub fn unstake(env: Env, user: Address, amount: i128) -> Result<(), ContractError> {
         Self::require_not_paused(&env)?;
         user.require_auth();
+
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
 
         let mut user_stake = Self::get_user_stake(&env, &user);
 
@@ -295,6 +267,10 @@ impl StakingRewards {
         Self::require_not_paused(&env)?;
         Self::require_operator(&env)?;
 
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
         let total = Self::get_total_staked(&env);
         if total == 0 {
             return Ok(());
@@ -318,6 +294,10 @@ impl StakingRewards {
     pub fn distribute_rewards(env: Env, amount: i128) -> Result<(), ContractError> {
         Self::require_not_paused(&env)?;
         Self::require_admin(&env)?;
+
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
 
         let total = Self::get_total_staked(&env);
         if total == 0 {
@@ -590,12 +570,47 @@ impl StakingRewards {
     }
 }
 
+#[contractimpl]
+impl Pausable for StakingRewards {
+    fn pause(env: Env, _admin: Address) -> Result<(), PausableError> {
+        if StakingRewards::require_admin(&env).is_err() {
+            return Err(PausableError::NotAuthorized);
+        }
+        env.storage().instance().set(&StorageKey::Paused, &true);
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
+            (),
+        );
+        Ok(())
+    }
+
+    fn unpause(env: Env, _admin: Address) -> Result<(), PausableError> {
+        if StakingRewards::require_admin(&env).is_err() {
+            return Err(PausableError::NotAuthorized);
+        }
+        env.storage().instance().set(&StorageKey::Paused, &false);
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")),
+            (),
+        );
+        Ok(())
+    }
+
+    fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&StorageKey::Paused)
+            .unwrap_or(false)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env, IntoVal};
+    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+    use soroban_sdk::{Address, Env, IntoVal};
 
-    fn setup(env: &Env) -> (soroban_sdk::Address, StakingRewardsClient<'_>) {
+    pub fn setup(env: &Env) -> (soroban_sdk::Address, StakingRewardsClient<'_>) {
         env.mock_all_auths();
         let contract_id = env.register(StakingRewards, ());
         let client = StakingRewardsClient::new(env, &contract_id);
@@ -697,11 +712,11 @@ mod test {
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        client.pause(&admin);
         assert!(client.is_paused());
     }
 
@@ -738,7 +753,7 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        client.unpause();
+        client.unpause(&admin);
     }
 
     #[test]

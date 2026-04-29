@@ -24,8 +24,10 @@ export interface PerformanceBenchmark {
     migrationName: string;
     dataSize: string;
     executionTime: number;
-    gasUsed: number;
-    memoryUsage: number;
+    instructions: number;
+    memoryBytes: number;
+    storageReadBytes: number;
+    storageWriteBytes: number;
 }
 
 export class MigrationTestFramework {
@@ -264,30 +266,34 @@ export class MigrationTestFramework {
             const testName = `Large Data Volume (${size} entries)`;
             
             try {
+                const testData = await this.generateTestData(size);
+                await this.setupTestData(testData);
+
                 const { result, time } = await this.measureExecutionTime(async () => {
-                    const testData = await this.generateTestData(size);
-                    await this.setupTestData(testData);
                     return await this.runner.migrate(2);
                 });
 
-                const gasUsed = await this.estimateGasUsage();
+                const simulation = await this.runner.dryRun(2);
+                const cost = simulation.cost || { cpuInsns: 0, memBytes: 0 };
                 
                 this.benchmarks.push({
                     migrationName: testName,
                     dataSize: `${size} entries`,
                     executionTime: time,
-                    gasUsed,
-                    memoryUsage: await this.estimateMemoryUsage()
+                    instructions: Number(cost.cpuInsns),
+                    memoryBytes: Number(cost.memBytes),
+                    storageReadBytes: Number(simulation.results?.[0]?.readBytes || 0),
+                    storageWriteBytes: Number(simulation.results?.[0]?.writeBytes || 0)
                 });
 
                 this.results.push({
                     testName,
                     passed: true,
                     executionTime: time,
-                    gasUsed
+                    gasUsed: Number(cost.cpuInsns)
                 });
 
-                console.log(`✓ ${testName} test PASSED (${time}ms)`);
+                console.log(`✓ ${testName} test PASSED (${time}ms, ${cost.cpuInsns} instructions)`);
             } catch (error) {
                 this.results.push({
                     testName,
@@ -522,11 +528,11 @@ export class MigrationTestFramework {
 
         if (this.benchmarks.length > 0) {
             report += `## Performance Benchmarks\n\n`;
-            report += `| Migration | Data Size | Time (ms) | Gas Used | Memory (bytes) |\n`;
-            report += `|-----------|-----------|-----------|----------|----------------|\n`;
+            report += `| Migration | Data Size | Time (ms) | Instructions | Memory (bytes) | Read (bytes) | Write (bytes) |\n`;
+            report += `|-----------|-----------|-----------|--------------|----------------|--------------|---------------|\n`;
             
             for (const benchmark of this.benchmarks) {
-                report += `| ${benchmark.migrationName} | ${benchmark.dataSize} | ${benchmark.executionTime} | ${benchmark.gasUsed} | ${benchmark.memoryUsage} |\n`;
+                report += `| ${benchmark.migrationName} | ${benchmark.dataSize} | ${benchmark.executionTime} | ${benchmark.instructions} | ${benchmark.memoryBytes} | ${benchmark.storageReadBytes} | ${benchmark.storageWriteBytes} |\n`;
             }
             report += `\n`;
         }

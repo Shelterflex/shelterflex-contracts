@@ -8,10 +8,20 @@ members = [
   "staking_pool",
   "mvp_staking_pool",
   "whistleblower_rewards",
+  "soroban_pausable",
+  "soroban_access_control",
   "deal_escrow",
   "contract_access",
   "timelock",
-  "oracle_price_feeds",
+  "vesting_schedule",
+
+  "schema_registry",
+  "allowlist_registry",
+  "bond_collateral",
+  "reentrancy_guard",
+  "epoch_rewards",
+  "slashing_module",
+  "stake_delegation",
 ]
 
 [profile.release-with-logs]

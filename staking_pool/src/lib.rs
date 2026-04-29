@@ -9,16 +9,25 @@ use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec as StdVec;
 
+use soroban_pausable::{Pausable, PausableError};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Map,
     String, Symbol,
 };
 // Map is still used in ReceiptInput.metadata
 
+pub mod access_control;
+pub mod validation;
+
+#[cfg(kani)]
+pub mod formal_properties;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     ContractVersion,
+    /// State schema version used to validate upgrade compatibility (#382)
+    StateSchemaVersion,
     Admin,
     Operator,
     Token,
@@ -36,6 +45,7 @@ pub enum DataKey {
     UpgradeDelay,
     PendingUpgradeHash,
     PendingUpgradeAt,
+    PendingUpgradeVersion,
 }
 
 /// Contract error types
@@ -51,6 +61,8 @@ pub enum ContractError {
     Paused = 3,
     /// Amount is invalid (zero or negative)
     InvalidAmount = 4,
+    /// Lock period is invalid (out of range)
+    InvalidLockPeriod = 14,
     /// Insufficient staked balance
     InsufficientBalance = 5,
     /// Tokens are locked and cannot be unstaked yet
@@ -67,6 +79,10 @@ pub enum ContractError {
     NoUpgradePending = 10,
     /// Timelock delay has not elapsed yet
     UpgradeDelayNotMet = 11,
+    /// Upgrade version must be strictly greater than current version
+    InvalidUpgradeVersion = 12,
+    /// Stored state schema is incompatible with this contract version
+    IncompatibleStateSchema = 13,
 }
 
 /// Input parameters for computing metadata hash
@@ -93,6 +109,28 @@ pub struct ReceiptInput {
 
 #[contract]
 pub struct StakingPool;
+
+fn get_state_schema_version(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get::<_, u32>(&DataKey::StateSchemaVersion)
+        .unwrap_or(0u32)
+}
+
+fn validate_upgrade_safety(env: &Env, new_version: u32) -> Result<(), ContractError> {
+    let current_version = StakingPool::contract_version(env.clone());
+    let schema_version = get_state_schema_version(env);
+
+    if schema_version != current_version {
+        return Err(ContractError::IncompatibleStateSchema);
+    }
+
+    if new_version != current_version.saturating_add(1) {
+        return Err(ContractError::InvalidUpgradeVersion);
+    }
+
+    Ok(())
+}
 
 fn get_admin(env: &Env) -> Address {
     env.storage()
@@ -200,15 +238,6 @@ fn is_paused(env: &Env) -> bool {
         .unwrap_or(false)
 }
 
-fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
-    let admin = get_admin(env);
-    caller.require_auth();
-    if caller != &admin {
-        return Err(ContractError::NotAuthorized);
-    }
-    Ok(())
-}
-
 fn require_user_or_operator(
     env: &Env,
     user: &Address,
@@ -242,13 +271,6 @@ fn require_user_or_operator(
 fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     if is_paused(env) {
         return Err(ContractError::Paused);
-    }
-    Ok(())
-}
-
-fn require_positive_amount(amount: i128) -> Result<(), ContractError> {
-    if amount <= 0 {
-        return Err(ContractError::InvalidAmount);
     }
     Ok(())
 }
@@ -329,6 +351,9 @@ impl StakingPool {
         env.storage()
             .instance()
             .set(&DataKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::StateSchemaVersion, &1u32);
         env.storage().instance().set(&DataKey::TotalStaked, &0i128);
         env.storage().instance().set(&DataKey::LockPeriod, &0u64);
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -349,6 +374,11 @@ impl StakingPool {
             .unwrap_or(0u32)
     }
 
+    /// Current state schema version stored on-chain.
+    pub fn state_schema_version(env: Env) -> u32 {
+        get_state_schema_version(&env)
+    }
+
     pub fn version(env: Env) -> u32 {
         Self::contract_version(env)
     }
@@ -358,7 +388,8 @@ impl StakingPool {
         admin: Address,
         new_operator: Option<Address>,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_operator")?;
 
         let old_operator: Option<Address> = get_operator(&env);
         env.storage()
@@ -377,7 +408,8 @@ impl StakingPool {
     }
 
     pub fn set_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_admin")?;
 
         env.storage().instance().set(&DataKey::Admin, &new_admin);
 
@@ -402,7 +434,7 @@ impl StakingPool {
         // We pass &from as the caller parameter, which should match the invoker in the test setup.
         // require_user_or_operator already calls user.require_auth() or op.require_auth(), so we don't need from.require_auth() here.
         let _spender = require_user_or_operator(&env, &from, &from)?;
-        require_positive_amount(amount)?;
+        validation::require_valid_amount(amount)?;
 
         // #390: reentrancy guard before external token call
         enter_nonreentrant(&env)?;
@@ -448,7 +480,7 @@ impl StakingPool {
         // We pass &to as the caller parameter, which should match the invoker in the test setup.
         // require_user_or_operator already calls user.require_auth() or op.require_auth(), so we don't need to.require_auth() here.
         let _spender = require_user_or_operator(&env, &to, &to)?;
-        require_positive_amount(amount)?;
+        validation::require_valid_amount(amount)?;
 
         // #386: per-key persistent storage instead of Map
         let current_balance = get_staked_balance(&env, &to);
@@ -513,40 +545,10 @@ impl StakingPool {
         get_total_staked(&env)
     }
 
-    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
-        env.storage().instance().set(&DataKey::Paused, &true);
-        // #389: emit admin address (was `()`)
-        env.events().publish(
-            (
-                Symbol::new(&env, "staking_pool"),
-                Symbol::new(&env, "pause"),
-            ),
-            admin,
-        );
-        Ok(())
-    }
-
-    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
-        env.storage().instance().set(&DataKey::Paused, &false);
-        // #389: emit admin address (was `()`)
-        env.events().publish(
-            (
-                Symbol::new(&env, "staking_pool"),
-                Symbol::new(&env, "unpause"),
-            ),
-            admin,
-        );
-        Ok(())
-    }
-
-    pub fn is_paused(env: Env) -> bool {
-        is_paused(&env)
-    }
-
     pub fn set_lock_period(env: Env, admin: Address, seconds: u64) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_lock_period")?;
+        validation::require_valid_lock_period(seconds)?;
         put_lock_period(&env, seconds);
         env.events().publish(
             (
@@ -565,7 +567,8 @@ impl StakingPool {
     // ── Upgrade governance (#392) ─────────────────────────────────────────────
 
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_guardian")?;
         env.storage().instance().set(&DataKey::Guardian, &guardian);
         env.events().publish(
             (
@@ -582,7 +585,13 @@ impl StakingPool {
         admin: Address,
         delay_seconds: u64,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "set_upgrade_delay",
+        )?;
         env.storage()
             .instance()
             .set(&DataKey::UpgradeDelay, &delay_seconds);
@@ -600,11 +609,15 @@ impl StakingPool {
         env: Env,
         admin: Address,
         new_wasm_hash: BytesN<32>,
+        new_version: u32,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "propose_upgrade")?;
         if env.storage().instance().has(&DataKey::PendingUpgradeHash) {
             return Err(ContractError::UpgradeAlreadyPending);
         }
+
+        validate_upgrade_safety(&env, new_version)?;
         let now = env.ledger().timestamp();
         env.storage()
             .instance()
@@ -612,12 +625,15 @@ impl StakingPool {
         env.storage()
             .instance()
             .set(&DataKey::PendingUpgradeAt, &now);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeVersion, &new_version);
         env.events().publish(
             (
                 Symbol::new(&env, "staking_pool"),
                 Symbol::new(&env, "propose_upgrade"),
             ),
-            (new_wasm_hash, now),
+            (new_wasm_hash, new_version, now),
         );
         Ok(())
     }
@@ -627,7 +643,8 @@ impl StakingPool {
         admin: Address,
         new_wasm_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "execute_upgrade")?;
         let pending: BytesN<32> = env
             .storage()
             .instance()
@@ -641,6 +658,14 @@ impl StakingPool {
             .instance()
             .get(&DataKey::PendingUpgradeAt)
             .unwrap_or(0);
+        let proposed_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeVersion)
+            .unwrap_or(0);
+
+        validate_upgrade_safety(&env, proposed_version)?;
+
         let delay: u64 = env
             .storage()
             .instance()
@@ -660,12 +685,20 @@ impl StakingPool {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &proposed_version);
+
         env.events().publish(
             (
                 Symbol::new(&env, "staking_pool"),
                 Symbol::new(&env, "execute_upgrade"),
             ),
-            new_wasm_hash.clone(),
+            (new_wasm_hash.clone(), proposed_version),
         );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
@@ -675,8 +708,18 @@ impl StakingPool {
         env: Env,
         admin: Address,
         new_wasm_hash: BytesN<32>,
+        new_version: u32,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "emergency_upgrade",
+        )?;
+
+        validate_upgrade_safety(&env, new_version)?;
+
         if let Some(guardian) = env
             .storage()
             .instance()
@@ -688,19 +731,33 @@ impl StakingPool {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &new_version);
+
         env.events().publish(
             (
                 Symbol::new(&env, "staking_pool"),
                 Symbol::new(&env, "emergency_upgrade"),
             ),
-            (admin, new_wasm_hash.clone(), env.ledger().timestamp()),
+            (
+                admin,
+                new_wasm_hash.clone(),
+                new_version,
+                env.ledger().timestamp(),
+            ),
         );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
 
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "cancel_upgrade")?;
         let hash: BytesN<32> = env
             .storage()
             .instance()
@@ -710,6 +767,9 @@ impl StakingPool {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
         env.events().publish(
             (
                 Symbol::new(&env, "staking_pool"),
@@ -745,7 +805,7 @@ impl StakingPool {
         env: Env,
         input: ReceiptInput,
     ) -> Result<BytesN<32>, ContractError> {
-        require_positive_amount(input.amount_usdc)?;
+        crate::validation::require_valid_amount(input.amount_usdc)?;
 
         let payload = create_canonical_payload_v1(&env, &input);
         Ok(compute_canonical_hash(&env, &payload))
@@ -766,6 +826,42 @@ impl StakingPool {
     ) -> Result<bool, ContractError> {
         let computed_hash = Self::compute_metadata_hash(env, input)?;
         Ok(computed_hash == expected_hash)
+    }
+}
+
+#[contractimpl]
+impl Pausable for StakingPool {
+    fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
+        let current_admin = get_admin(&env);
+        if access_control::require_admin_permission(&env, &current_admin, &admin, "pause").is_err()
+        {
+            return Err(PausableError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
+            (),
+        );
+        Ok(())
+    }
+
+    fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
+        let current_admin = get_admin(&env);
+        if access_control::require_admin_permission(&env, &current_admin, &admin, "unpause")
+            .is_err()
+        {
+            return Err(PausableError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")),
+            (),
+        );
+        Ok(())
+    }
+
+    fn is_paused(env: Env) -> bool {
+        is_paused(&env)
     }
 }
 
@@ -815,6 +911,58 @@ mod test {
             .unwrap();
 
         (contract_id, client, admin, user, token_contract_id)
+    }
+
+    #[test]
+    fn propose_upgrade_fails_for_non_sequential_version() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _token_id) = setup_contract(&env);
+        let hash = BytesN::from_array(&env, &[0u8; 32]);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone(), 3u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err = client
+            .try_propose_upgrade(&admin, &hash, &3u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidUpgradeVersion);
+    }
+
+    #[test]
+    fn propose_upgrade_fails_when_state_schema_mismatched() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _token_id) = setup_contract(&env);
+        let hash = BytesN::from_array(&env, &[0u8; 32]);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&super::DataKey::StateSchemaVersion, &0u32);
+        });
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err = client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::IncompatibleStateSchema);
     }
 
     // ============================================================================
@@ -969,7 +1117,7 @@ mod test {
         }]);
 
         let err = client.try_pause(&non_admin).unwrap_err().unwrap();
-        assert_eq!(err, ContractError::NotAuthorized);
+        assert_eq!(err, soroban_pausable::PausableError::NotAuthorized);
     }
 
     #[test]
@@ -1250,7 +1398,7 @@ mod test {
         assert_eq!(topics.len(), 2);
 
         let contract_name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(contract_name, Symbol::new(&env, "staking_pool"));
+        assert_eq!(contract_name, Symbol::new(&env, "Pausable"));
         let event_name: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
         assert_eq!(event_name, Symbol::new(&env, "pause"));
     }
@@ -1291,7 +1439,7 @@ mod test {
         assert_eq!(topics.len(), 2);
 
         let contract_name: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(contract_name, Symbol::new(&env, "staking_pool"));
+        assert_eq!(contract_name, Symbol::new(&env, "Pausable"));
         let event_name: Symbol = topics.get(1).unwrap().try_into_val(&env).unwrap();
         assert_eq!(event_name, Symbol::new(&env, "unpause"));
     }
@@ -1358,6 +1506,71 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(client.get_lock_period(), 3600u64);
+    }
+
+    #[test]
+    fn admin_can_set_lock_period_at_minimum_zero_seconds() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _token_id) = setup_contract(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_lock_period",
+                args: (admin.clone(), 0u64).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.try_set_lock_period(&admin, &0u64).unwrap().unwrap();
+        assert_eq!(client.get_lock_period(), 0u64);
+    }
+
+    #[test]
+    fn admin_can_set_lock_period_at_maximum_31536000_seconds() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _token_id) = setup_contract(&env);
+        let max_lock_period = 31_536_000u64;
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_lock_period",
+                args: (admin.clone(), max_lock_period).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client
+            .try_set_lock_period(&admin, &max_lock_period)
+            .unwrap()
+            .unwrap();
+        assert_eq!(client.get_lock_period(), max_lock_period);
+    }
+
+    #[test]
+    fn admin_cannot_set_lock_period_above_maximum_31536000_seconds() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _token_id) = setup_contract(&env);
+        let just_above_max_lock_period = 31_536_001u64;
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_lock_period",
+                args: (admin.clone(), just_above_max_lock_period).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err = client
+            .try_set_lock_period(&admin, &just_above_max_lock_period)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidLockPeriod);
     }
 
     #[test]
@@ -1697,7 +1910,7 @@ mod test {
             },
         }]);
         let err = client.try_pause(&non_admin).unwrap_err().unwrap();
-        assert_eq!(err, ContractError::NotAuthorized);
+        assert_eq!(err, soroban_pausable::PausableError::NotAuthorized);
 
         // Test that admin can pause
         env.mock_auths(&[MockAuth {

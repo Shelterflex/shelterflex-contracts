@@ -1,19 +1,23 @@
 #![no_std]
 
+use soroban_pausable::{Pausable, PausableError};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
 };
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
+pub mod access_control;
 pub mod validation;
 
-#[cfg(test)]
+#[cfg(kani)]
 mod formal_properties;
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     ContractVersion,
+    /// State schema version used to validate upgrade compatibility (#382)
+    StateSchemaVersion,
     Admin,
     /// Per-user balance stored in persistent storage (gas-optimised, #386)
     Balance(Address),
@@ -23,6 +27,33 @@ pub enum DataKey {
     UpgradeDelay,
     PendingUpgradeHash,
     PendingUpgradeAt,
+    PendingUpgradeVersion,
+}
+
+fn get_state_schema_version(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get::<_, u32>(&DataKey::StateSchemaVersion)
+        .unwrap_or(0u32)
+}
+
+fn validate_upgrade_safety(env: &Env, new_version: u32) -> Result<(), ContractError> {
+    let current_version = RentWallet::contract_version(env.clone());
+    let schema_version = get_state_schema_version(env);
+
+    // Ensure current on-chain state schema matches the currently running contract.
+    // This forces a migration step (in the new WASM) before further upgrades.
+    if schema_version != current_version {
+        return Err(ContractError::IncompatibleStateSchema);
+    }
+
+    // Enforce sequential upgrades by default to reduce migration complexity.
+    // Emergency upgrades can still jump versions if desired by adjusting this rule later.
+    if new_version != current_version.saturating_add(1) {
+        return Err(ContractError::InvalidUpgradeVersion);
+    }
+
+    Ok(())
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -52,6 +83,10 @@ pub enum ContractError {
     InvalidStringChar = 13,
     /// Two addresses that must differ were identical
     SameAddress = 14,
+    /// Upgrade version must be strictly greater than current version
+    InvalidUpgradeVersion = 15,
+    /// Stored state schema is incompatible with this contract version
+    IncompatibleStateSchema = 16,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -82,15 +117,6 @@ fn put_balance(env: &Env, user: &Address, amount: i128) {
         .set(&DataKey::Balance(user.clone()), &amount);
 }
 
-fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
-    let admin = get_admin(env);
-    caller.require_auth();
-    if caller != &admin {
-        return Err(ContractError::NotAuthorized);
-    }
-    Ok(())
-}
-
 fn get_paused_state(env: &Env) -> bool {
     env.storage()
         .instance()
@@ -118,6 +144,9 @@ impl RentWallet {
         env.storage()
             .instance()
             .set(&DataKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::StateSchemaVersion, &1u32);
         env.storage().instance().set(&DataKey::Paused, &false);
 
         // #389: include version in init event
@@ -136,6 +165,11 @@ impl RentWallet {
             .unwrap_or(0u32)
     }
 
+    /// Current state schema version stored on-chain.
+    pub fn state_schema_version(env: Env) -> u32 {
+        get_state_schema_version(&env)
+    }
+
     pub fn version(env: Env) -> u32 {
         Self::contract_version(env)
     }
@@ -146,7 +180,8 @@ impl RentWallet {
         user: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "credit")?;
         require_not_paused(&env)?;
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -173,7 +208,8 @@ impl RentWallet {
         user: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "debit")?;
         require_not_paused(&env)?;
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -202,7 +238,8 @@ impl RentWallet {
     }
 
     pub fn set_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_admin")?;
 
         let old_admin = get_admin(&env);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
@@ -218,40 +255,53 @@ impl RentWallet {
 
         Ok(())
     }
+}
 
-    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+#[contractimpl]
+impl Pausable for RentWallet {
+    fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
+        let current_admin = get_admin(&env);
+        if access_control::require_admin_permission(&env, &current_admin, &admin, "pause").is_err()
+        {
+            return Err(PausableError::NotAuthorized);
+        }
         env.storage().instance().set(&DataKey::Paused, &true);
         // #389: emit admin address (was `()`)
         env.events().publish(
-            (Symbol::new(&env, "rent_wallet"), Symbol::new(&env, "pause")),
-            admin,
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
+            (),
         );
         Ok(())
     }
 
-    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+    fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
+        let current_admin = get_admin(&env);
+        if access_control::require_admin_permission(&env, &current_admin, &admin, "unpause")
+            .is_err()
+        {
+            return Err(PausableError::NotAuthorized);
+        }
         env.storage().instance().set(&DataKey::Paused, &false);
         // #389: emit admin address (was `()`)
         env.events().publish(
-            (
-                Symbol::new(&env, "rent_wallet"),
-                Symbol::new(&env, "unpause"),
-            ),
-            admin,
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")),
+            (),
         );
         Ok(())
     }
 
-    pub fn is_paused(env: Env) -> bool {
+    fn is_paused(env: Env) -> bool {
         get_paused_state(&env)
     }
+}
 
+#[contractimpl]
+impl RentWallet {
     // ── Upgrade governance (#392) ─────────────────────────────────────────────
 
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "set_guardian")?;
         env.storage().instance().set(&DataKey::Guardian, &guardian);
         env.events().publish(
             (
@@ -268,7 +318,13 @@ impl RentWallet {
         admin: Address,
         delay_seconds: u64,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "set_upgrade_delay",
+        )?;
         env.storage()
             .instance()
             .set(&DataKey::UpgradeDelay, &delay_seconds);
@@ -288,11 +344,16 @@ impl RentWallet {
         env: Env,
         admin: Address,
         new_wasm_hash: BytesN<32>,
+        new_version: u32,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "propose_upgrade")?;
         if env.storage().instance().has(&DataKey::PendingUpgradeHash) {
             return Err(ContractError::UpgradeAlreadyPending);
         }
+
+        validate_upgrade_safety(&env, new_version)?;
+
         let now = env.ledger().timestamp();
         env.storage()
             .instance()
@@ -300,13 +361,16 @@ impl RentWallet {
         env.storage()
             .instance()
             .set(&DataKey::PendingUpgradeAt, &now);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeVersion, &new_version);
         // #389: upgrade announcement event
         env.events().publish(
             (
                 Symbol::new(&env, "rent_wallet"),
                 Symbol::new(&env, "propose_upgrade"),
             ),
-            (new_wasm_hash, now),
+            (new_wasm_hash, new_version, now),
         );
         Ok(())
     }
@@ -318,7 +382,8 @@ impl RentWallet {
         admin: Address,
         new_wasm_hash: BytesN<32>,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "execute_upgrade")?;
         let pending: BytesN<32> = env
             .storage()
             .instance()
@@ -332,6 +397,14 @@ impl RentWallet {
             .instance()
             .get(&DataKey::PendingUpgradeAt)
             .unwrap_or(0);
+        let proposed_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeVersion)
+            .unwrap_or(0);
+
+        validate_upgrade_safety(&env, proposed_version)?;
+
         let delay: u64 = env
             .storage()
             .instance()
@@ -352,12 +425,21 @@ impl RentWallet {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
+
+        // Update version before WASM is swapped
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &proposed_version);
+
         env.events().publish(
             (
                 Symbol::new(&env, "rent_wallet"),
                 Symbol::new(&env, "execute_upgrade"),
             ),
-            new_wasm_hash.clone(),
+            (new_wasm_hash.clone(), proposed_version),
         );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
@@ -369,8 +451,20 @@ impl RentWallet {
         env: Env,
         admin: Address,
         new_wasm_hash: BytesN<32>,
+        new_version: u32,
     ) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "emergency_upgrade",
+        )?;
+
+        // Emergency upgrades still require schema compatibility, but allow only sequential
+        // upgrades for now (same safety policy as normal upgrades).
+        validate_upgrade_safety(&env, new_version)?;
+
         // Multi-sig: require guardian if configured
         if let Some(guardian) = env
             .storage()
@@ -384,20 +478,34 @@ impl RentWallet {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &new_version);
+
         // Enhanced logging for emergency path
         env.events().publish(
             (
                 Symbol::new(&env, "rent_wallet"),
                 Symbol::new(&env, "emergency_upgrade"),
             ),
-            (admin, new_wasm_hash.clone(), env.ledger().timestamp()),
+            (
+                admin,
+                new_wasm_hash.clone(),
+                new_version,
+                env.ledger().timestamp(),
+            ),
         );
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
 
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
-        require_admin(&env, &admin)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "cancel_upgrade")?;
         let hash: BytesN<32> = env
             .storage()
             .instance()
@@ -407,6 +515,9 @@ impl RentWallet {
             .instance()
             .remove(&DataKey::PendingUpgradeHash);
         env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
         env.events().publish(
             (
                 Symbol::new(&env, "rent_wallet"),
@@ -947,6 +1058,87 @@ mod test {
         assert_eq!(err, ContractError::Paused);
     }
 
+    #[test]
+    fn non_admin_cannot_pause() {
+        let env = Env::default();
+        let (contract_id, client, _admin, _user, non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: (non_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client.try_pause(&non_admin).unwrap_err().unwrap();
+        assert_eq!(err, soroban_pausable::PausableError::NotAuthorized);
+    }
+
+    #[test]
+    fn non_admin_cannot_unpause() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, non_admin) = setup(&env);
+
+        // First pause as admin
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: (admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_pause(&admin).unwrap().unwrap();
+
+        // Try to unpause as non-admin
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unpause",
+                args: (non_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client.try_unpause(&non_admin).unwrap_err().unwrap();
+        assert_eq!(err, soroban_pausable::PausableError::NotAuthorized);
+    }
+
+    #[test]
+    fn credit_fails_when_paused() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: (admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_pause(&admin).unwrap().unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (admin.clone(), user.clone(), 10i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_credit(&admin, &user, &10i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::Paused);
+    }
+
     // ============================================================================
     // Upgrade Governance Tests (#392)
     // ============================================================================
@@ -962,11 +1154,14 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+        client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
@@ -980,23 +1175,26 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+        client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap()
+            .unwrap();
 
         env.mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
         let err = client
-            .try_propose_upgrade(&admin, &hash)
+            .try_propose_upgrade(&admin, &hash, &2u32)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ContractError::UpgradeAlreadyPending);
@@ -1013,11 +1211,14 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+        client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap()
+            .unwrap();
 
         env.mock_auths(&[MockAuth {
             address: &admin,
@@ -1036,11 +1237,14 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+        client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
@@ -1069,11 +1273,14 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "propose_upgrade",
-                args: (admin.clone(), hash.clone()).into_val(&env),
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+        client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap()
+            .unwrap();
 
         // Execute immediately — should fail because delay not met
         env.mock_auths(&[MockAuth {
@@ -1130,5 +1337,67 @@ mod test {
         }]);
         let err = client.try_cancel_upgrade(&admin).unwrap_err().unwrap();
         assert_eq!(err, ContractError::NoUpgradePending);
+    }
+
+    #[test]
+    fn failed_execute_upgrade_does_not_clear_pending_upgrade() {
+        let env = Env::default();
+        let (contract_id, client, admin, _user, _non_admin) = setup(&env);
+        let hash = BytesN::from_array(&env, &[0u8; 32]);
+
+        // Propose an upgrade to version 2.
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap()
+            .unwrap();
+
+        // Break schema compatibility to force execute_upgrade to fail.
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&super::DataKey::StateSchemaVersion, &0u32);
+        });
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "execute_upgrade",
+                args: (admin.clone(), hash.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err = client
+            .try_execute_upgrade(&admin, &hash)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::IncompatibleStateSchema);
+
+        // Pending proposal should still exist; re-proposing should fail.
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone(), 2u32).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err2 = client
+            .try_propose_upgrade(&admin, &hash, &2u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err2, ContractError::UpgradeAlreadyPending);
     }
 }

@@ -606,7 +606,10 @@ fn test_pause_not_authorized() {
 
     // Should fail with NotAuthorized error
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        soroban_pausable::PausableError::NotAuthorized
+    );
 
     // Verify paused state is still false
     let paused: bool = env.as_contract(&contract_id, || {
@@ -707,7 +710,10 @@ fn test_unpause_not_authorized() {
 
     // Should fail with NotAuthorized error
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        soroban_pausable::PausableError::NotAuthorized
+    );
 
     // Verify paused state is still true
     let paused: bool = env.as_contract(&contract_id, || {

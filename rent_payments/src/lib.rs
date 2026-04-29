@@ -1,5 +1,6 @@
 #![no_std]
 
+use soroban_pausable::{Pausable, PausableError};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, vec, Address, BytesN, Env, Symbol, Vec,
 };
@@ -64,6 +65,7 @@ pub enum ContractError {
     AlreadyInitialized = 1,
     InvalidAmount = 2,
     InvalidLimit = 3,
+    Paused = 4,
 }
 
 #[contract]
@@ -76,12 +78,6 @@ fn is_paused(env: &Env) -> bool {
         .unwrap_or(false)
 }
 
-fn require_not_paused(env: &Env) {
-    if is_paused(env) {
-        panic!("contract is paused");
-    }
-}
-
 fn get_admin(env: &Env) -> Address {
     env.storage()
         .instance()
@@ -89,9 +85,17 @@ fn get_admin(env: &Env) -> Address {
         .expect("admin not set")
 }
 
-fn require_admin(env: &Env) {
+fn require_admin(env: &Env) -> Result<(), ContractError> {
     let admin = get_admin(env);
     admin.require_auth();
+    Ok(())
+}
+
+fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    if is_paused(env) {
+        return Err(ContractError::Paused);
+    }
+    Ok(())
 }
 
 fn get_receipts(env: &Env, deal_id: DealId) -> Vec<Receipt> {
@@ -195,35 +199,6 @@ impl RentPayments {
         Self::contract_version(env)
     }
 
-    pub fn pause(env: Env) {
-        require_admin(&env);
-        env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish(
-            (
-                Symbol::new(&env, "rent_payments"),
-                Symbol::new(&env, "paused"),
-            ),
-            (),
-        );
-    }
-
-    pub fn unpause(env: Env) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish(
-            (
-                Symbol::new(&env, "rent_payments"),
-                Symbol::new(&env, "unpaused"),
-            ),
-            (),
-        );
-    }
-
-    pub fn is_paused(env: Env) -> bool {
-        is_paused(&env)
-    }
-
     /// Create a new receipt for a deal
     /// This function records a monthly payment receipt
     pub fn create_receipt(
@@ -232,8 +207,8 @@ impl RentPayments {
         amount: i128,
         payer: Address,
     ) -> Result<Receipt, ContractError> {
-        require_admin(&env);
-        require_not_paused(&env);
+        let _ = require_admin(&env)?;
+        require_not_paused(&env)?;
 
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -430,6 +405,41 @@ impl RentPayments {
     /// Get the total number of receipts for a deal
     pub fn receipt_count(env: Env, deal_id: DealId) -> u64 {
         get_receipt_count(&env, deal_id)
+    }
+}
+
+#[contractimpl]
+impl Pausable for RentPayments {
+    fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
+        admin.require_auth();
+        let stored = get_admin(&env);
+        if admin != stored {
+            return Err(PausableError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
+            (),
+        );
+        Ok(())
+    }
+
+    fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
+        admin.require_auth();
+        let stored = get_admin(&env);
+        if admin != stored {
+            return Err(PausableError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "unpause")),
+            (),
+        );
+        Ok(())
+    }
+
+    fn is_paused(env: Env) -> bool {
+        is_paused(&env)
     }
 }
 
@@ -1083,8 +1093,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "contract is paused")]
-    fn test_pause() {
+    fn test_pause_returns_explicit_error() {
         let env = Env::default();
         let (admin, client, contract_id) = setup(&env);
         let payer = Address::generate(&env);
@@ -1095,15 +1104,15 @@ mod test {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "pause",
-                args: ().into_val(&env),
+                args: (admin.clone(),).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.pause();
+        client.pause(&admin);
 
         assert!(client.is_paused());
 
-        // Try to create a receipt while paused (should panic)
+        // Try to create a receipt while paused (should return explicit paused error)
         env.mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
@@ -1113,7 +1122,12 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        client.create_receipt(&1u64, &1000, &payer);
+
+        let err = client
+            .try_create_receipt(&1u64, &1000i128, &payer)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::Paused);
     }
 
     // ============================================================================
