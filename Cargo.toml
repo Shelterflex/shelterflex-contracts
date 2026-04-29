@@ -11,6 +11,7 @@ members = [
   "deal_escrow",
   "contract_access",
   "timelock",
+  "oracle_price_feeds",
 ]
 
 [profile.release-with-logs]
