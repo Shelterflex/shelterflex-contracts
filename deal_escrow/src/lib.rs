@@ -67,6 +67,23 @@ pub enum ContractError {
     NoUpgradePending = 8,
     UpgradeDelayNotMet = 9,
     InvalidSplit = 11,
+    // Circuit breaker states
+    Frozen = 12,
+    RecoveryDelayNotMet = 13,
+    // Release window & schema
+    InvalidReleaseWindow = 14,
+    InvalidSchemaVersion = 15,
+    // Pending release lifecycle
+    PendingReleaseExists = 16,
+    NoPendingRelease = 17,
+    // Dispute errors
+    DisputeNotAllowed = 18,
+    NoOpenDispute = 19,
+    InvalidSettlement = 20,
+    // Governance drain
+    InvalidGovernanceDrain = 21,
+    // Migration / data invariants
+    MigrationInvariantViolation = 22,
 }
 
 #[contracttype]
