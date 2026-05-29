@@ -1,5 +1,5 @@
 [package]
-name = "oracle_price_feeds"
+name = "tenant_reputation"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,6 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 soroban-sdk = "22.0.7"
+soroban-pausable = { version = "0.1.0", path = "../soroban_pausable" }
 soroban_access_control = { version = "0.1.0", path = "../soroban_access_control" }
 
 [dev-dependencies]

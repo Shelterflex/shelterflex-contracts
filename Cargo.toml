@@ -22,6 +22,8 @@ members = [
   "epoch_rewards",
   "slashing_module",
   "stake_delegation",
+  "oracle_price_feeds",
+  "tenant_reputation",
 ]
 
 [profile.release-with-logs]
