@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Symbol,
+};
 
 pub mod access_control;
 
@@ -196,7 +198,15 @@ mod test {
         Symbol::new(env, "NGN_USDC")
     }
 
-    fn setup(env: &Env) -> (Address, OraclePriceFeedsClient<'_>, Address, Address, Symbol) {
+    fn setup(
+        env: &Env,
+    ) -> (
+        Address,
+        OraclePriceFeedsClient<'_>,
+        Address,
+        Address,
+        Symbol,
+    ) {
         let contract_id = env.register(OraclePriceFeeds, ());
         let client = OraclePriceFeedsClient::new(env, &contract_id);
         let admin = Address::generate(env);

@@ -125,26 +125,32 @@ impl TenantReputation {
     }
 
     pub fn get_reputation(env: Env, tenant: Address) -> Option<ReputationRecord> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Reputation(tenant))
+        env.storage().persistent().get(&DataKey::Reputation(tenant))
     }
 
     pub fn has_reputation(env: Env, tenant: Address) -> bool {
-        env.storage()
-            .persistent()
-            .has(&DataKey::Reputation(tenant))
+        env.storage().persistent().has(&DataKey::Reputation(tenant))
     }
 
-    pub fn revoke_reputation(env: Env, caller: Address, tenant: Address) -> Result<(), ContractError> {
+    pub fn revoke_reputation(
+        env: Env,
+        caller: Address,
+        tenant: Address,
+    ) -> Result<(), ContractError> {
         access_control::require_admin_permission(
             &env,
             &get_admin(&env),
             &caller,
             "revoke_reputation",
         )?;
-        if env.storage().persistent().has(&DataKey::Reputation(tenant.clone())) {
-            env.storage().persistent().remove(&DataKey::Reputation(tenant.clone()));
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Reputation(tenant.clone()))
+        {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Reputation(tenant.clone()));
             env.events().publish(
                 (
                     soroban_sdk::Symbol::new(&env, "tenant_reputation"),
@@ -156,19 +162,13 @@ impl TenantReputation {
         }
         Ok(())
     }
-
 }
 
 #[contractimpl]
 impl Pausable for TenantReputation {
     fn pause(env: Env, admin: Address) -> Result<(), PausableError> {
-        access_control::require_admin_permission(
-            &env,
-            &get_admin(&env),
-            &admin,
-            "pause",
-        )
-        .map_err(|_| PausableError::NotAuthorized)?;
+        access_control::require_admin_permission(&env, &get_admin(&env), &admin, "pause")
+            .map_err(|_| PausableError::NotAuthorized)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events().publish(
             (
@@ -181,13 +181,8 @@ impl Pausable for TenantReputation {
     }
 
     fn unpause(env: Env, admin: Address) -> Result<(), PausableError> {
-        access_control::require_admin_permission(
-            &env,
-            &get_admin(&env),
-            &admin,
-            "unpause",
-        )
-        .map_err(|_| PausableError::NotAuthorized)?;
+        access_control::require_admin_permission(&env, &get_admin(&env), &admin, "unpause")
+            .map_err(|_| PausableError::NotAuthorized)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         Ok(())
     }
@@ -349,7 +344,10 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        client.try_revoke_reputation(&admin, &tenant).unwrap().unwrap();
+        client
+            .try_revoke_reputation(&admin, &tenant)
+            .unwrap()
+            .unwrap();
         assert!(!client.has_reputation(&tenant));
         assert_eq!(client.get_reputation(&tenant), None);
     }
