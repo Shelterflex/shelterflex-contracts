@@ -713,6 +713,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "governance"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "soroban_access_control",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -847,6 +855,15 @@ name = "indexmap-nostd"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e04e2fd2b8188ea827b32ef11de88377086d690286ab35747ef7f9bf3ccb590"
+
+[[package]]
+name = "inspector_bond"
+version = "0.1.0"
+dependencies = [
+ "soroban-pausable",
+ "soroban-sdk",
+ "soroban_access_control",
+]
 
 [[package]]
 name = "itertools"
@@ -1216,6 +1233,14 @@ version = "0.1.0"
 dependencies = [
  "soroban-pausable",
  "soroban-sdk",
+]
+
+[[package]]
+name = "rent_to_own"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "soroban_access_control",
 ]
 
 [[package]]
