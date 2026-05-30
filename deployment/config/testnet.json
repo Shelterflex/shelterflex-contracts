@@ -1,0 +1,12 @@
+{
+  "network": {
+    "name": "testnet",
+    "rpc_url": "https://soroban-testnet.stellar.org",
+    "network_passphrase": "Test SDF Network ; September 2015",
+    "friendbot_url": "https://friendbot.stellar.org"
+  },
+  "deployer": {
+    "address": "${STELLAR_DEPLOYER_ADDRESS}",
+    "_comment": "Set STELLAR_DEPLOYER_ADDRESS and STELLAR_SECRET_KEY as environment variables. Never hardcode secrets."
+  }
+}
