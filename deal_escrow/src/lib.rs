@@ -1262,6 +1262,9 @@ impl DealEscrow {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod cross_contract_integration_tests;
+
+#[cfg(test)]
 mod test {
     extern crate std;
     use super::{
