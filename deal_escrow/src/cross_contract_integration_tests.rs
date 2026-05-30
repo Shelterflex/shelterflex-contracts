@@ -1,10 +1,9 @@
-#![cfg(test)]
+//! Cross-contract integration tests: rent_wallet + deal_escrow + rent_payments
 
 extern crate std;
 
-use deal_escrow::{
-    ContractError as DealEscrowError, DealEscrow, DealEscrowClient,
-    TokenClient as EscrowTokenClient,
+use crate::{
+    ContractError as DealEscrowError, DealEscrow, DealEscrowClient, TokenClient as EscrowTokenClient,
 };
 use rent_payments::{RentPayments, RentPaymentsClient};
 use rent_wallet::{RentWallet, RentWalletClient};
@@ -14,24 +13,24 @@ use soroban_sdk::{Address, Env, IntoVal, String, Symbol};
 use std::format;
 
 /// Deployed contracts and role addresses for cross-contract payment flows.
-pub struct TestContracts<'a> {
-    pub rent_wallet_id: Address,
-    pub rent_wallet: RentWalletClient<'a>,
-    pub deal_escrow_id: Address,
-    pub deal_escrow: DealEscrowClient<'a>,
-    pub rent_payments_id: Address,
-    pub rent_payments: RentPaymentsClient<'a>,
-    pub token: Address,
-    pub token_admin: Address,
-    pub admin: Address,
-    pub operator: Address,
-    pub tenant: Address,
-    pub landlord: Address,
-    pub platform: Address,
-    pub reporter: Address,
+struct TestContracts<'a> {
+    rent_wallet_id: Address,
+    rent_wallet: RentWalletClient<'a>,
+    deal_escrow_id: Address,
+    deal_escrow: DealEscrowClient<'a>,
+    rent_payments_id: Address,
+    rent_payments: RentPaymentsClient<'a>,
+    token: Address,
+    token_admin: Address,
+    admin: Address,
+    operator: Address,
+    tenant: Address,
+    landlord: Address,
+    platform: Address,
+    reporter: Address,
 }
 
-pub fn setup_full_stack(env: &Env) -> TestContracts<'_> {
+fn setup_full_stack(env: &Env) -> TestContracts<'_> {
     let admin = Address::generate(env);
     let operator = Address::generate(env);
     let tenant = Address::generate(env);
@@ -76,7 +75,7 @@ pub fn setup_full_stack(env: &Env) -> TestContracts<'_> {
     }
 }
 
-pub fn deal_id_str(env: &Env, deal_id: u64) -> String {
+fn deal_id_str(env: &Env, deal_id: u64) -> String {
     String::from_str(env, &format!("{deal_id}"))
 }
 
@@ -94,8 +93,7 @@ fn mint_to(env: &Env, token: &Address, token_admin: &Address, to: &Address, amou
     sac.mint(to, &amount);
 }
 
-/// Credit tenant wallet, debit for payment, deposit tokens into escrow.
-pub fn wallet_credit_and_escrow_deposit(
+fn wallet_credit_and_escrow_deposit(
     env: &Env,
     stack: &TestContracts<'_>,
     deal_id: u64,
@@ -166,8 +164,7 @@ pub fn wallet_credit_and_escrow_deposit(
     assert_eq!(stack.deal_escrow.balance(&deal_str), amount);
 }
 
-/// Release full escrow balance with fee split and record a rent_payments receipt.
-pub fn release_escrow_and_record_receipt(
+fn release_escrow_and_record_receipt(
     env: &Env,
     stack: &TestContracts<'_>,
     deal_id: u64,

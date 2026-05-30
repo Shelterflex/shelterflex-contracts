@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-  "integration_tests",
   "rent_wallet",
   "rent_payments",
   "transaction-receipt-contract",
