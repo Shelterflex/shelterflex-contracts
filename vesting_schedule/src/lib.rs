@@ -1,6 +1,12 @@
 #![no_std]
+// Soroban contractimpl methods often need >7 args (e.g. all the fields of a
+// vesting schedule). The auto-generated client mirrors each signature, so the
+// allow has to cover the whole crate rather than a single function.
+#![allow(clippy::too_many_arguments)]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
+};
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -213,7 +219,14 @@ impl VestingScheduleContract {
 
         env.events().publish(
             (symbol_short!("vesting"), symbol_short!("created")),
-            (beneficiary, total_amount, start_time, end_time, cliff_time, revocable),
+            (
+                beneficiary,
+                total_amount,
+                start_time,
+                end_time,
+                cliff_time,
+                revocable,
+            ),
         );
 
         Ok(())

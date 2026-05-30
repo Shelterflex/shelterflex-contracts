@@ -9,8 +9,6 @@
 //!   6. Revoke flow (revocable, NotRevocable, AlreadyRevoked, claim-after-revoke)
 //!   7. Pause flow (claim blocked, then succeeds after unpause)
 
-#![cfg(test)]
-
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Address, Env};
 
@@ -49,7 +47,13 @@ fn setup<'a>() -> Ctx<'a> {
 
     env.ledger().with_mut(|li| li.timestamp = START - 1);
 
-    Ctx { env, contract, admin, token, beneficiary }
+    Ctx {
+        env,
+        contract,
+        admin,
+        token,
+        beneficiary,
+    }
 }
 
 fn create_default(ctx: &Ctx, revocable: bool) {
