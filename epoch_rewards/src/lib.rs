@@ -23,6 +23,8 @@ pub enum DataKey {
     TotalStaked,
     /// Per-user stake info
     UserStake(Address),
+    /// Paused flag
+    Paused,
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -46,6 +48,8 @@ pub enum ContractError {
     OutOfOrderSealing = 6,
     /// Epoch duration has not elapsed yet
     EpochNotExpired = 7,
+    /// Contract is paused
+    Paused = 8,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -141,6 +145,29 @@ impl EpochRewards {
     pub fn set_operator(env: Env, admin: Address, operator: Address) -> Result<(), ContractError> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Operator, &operator);
+        Ok(())
+    }
+
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false) {
+            return Err(ContractError::Paused);
+        }
         Ok(())
     }
 
@@ -266,6 +293,7 @@ impl EpochRewards {
         caller: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         Self::require_operator_or_admin(&env, &caller)?;
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -516,128 +544,4 @@ impl EpochRewards {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    extern crate std;
-
-    use super::*;
-    use soroban_sdk::{
-        testutils::{Address as _, Ledger},
-        Env,
-    };
-
-    fn setup(env: &Env, duration: u64) -> (Address, EpochRewardsClient<'_>) {
-        env.mock_all_auths();
-        let id = env.register(EpochRewards, ());
-        let client = EpochRewardsClient::new(env, &id);
-        let admin = Address::generate(env);
-        client.init(&admin, &duration);
-        (admin, client)
-    }
-
-    // ── Normal sealing ────────────────────────────────────────────────────────
-
-    #[test]
-    fn normal_epoch_seal() {
-        let env = Env::default();
-        let duration = 100u64;
-        let (admin, client) = setup(&env, duration);
-
-        let user = Address::generate(&env);
-        client.stake(&user, &1_000);
-        client.fund_epoch_rewards(&admin, &500);
-
-        // Advance time past epoch duration
-        env.ledger().with_mut(|li| li.timestamp = duration + 1);
-
-        assert_eq!(client.current_epoch(), 1);
-        client.seal_epoch(&admin, &1, &200);
-        assert_eq!(client.current_epoch(), 2);
-
-        let epoch1 = client.get_epoch(&1).unwrap();
-        assert!(epoch1.sealed);
-        assert_eq!(epoch1.total_rewards, 500);
-
-        // Rewards are still claimable via reward index
-        assert!(client.get_claimable(&user) > 0);
-    }
-
-    // ── Carry-forward ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn unclaimed_rewards_carry_forward() {
-        let env = Env::default();
-        let duration = 100u64;
-        let (admin, client) = setup(&env, duration);
-
-        let user = Address::generate(&env);
-        client.stake(&user, &1_000);
-        client.fund_epoch_rewards(&admin, &1_000);
-
-        env.ledger().with_mut(|li| li.timestamp = duration + 1);
-        client.seal_epoch(&admin, &1, &100);
-
-        let epoch2 = client.get_epoch(&2).unwrap();
-        // Carry forward should be 1_000 (epoch 1 total_rewards)
-        assert_eq!(epoch2.carried_forward, 1_000);
-    }
-
-    // ── Missed epoch catch-up ─────────────────────────────────────────────────
-
-    #[test]
-    fn missed_epoch_catchup() {
-        let env = Env::default();
-        let duration = 50u64;
-        let (admin, client) = setup(&env, duration);
-
-        let user = Address::generate(&env);
-        client.stake(&user, &1_000);
-
-        // Jump past two epoch windows (keeper missed epoch 1)
-        env.ledger().with_mut(|li| li.timestamp = duration * 3);
-
-        // Keeper catches up epoch 1 first
-        client.seal_epoch(&admin, &1, &duration);
-        // Then epoch 2
-        env.ledger().with_mut(|li| li.timestamp = duration * 3 + 1);
-        client.seal_epoch(&admin, &2, &duration);
-
-        assert_eq!(client.current_epoch(), 3);
-        // No fund corruption: total_staked unchanged
-        assert_eq!(client.total_staked(), 1_000);
-    }
-
-    // ── Out-of-order sealing rejected ─────────────────────────────────────────
-
-    #[test]
-    fn out_of_order_sealing_rejected() {
-        let env = Env::default();
-        let (admin, client) = setup(&env, 100);
-
-        env.ledger().with_mut(|li| li.timestamp = 200);
-
-        // Cannot seal epoch 2 while epoch 1 is current
-        let result = client.try_seal_epoch(&admin, &2, &100);
-        assert_eq!(
-            result.unwrap_err().unwrap(),
-            ContractError::OutOfOrderSealing
-        );
-    }
-
-    // ── Already-sealed rejection ──────────────────────────────────────────────
-
-    #[test]
-    fn already_sealed_epoch_rejected() {
-        let env = Env::default();
-        let (admin, client) = setup(&env, 100);
-        env.ledger().with_mut(|li| li.timestamp = 200);
-
-        client.seal_epoch(&admin, &1, &100);
-
-        // Move to epoch 2, then try to seal epoch 1 again (would be out-of-order)
-        let result = client.try_seal_epoch(&admin, &1, &100);
-        assert_eq!(
-            result.unwrap_err().unwrap(),
-            ContractError::OutOfOrderSealing
-        );
-    }
-}
+mod tests;
