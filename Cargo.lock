@@ -227,6 +227,7 @@ dependencies = [
 name = "bond_collateral"
 version = "0.1.0"
 dependencies = [
+ "slashing_module",
  "soroban-sdk",
  "soroban_access_control",
 ]
