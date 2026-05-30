@@ -4,6 +4,10 @@
 mod integration_test;
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod tests;
+
+mod security_properties;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, BytesN, Env, IntoVal,
@@ -24,6 +28,9 @@ pub enum TimelockError {
     InsufficientMultisigApprovals = 8,
     ContractPaused = 9,
 }
+
+/// Grace period after ETA before a queued operation expires (14 days).
+pub const GRACE_PERIOD: u64 = 1_209_600;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,6 +61,9 @@ impl Timelock {
         }
 
         if min_delay > max_delay {
+            return Err(TimelockError::InvalidDelay);
+        }
+        if min_delay == 0 {
             return Err(TimelockError::InvalidDelay);
         }
 
@@ -176,8 +186,8 @@ impl Timelock {
             return Err(TimelockError::TimestampNotMet);
         }
 
-        // Grace period (e.g., 2 weeks) to avoid stale transactions sitting in the queue
-        if now > eta + 1_209_600 {
+        // Grace period to avoid stale transactions sitting in the queue
+        if now > eta + GRACE_PERIOD {
             return Err(TimelockError::TransactionExpired);
         }
 
@@ -270,6 +280,42 @@ impl Timelock {
         }
 
         env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    /// Admin increases minimum delay; decreases are rejected (governance-only).
+    pub fn set_min_delay(
+        env: Env,
+        admin: Address,
+        new_min_delay: u64,
+    ) -> Result<(), TimelockError> {
+        admin.require_auth();
+        let current_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if admin != current_admin {
+            return Err(TimelockError::NotAuthorized);
+        }
+        if new_min_delay == 0 {
+            return Err(TimelockError::InvalidDelay);
+        }
+        let current_min: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDelay)
+            .unwrap_or(0);
+        let max: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxDelay)
+            .unwrap_or(u64::MAX);
+        if new_min_delay < current_min {
+            return Err(TimelockError::InvalidDelay);
+        }
+        if new_min_delay > max {
+            return Err(TimelockError::InvalidDelay);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MinDelay, &new_min_delay);
         Ok(())
     }
 }

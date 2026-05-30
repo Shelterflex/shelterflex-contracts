@@ -29,6 +29,7 @@ pub enum DataKey {
     DealBalance(String),
     DealDepositor(String),
     DealState(String),
+    DealLifecycle(String),
     PendingRentRelease(String),
     RentDispute(String),
     LegacyLockedAmountV2(String),
@@ -84,6 +85,18 @@ pub enum ContractError {
     InvalidGovernanceDrain = 21,
     // Migration / data invariants
     MigrationInvariantViolation = 22,
+    // Deal lifecycle (#974)
+    InvalidDealTransition = 23,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u32)]
+pub enum DealLifecycleStatus {
+    Draft = 0,
+    Active = 1,
+    Completed = 2,
+    Defaulted = 3,
 }
 
 #[contracttype]
@@ -1256,6 +1269,89 @@ impl DealEscrow {
             .instance()
             .get::<_, bool>(&DataKey::Paused)
             .unwrap_or(false)
+    }
+
+    fn get_deal_lifecycle(env: &Env, deal_id: &String) -> DealLifecycleStatus {
+        env.storage()
+            .persistent()
+            .get::<_, DealLifecycleStatus>(&DataKey::DealLifecycle(deal_id.clone()))
+            .unwrap_or(DealLifecycleStatus::Draft)
+    }
+
+    fn set_deal_lifecycle(env: &Env, deal_id: &String, status: DealLifecycleStatus) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::DealLifecycle(deal_id.clone()), &status);
+    }
+
+    /// Admin-only: activate a deal on-chain (draft → active).
+    pub fn activate_deal(env: Env, admin: Address, deal_id: String) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
+        validation::require_non_empty_string(&env, &deal_id)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "activate_deal")?;
+
+        let current = Self::get_deal_lifecycle(&env, &deal_id);
+        if current != DealLifecycleStatus::Draft {
+            return Err(ContractError::InvalidDealTransition);
+        }
+        Self::set_deal_lifecycle(&env, &deal_id, DealLifecycleStatus::Active);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "activate_deal"),
+            ),
+            (deal_id, admin),
+        );
+        Ok(())
+    }
+
+    /// Admin-only: mark a deal completed on-chain.
+    pub fn complete_deal(env: Env, admin: Address, deal_id: String) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
+        validation::require_non_empty_string(&env, &deal_id)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "complete_deal")?;
+
+        let current = Self::get_deal_lifecycle(&env, &deal_id);
+        if current != DealLifecycleStatus::Active {
+            return Err(ContractError::InvalidDealTransition);
+        }
+        Self::set_deal_lifecycle(&env, &deal_id, DealLifecycleStatus::Completed);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "complete_deal"),
+            ),
+            (deal_id, admin),
+        );
+        Ok(())
+    }
+
+    /// Admin-only: mark a deal defaulted on-chain.
+    pub fn default_deal(env: Env, admin: Address, deal_id: String) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
+        validation::require_non_empty_string(&env, &deal_id)?;
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(&env, &current_admin, &admin, "default_deal")?;
+
+        let current = Self::get_deal_lifecycle(&env, &deal_id);
+        if current != DealLifecycleStatus::Active {
+            return Err(ContractError::InvalidDealTransition);
+        }
+        Self::set_deal_lifecycle(&env, &deal_id, DealLifecycleStatus::Defaulted);
+        env.events().publish(
+            (
+                Symbol::new(&env, "deal_escrow"),
+                Symbol::new(&env, "default_deal"),
+            ),
+            (deal_id, admin),
+        );
+        Ok(())
+    }
+
+    pub fn deal_lifecycle_status(env: Env, deal_id: String) -> DealLifecycleStatus {
+        Self::get_deal_lifecycle(&env, &deal_id)
     }
 }
 
