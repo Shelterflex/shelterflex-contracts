@@ -3,7 +3,8 @@
 extern crate std;
 
 use deal_escrow::{
-    ContractError as DealEscrowError, DealEscrow, DealEscrowClient, TokenClient as EscrowTokenClient,
+    ContractError as DealEscrowError, DealEscrow, DealEscrowClient,
+    TokenClient as EscrowTokenClient,
 };
 use rent_payments::{RentPayments, RentPaymentsClient};
 use rent_wallet::{RentWallet, RentWalletClient};
@@ -44,17 +45,11 @@ pub fn setup_full_stack(env: &Env) -> TestContracts<'_> {
 
     let rent_wallet_id = env.register(RentWallet, ());
     let rent_wallet = RentWalletClient::new(env, &rent_wallet_id);
-    rent_wallet
-        .try_init(&admin)
-        .unwrap()
-        .unwrap();
+    rent_wallet.try_init(&admin).unwrap().unwrap();
 
     let rent_payments_id = env.register(RentPayments, ());
     let rent_payments = RentPaymentsClient::new(env, &rent_payments_id);
-    rent_payments
-        .try_init(&admin)
-        .unwrap()
-        .unwrap();
+    rent_payments.try_init(&admin).unwrap().unwrap();
 
     let deal_escrow_id = env.register(DealEscrow, ());
     let deal_escrow = DealEscrowClient::new(env, &deal_escrow_id);
@@ -114,12 +109,7 @@ pub fn wallet_credit_and_escrow_deposit(
         invoke: &MockAuthInvoke {
             contract: &stack.rent_wallet_id,
             fn_name: "credit",
-            args: (
-                stack.admin.clone(),
-                stack.tenant.clone(),
-                amount,
-            )
-                .into_val(env),
+            args: (stack.admin.clone(), stack.tenant.clone(), amount).into_val(env),
             sub_invokes: &[],
         },
     }]);
@@ -135,12 +125,7 @@ pub fn wallet_credit_and_escrow_deposit(
         invoke: &MockAuthInvoke {
             contract: &stack.rent_wallet_id,
             fn_name: "debit",
-            args: (
-                stack.admin.clone(),
-                stack.tenant.clone(),
-                amount,
-            )
-                .into_val(env),
+            args: (stack.admin.clone(), stack.tenant.clone(), amount).into_val(env),
             sub_invokes: &[],
         },
     }]);
@@ -159,21 +144,11 @@ pub fn wallet_credit_and_escrow_deposit(
         invoke: &MockAuthInvoke {
             contract: &stack.deal_escrow_id,
             fn_name: "deposit",
-            args: (
-                stack.tenant.clone(),
-                deal_str.clone(),
-                amount,
-            )
-                .into_val(env),
+            args: (stack.tenant.clone(), deal_str.clone(), amount).into_val(env),
             sub_invokes: &[MockAuthInvoke {
                 contract: &stack.token,
                 fn_name: "transfer",
-                args: (
-                    stack.tenant.clone(),
-                    stack.deal_escrow_id.clone(),
-                    amount,
-                )
-                    .into_val(env),
+                args: (stack.tenant.clone(), stack.deal_escrow_id.clone(), amount).into_val(env),
                 sub_invokes: &[],
             }],
         },
@@ -226,7 +201,7 @@ pub fn release_escrow_and_record_receipt(
                 Symbol::new(env, "manual_admin"),
                 String::from_str(env, "payment"),
             )
-                .into_val(env),
+            .into_val(env),
             sub_invokes: &[],
         },
     }]);
@@ -358,13 +333,7 @@ fn scenario_3_paused_deal_escrow_blocks_deposit_until_unpaused() {
     let deal_str = deal_id_str(&env, deal_id);
     let amount = 500i128;
 
-    mint_to(
-        &env,
-        &stack.token,
-        &stack.token_admin,
-        &stack.tenant,
-        amount,
-    );
+    mint_to(&env, &stack.token, &stack.token_admin, &stack.tenant, amount);
 
     env.mock_auths(&[MockAuth {
         address: &stack.admin,
@@ -375,23 +344,14 @@ fn scenario_3_paused_deal_escrow_blocks_deposit_until_unpaused() {
             sub_invokes: &[],
         },
     }]);
-    stack
-        .deal_escrow
-        .try_pause(&stack.admin)
-        .unwrap()
-        .unwrap();
+    stack.deal_escrow.try_pause(&stack.admin).unwrap().unwrap();
 
     env.mock_auths(&[MockAuth {
         address: &stack.tenant,
         invoke: &MockAuthInvoke {
             contract: &stack.deal_escrow_id,
             fn_name: "deposit",
-            args: (
-                stack.tenant.clone(),
-                deal_str.clone(),
-                amount,
-            )
-                .into_val(&env),
+            args: (stack.tenant.clone(), deal_str.clone(), amount).into_val(&env),
             sub_invokes: &[],
         },
     }]);
@@ -411,32 +371,18 @@ fn scenario_3_paused_deal_escrow_blocks_deposit_until_unpaused() {
             sub_invokes: &[],
         },
     }]);
-    stack
-        .deal_escrow
-        .try_unpause(&stack.admin)
-        .unwrap()
-        .unwrap();
+    stack.deal_escrow.try_unpause(&stack.admin).unwrap().unwrap();
 
     env.mock_auths(&[MockAuth {
         address: &stack.tenant,
         invoke: &MockAuthInvoke {
             contract: &stack.deal_escrow_id,
             fn_name: "deposit",
-            args: (
-                stack.tenant.clone(),
-                deal_str.clone(),
-                amount,
-            )
-                .into_val(&env),
+            args: (stack.tenant.clone(), deal_str.clone(), amount).into_val(&env),
             sub_invokes: &[MockAuthInvoke {
                 contract: &stack.token,
                 fn_name: "transfer",
-                args: (
-                    stack.tenant.clone(),
-                    stack.deal_escrow_id.clone(),
-                    amount,
-                )
-                    .into_val(&env),
+                args: (stack.tenant.clone(), stack.deal_escrow_id.clone(), amount).into_val(&env),
                 sub_invokes: &[],
             }],
         },
@@ -476,7 +422,7 @@ fn scenario_4_release_more_than_escrow_balance_fails() {
                 Symbol::new(&env, "manual_admin"),
                 String::from_str(&env, "over-release"),
             )
-                .into_val(&env),
+            .into_val(&env),
             sub_invokes: &[],
         },
     }]);
