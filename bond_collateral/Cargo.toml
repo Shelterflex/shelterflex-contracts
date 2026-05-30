@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = "22.0.7"
@@ -12,3 +12,4 @@ soroban_access_control = { version = "0.1.0", path = "../soroban_access_control"
 
 [dev-dependencies]
 soroban-sdk = { version = "22.0.7", features = ["testutils"] }
+slashing_module = { path = "../slashing_module" }

@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Bytes, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, Address, Bytes, Env, String, Symbol, Vec,
 };
 
 // ── Storage Keys ─────────────────────────────────────────────────────────────
@@ -24,6 +24,24 @@ pub enum DataKey {
     StakedBalance(Address),
     /// Governance-approved unjail flag (set by admin; consumed on unjail)
     UnjailApproval(Address),
+
+    // ── Inspector bond slashing (Issue #925) ─────────────────────────────
+    /// Registered bond_collateral contract; only this address may call `slash`.
+    BondContract,
+    /// Slash history per inspector (append-only).
+    InspectorSlashHistory(Address),
+}
+
+/// Single slash entry recorded against an inspector by the bond contract
+/// (Issue #925). Distinct from `SlashEvidence`, which lives in the
+/// validator-style evidence flow.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InspectorSlashRecord {
+    pub inspection_id: String,
+    pub amount: i128,
+    pub reason: String,
+    pub slashed_at: u64,
 }
 
 // ── Slashable Offence Types ───────────────────────────────────────────────────
@@ -399,6 +417,100 @@ impl SlashingModule {
         );
         Ok(())
     }
+
+    // ── Inspector bond slashing (Issue #925) ──────────────────────────────────
+    //
+    // Companion flow to the validator slashing above: the `bond_collateral`
+    // contract calls `slash` here when an admin decides an inspector's
+    // collateral should be reduced for a specific inspection. We gate `slash`
+    // to the one registered bond contract so no other caller can record a
+    // slash against an inspector.
+
+    /// Register the bond_collateral contract address authorised to call `slash`.
+    pub fn set_bond_contract(
+        env: Env,
+        admin: Address,
+        bond_contract: Address,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::BondContract, &bond_contract);
+        env.events().publish(
+            (
+                Symbol::new(&env, "slashing"),
+                Symbol::new(&env, "set_bond_contract"),
+            ),
+            bond_contract,
+        );
+        Ok(())
+    }
+
+    /// Currently-registered bond contract, if any.
+    pub fn bond_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::BondContract)
+    }
+
+    /// Record a slash against an inspector for a specific inspection. Only
+    /// callable by the registered bond contract; the caller is checked against
+    /// both Soroban auth and the registered address. Returns the amount slashed.
+    pub fn slash(
+        env: Env,
+        caller: Address,
+        inspector: Address,
+        amount: i128,
+        inspection_id: String,
+        reason: String,
+    ) -> Result<i128, ContractError> {
+        let registered: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::BondContract)
+            .ok_or(ContractError::NotAuthorized)?;
+        if caller != registered {
+            return Err(ContractError::NotAuthorized);
+        }
+        caller.require_auth();
+
+        if amount <= 0 {
+            return Err(ContractError::ArithmeticError);
+        }
+
+        let record = InspectorSlashRecord {
+            inspection_id: inspection_id.clone(),
+            amount,
+            reason: reason.clone(),
+            slashed_at: env.ledger().timestamp(),
+        };
+
+        let key = DataKey::InspectorSlashHistory(inspector.clone());
+        let mut history: Vec<InspectorSlashRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(record.clone());
+        env.storage().persistent().set(&key, &history);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "slashing"),
+                Symbol::new(&env, "inspector_slashed"),
+                inspector,
+            ),
+            (inspection_id, amount, reason),
+        );
+
+        Ok(amount)
+    }
+
+    /// Read the inspector's slash history (oldest first).
+    pub fn get_slash_history(env: Env, inspector: Address) -> Vec<InspectorSlashRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::InspectorSlashHistory(inspector))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -621,5 +733,94 @@ mod tests {
             &Offence::Downtime,
         );
         assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+    }
+
+    // ── Inspector bond slashing surface (Issue #925) ─────────────────────
+
+    #[test]
+    fn bond_contract_is_set_and_read_back() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(SlashingModule, ());
+        let client = SlashingModuleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init(&admin);
+
+        assert!(client.bond_contract().is_none());
+
+        let bond_contract = Address::generate(&env);
+        client.set_bond_contract(&admin, &bond_contract);
+        assert_eq!(client.bond_contract(), Some(bond_contract));
+    }
+
+    #[test]
+    fn slash_rejects_unregistered_caller_with_not_authorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(SlashingModule, ());
+        let client = SlashingModuleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init(&admin);
+
+        let registered = Address::generate(&env);
+        client.set_bond_contract(&admin, &registered);
+
+        let stranger = Address::generate(&env);
+        let inspector = Address::generate(&env);
+        let result = client.try_slash(
+            &stranger,
+            &inspector,
+            &100,
+            &soroban_sdk::String::from_str(&env, "INSP-1"),
+            &soroban_sdk::String::from_str(&env, "r"),
+        );
+        assert_eq!(result, Err(Ok(ContractError::NotAuthorized)));
+    }
+
+    #[test]
+    fn slash_rejects_non_positive_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(SlashingModule, ());
+        let client = SlashingModuleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init(&admin);
+        let bond_contract = Address::generate(&env);
+        client.set_bond_contract(&admin, &bond_contract);
+
+        let inspector = Address::generate(&env);
+        let result = client.try_slash(
+            &bond_contract,
+            &inspector,
+            &0,
+            &soroban_sdk::String::from_str(&env, "INSP-1"),
+            &soroban_sdk::String::from_str(&env, "r"),
+        );
+        assert_eq!(result, Err(Ok(ContractError::ArithmeticError)));
+    }
+
+    #[test]
+    fn slash_records_history_when_called_by_registered_bond_contract() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(SlashingModule, ());
+        let client = SlashingModuleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.init(&admin);
+        let bond_contract = Address::generate(&env);
+        client.set_bond_contract(&admin, &bond_contract);
+
+        let inspector = Address::generate(&env);
+        let inspection = soroban_sdk::String::from_str(&env, "INSP-7");
+        let reason = soroban_sdk::String::from_str(&env, "fraud");
+        let slashed = client.slash(&bond_contract, &inspector, &500, &inspection, &reason);
+        assert_eq!(slashed, 500);
+
+        let history = client.get_slash_history(&inspector);
+        assert_eq!(history.len(), 1);
+        let entry = history.get(0).unwrap();
+        assert_eq!(entry.amount, 500);
+        assert_eq!(entry.inspection_id, inspection);
+        assert_eq!(entry.reason, reason);
     }
 }
