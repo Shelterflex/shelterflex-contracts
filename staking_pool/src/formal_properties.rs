@@ -118,7 +118,8 @@ impl PoolModel {
             .pending_upgrade_at
             .ok_or(ModelError::UpgradeDelayNotMet)?;
 
-        if self.upgrade_delay > 0 && self.current_time < proposed_at.saturating_add(self.upgrade_delay)
+        if self.upgrade_delay > 0
+            && self.current_time < proposed_at.saturating_add(self.upgrade_delay)
         {
             return Err(ModelError::UpgradeDelayNotMet);
         }
@@ -144,7 +145,10 @@ fn stake_no_overflow() {
     kani::assume(staked_amount <= i128::MAX / 2);
 
     let direct = total_staked.checked_add(staked_amount);
-    assert!(direct.is_some(), "checked_add must succeed within safe bounds");
+    assert!(
+        direct.is_some(),
+        "checked_add must succeed within safe bounds"
+    );
 
     let mut model = PoolModel::new();
     model.total_staked = total_staked;
@@ -285,7 +289,10 @@ fn reentrancy_safety() {
     }
 
     model.exit_nonreentrant();
-    assert!(!model.reentrancy, "lock must be cleared after external call");
+    assert!(
+        !model.reentrancy,
+        "lock must be cleared after external call"
+    );
 }
 
 /// **Property:** `execute_upgrade` cannot succeed before
@@ -309,7 +316,10 @@ fn upgrade_delay_respected() {
         ..PoolModel::new()
     };
 
-    assert_eq!(model.can_execute_upgrade(), Err(ModelError::UpgradeDelayNotMet));
+    assert_eq!(
+        model.can_execute_upgrade(),
+        Err(ModelError::UpgradeDelayNotMet)
+    );
 
     let elapsed_time = proposed_at.saturating_add(delay);
     let model_ready = PoolModel {
