@@ -201,7 +201,7 @@ pub fn release_escrow_and_record_receipt(
                 Symbol::new(env, "manual_admin"),
                 String::from_str(env, "payment"),
             )
-            .into_val(env),
+                .into_val(env),
             sub_invokes: &[],
         },
     }]);
@@ -333,7 +333,13 @@ fn scenario_3_paused_deal_escrow_blocks_deposit_until_unpaused() {
     let deal_str = deal_id_str(&env, deal_id);
     let amount = 500i128;
 
-    mint_to(&env, &stack.token, &stack.token_admin, &stack.tenant, amount);
+    mint_to(
+        &env,
+        &stack.token,
+        &stack.token_admin,
+        &stack.tenant,
+        amount,
+    );
 
     env.mock_auths(&[MockAuth {
         address: &stack.admin,
@@ -371,7 +377,11 @@ fn scenario_3_paused_deal_escrow_blocks_deposit_until_unpaused() {
             sub_invokes: &[],
         },
     }]);
-    stack.deal_escrow.try_unpause(&stack.admin).unwrap().unwrap();
+    stack
+        .deal_escrow
+        .try_unpause(&stack.admin)
+        .unwrap()
+        .unwrap();
 
     env.mock_auths(&[MockAuth {
         address: &stack.tenant,
@@ -422,7 +432,7 @@ fn scenario_4_release_more_than_escrow_balance_fails() {
                 Symbol::new(&env, "manual_admin"),
                 String::from_str(&env, "over-release"),
             )
-            .into_val(&env),
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
