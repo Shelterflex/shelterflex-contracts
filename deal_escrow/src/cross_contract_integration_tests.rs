@@ -3,7 +3,8 @@
 extern crate std;
 
 use crate::{
-    ContractError as DealEscrowError, DealEscrow, DealEscrowClient, TokenClient as EscrowTokenClient,
+    ContractError as DealEscrowError, DealEscrow, DealEscrowClient,
+    TokenClient as EscrowTokenClient,
 };
 use rent_payments::{RentPayments, RentPaymentsClient};
 use rent_wallet::{RentWallet, RentWalletClient};

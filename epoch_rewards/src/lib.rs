@@ -161,11 +161,19 @@ impl EpochRewards {
     }
 
     pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false)
+        env.storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-        if env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
             return Err(ContractError::Paused);
         }
         Ok(())

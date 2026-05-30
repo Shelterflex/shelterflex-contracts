@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
+};
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -48,33 +50,54 @@ pub struct BondRecord {
 pub struct InspectorBondContract;
 
 fn get_admin(env: &Env) -> Address {
-    env.storage().instance().get(&DataKey::Admin).expect("not init")
+    env.storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .expect("not init")
 }
 
 fn is_paused_internal(env: &Env) -> bool {
-    env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false)
+    env.storage()
+        .instance()
+        .get::<_, bool>(&DataKey::Paused)
+        .unwrap_or(false)
 }
 
 fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-    if is_paused_internal(env) { Err(ContractError::Paused) } else { Ok(()) }
+    if is_paused_internal(env) {
+        Err(ContractError::Paused)
+    } else {
+        Ok(())
+    }
 }
 
 fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
     caller.require_auth();
-    if caller != &get_admin(env) { return Err(ContractError::NotAuthorized); }
+    if caller != &get_admin(env) {
+        return Err(ContractError::NotAuthorized);
+    }
     Ok(())
 }
 
 fn min_bond(env: &Env) -> i128 {
-    env.storage().instance().get::<_, i128>(&DataKey::MinBondAmount).unwrap_or(1_000_0000000)
+    env.storage()
+        .instance()
+        .get::<_, i128>(&DataKey::MinBondAmount)
+        .unwrap_or(1_000_0000000)
 }
 
 fn slash_bps(env: &Env) -> i128 {
-    env.storage().instance().get::<_, i128>(&DataKey::SlashPenaltyBps).unwrap_or(1000)
+    env.storage()
+        .instance()
+        .get::<_, i128>(&DataKey::SlashPenaltyBps)
+        .unwrap_or(1000)
 }
 
 fn lock_days(env: &Env) -> u64 {
-    env.storage().instance().get::<_, u64>(&DataKey::UnstakeLockDays).unwrap_or(30)
+    env.storage()
+        .instance()
+        .get::<_, u64>(&DataKey::UnstakeLockDays)
+        .unwrap_or(30)
 }
 
 #[contractimpl]
@@ -90,9 +113,15 @@ impl InspectorBondContract {
             return Err(ContractError::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::MinBondAmount, &min_bond_amount);
-        env.storage().instance().set(&DataKey::SlashPenaltyBps, &slash_penalty_bps);
-        env.storage().instance().set(&DataKey::UnstakeLockDays, &unstake_lock_days);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinBondAmount, &min_bond_amount);
+        env.storage()
+            .instance()
+            .set(&DataKey::SlashPenaltyBps, &slash_penalty_bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::UnstakeLockDays, &unstake_lock_days);
         Ok(())
     }
 
@@ -100,23 +129,36 @@ impl InspectorBondContract {
     pub fn stake_bond(env: Env, inspector: Address, amount: i128) -> Result<(), ContractError> {
         require_not_paused(&env)?;
         inspector.require_auth();
-        if amount <= 0 { return Err(ContractError::InvalidAmount); }
-        if amount < min_bond(&env) { return Err(ContractError::BondTooLow); }
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if amount < min_bond(&env) {
+            return Err(ContractError::BondTooLow);
+        }
 
         let lock_secs = lock_days(&env) * 86_400;
         let locked_until = env.ledger().timestamp() + lock_secs;
 
-        let existing: Option<BondRecord> = env.storage().persistent().get(&DataKey::Bond(inspector.clone()));
+        let existing: Option<BondRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Bond(inspector.clone()));
         let bond = BondRecord {
             inspector: inspector.clone(),
             amount: existing.as_ref().map(|b| b.amount).unwrap_or(0) + amount,
             locked_until,
             slash_count: existing.as_ref().map(|b| b.slash_count).unwrap_or(0),
         };
-        env.storage().persistent().set(&DataKey::Bond(inspector.clone()), &bond);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Bond(inspector.clone()), &bond);
 
         env.events().publish(
-            (Symbol::new(&env, "inspector_bond"), Symbol::new(&env, "staked"), inspector),
+            (
+                Symbol::new(&env, "inspector_bond"),
+                Symbol::new(&env, "staked"),
+                inspector,
+            ),
             amount,
         );
         Ok(())
@@ -125,7 +167,9 @@ impl InspectorBondContract {
     /// Inspector withdraws bond if no active jobs and locked_until has passed.
     pub fn unstake_bond(env: Env, inspector: Address) -> Result<i128, ContractError> {
         inspector.require_auth();
-        let bond: BondRecord = env.storage().persistent()
+        let bond: BondRecord = env
+            .storage()
+            .persistent()
             .get(&DataKey::Bond(inspector.clone()))
             .ok_or(ContractError::NoBond)?;
 
@@ -137,10 +181,16 @@ impl InspectorBondContract {
         }
 
         let amount = bond.amount;
-        env.storage().persistent().remove(&DataKey::Bond(inspector.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Bond(inspector.clone()));
 
         env.events().publish(
-            (Symbol::new(&env, "inspector_bond"), Symbol::new(&env, "unstaked"), inspector),
+            (
+                Symbol::new(&env, "inspector_bond"),
+                Symbol::new(&env, "unstaked"),
+                inspector,
+            ),
             amount,
         );
         Ok(amount)
@@ -156,19 +206,31 @@ impl InspectorBondContract {
     ) -> Result<i128, ContractError> {
         require_admin(&env, &admin)?;
 
-        let mut bond: BondRecord = env.storage().persistent()
+        let mut bond: BondRecord = env
+            .storage()
+            .persistent()
             .get(&DataKey::Bond(inspector.clone()))
             .ok_or(ContractError::NoBond)?;
 
         let penalty = bond.amount * slash_bps(&env) / 10_000;
-        let slash_amount = if penalty > bond.amount { bond.amount } else { penalty };
+        let slash_amount = if penalty > bond.amount {
+            bond.amount
+        } else {
+            penalty
+        };
 
         bond.amount = (bond.amount - slash_amount).max(0);
         bond.slash_count += 1;
-        env.storage().persistent().set(&DataKey::Bond(inspector.clone()), &bond);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Bond(inspector.clone()), &bond);
 
         env.events().publish(
-            (Symbol::new(&env, "inspector_bond"), Symbol::new(&env, "slashed"), inspector.clone()),
+            (
+                Symbol::new(&env, "inspector_bond"),
+                Symbol::new(&env, "slashed"),
+                inspector.clone(),
+            ),
             (slash_amount, report_id, reason),
         );
         Ok(slash_amount)
@@ -179,7 +241,11 @@ impl InspectorBondContract {
     }
 
     pub fn is_bonded(env: Env, inspector: Address) -> bool {
-        match env.storage().persistent().get::<_, BondRecord>(&DataKey::Bond(inspector)) {
+        match env
+            .storage()
+            .persistent()
+            .get::<_, BondRecord>(&DataKey::Bond(inspector))
+        {
             Some(b) => b.amount >= min_bond(&env),
             None => false,
         }
@@ -203,7 +269,9 @@ impl InspectorBondContract {
 
     pub fn set_min_bond(env: Env, admin: Address, amount: i128) -> Result<(), ContractError> {
         require_admin(&env, &admin)?;
-        env.storage().instance().set(&DataKey::MinBondAmount, &amount);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinBondAmount, &amount);
         Ok(())
     }
 }
@@ -215,10 +283,7 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::{
-        testutils::Address as _,
-        Env,
-    };
+    use soroban_sdk::{testutils::Address as _, Env};
 
     fn setup(env: &Env) -> (Address, InspectorBondContractClient<'_>) {
         env.mock_all_auths();
@@ -293,7 +358,8 @@ mod tests {
 
         client.stake_bond(&inspector, &10_000);
         let report_id = BytesN::from_array(&env, &[1u8; 32]);
-        let slashed = client.slash_inspector(&admin, &inspector, &report_id, &Symbol::new(&env, "fraud"));
+        let slashed =
+            client.slash_inspector(&admin, &inspector, &report_id, &Symbol::new(&env, "fraud"));
 
         // 10% of 10_000 = 1_000
         assert_eq!(slashed, 1_000);
@@ -332,7 +398,10 @@ mod tests {
         client.slash_inspector(&admin, &inspector, &report_id, &Symbol::new(&env, "fraud"));
 
         let result = client.try_unstake_bond(&inspector);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::BondBelowMinimum);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::BondBelowMinimum
+        );
     }
 
     #[test]
@@ -363,7 +432,12 @@ mod tests {
 
         client.stake_bond(&inspector, &1_000);
         let report_id = BytesN::from_array(&env, &[4u8; 32]);
-        let result = client.try_slash_inspector(&attacker, &inspector, &report_id, &Symbol::new(&env, "fraud"));
+        let result = client.try_slash_inspector(
+            &attacker,
+            &inspector,
+            &report_id,
+            &Symbol::new(&env, "fraud"),
+        );
         assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
     }
 }

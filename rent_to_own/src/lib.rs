@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
+};
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -68,12 +70,17 @@ pub struct EquityPayment {
 pub struct RentToOwn;
 
 fn get_admin(env: &Env) -> Address {
-    env.storage().instance().get(&DataKey::Admin).expect("not init")
+    env.storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .expect("not init")
 }
 
 fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
     caller.require_auth();
-    if caller != &get_admin(env) { return Err(ContractError::NotAuthorized); }
+    if caller != &get_admin(env) {
+        return Err(ContractError::NotAuthorized);
+    }
     Ok(())
 }
 
@@ -101,7 +108,11 @@ impl RentToOwn {
         if property_value_usdc <= 0 || monthly_equity_usdc <= 0 {
             return Err(ContractError::InvalidAmount);
         }
-        if env.storage().persistent().has(&DataKey::Deal(deal_id.clone())) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Deal(deal_id.clone()))
+        {
             return Err(ContractError::DealAlreadyExists);
         }
 
@@ -115,10 +126,15 @@ impl RentToOwn {
             total_payments_required,
             status: DealStatus::Active,
         };
-        env.storage().persistent().set(&DataKey::Deal(deal_id.clone()), &deal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Deal(deal_id.clone()), &deal);
 
         env.events().publish(
-            (Symbol::new(&env, "rent_to_own"), Symbol::new(&env, "deal_registered")),
+            (
+                Symbol::new(&env, "rent_to_own"),
+                Symbol::new(&env, "deal_registered"),
+            ),
             deal_id,
         );
         Ok(())
@@ -137,7 +153,9 @@ impl RentToOwn {
             return Err(ContractError::InvalidAmount);
         }
 
-        let mut deal: RentToOwnDeal = env.storage().persistent()
+        let mut deal: RentToOwnDeal = env
+            .storage()
+            .persistent()
             .get(&DataKey::Deal(deal_id.clone()))
             .ok_or(ContractError::DealNotFound)?;
 
@@ -155,7 +173,9 @@ impl RentToOwn {
         deal.payments_made += 1;
         let payment_number = deal.payments_made;
 
-        env.storage().persistent().set(&DataKey::Deal(deal_id.clone()), &deal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Deal(deal_id.clone()), &deal);
 
         let payment = EquityPayment {
             deal_id: deal_id.clone(),
@@ -164,20 +184,31 @@ impl RentToOwn {
             total_rent_amount: rent_amount,
             paid_at: env.ledger().timestamp(),
         };
-        env.storage().persistent().set(&DataKey::Payment(deal_id.clone(), payment_number), &payment);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(deal_id.clone(), payment_number), &payment);
 
         env.events().publish(
-            (Symbol::new(&env, "rent_to_own"), Symbol::new(&env, "equity_payment_recorded")),
+            (
+                Symbol::new(&env, "rent_to_own"),
+                Symbol::new(&env, "equity_payment_recorded"),
+            ),
             (deal_id, payment_number, new_equity),
         );
         Ok(())
     }
 
     /// Admin marks deal completed when all payments made.
-    pub fn complete_deal(env: Env, admin: Address, deal_id: BytesN<32>) -> Result<(), ContractError> {
+    pub fn complete_deal(
+        env: Env,
+        admin: Address,
+        deal_id: BytesN<32>,
+    ) -> Result<(), ContractError> {
         require_admin(&env, &admin)?;
 
-        let mut deal: RentToOwnDeal = env.storage().persistent()
+        let mut deal: RentToOwnDeal = env
+            .storage()
+            .persistent()
             .get(&DataKey::Deal(deal_id.clone()))
             .ok_or(ContractError::DealNotFound)?;
 
@@ -189,10 +220,15 @@ impl RentToOwn {
         }
 
         deal.status = DealStatus::Completed;
-        env.storage().persistent().set(&DataKey::Deal(deal_id.clone()), &deal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Deal(deal_id.clone()), &deal);
 
         env.events().publish(
-            (Symbol::new(&env, "rent_to_own"), Symbol::new(&env, "deal_completed")),
+            (
+                Symbol::new(&env, "rent_to_own"),
+                Symbol::new(&env, "deal_completed"),
+            ),
             deal_id,
         );
         Ok(())
@@ -207,7 +243,9 @@ impl RentToOwn {
     ) -> Result<(), ContractError> {
         require_admin(&env, &admin)?;
 
-        let mut deal: RentToOwnDeal = env.storage().persistent()
+        let mut deal: RentToOwnDeal = env
+            .storage()
+            .persistent()
             .get(&DataKey::Deal(deal_id.clone()))
             .ok_or(ContractError::DealNotFound)?;
 
@@ -217,10 +255,15 @@ impl RentToOwn {
 
         let accumulated = deal.equity_accumulated_usdc;
         deal.status = DealStatus::Defaulted;
-        env.storage().persistent().set(&DataKey::Deal(deal_id.clone()), &deal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Deal(deal_id.clone()), &deal);
 
         env.events().publish(
-            (Symbol::new(&env, "rent_to_own"), Symbol::new(&env, "deal_defaulted")),
+            (
+                Symbol::new(&env, "rent_to_own"),
+                Symbol::new(&env, "deal_defaulted"),
+            ),
             (deal_id, reason, accumulated),
         );
         Ok(())
@@ -236,7 +279,9 @@ impl RentToOwn {
             Some(d) => d,
             None => return 0,
         };
-        if deal.property_value_usdc == 0 { return 0; }
+        if deal.property_value_usdc == 0 {
+            return 0;
+        }
         ((deal.equity_accumulated_usdc * 10_000) / deal.property_value_usdc) as u32
     }
 }
@@ -248,10 +293,7 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::{
-        testutils::Address as _,
-        Env,
-    };
+    use soroban_sdk::{testutils::Address as _, Env};
 
     fn setup(env: &Env) -> (Address, RentToOwnClient<'_>) {
         env.mock_all_auths();
@@ -351,7 +393,10 @@ mod tests {
         client.record_equity_payment(&admin, &deal_id, &15_000, &10_000);
 
         let result = client.try_complete_deal(&admin, &deal_id);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::PaymentsNotComplete);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::PaymentsNotComplete
+        );
     }
 
     #[test]

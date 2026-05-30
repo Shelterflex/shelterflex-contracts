@@ -13,4 +13,6 @@ soroban_access_control = { version = "0.1.0", path = "../soroban_access_control"
 
 [dev-dependencies]
 soroban-sdk = { version = "22.0.7", features = ["testutils"] }
+rent_payments = { version = "0.1.0", path = "../rent_payments", features = ["testutils"] }
+rent_wallet = { version = "0.1.0", path = "../rent_wallet", features = ["testutils"] }
 

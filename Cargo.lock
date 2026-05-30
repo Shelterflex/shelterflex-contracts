@@ -455,6 +455,8 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 name = "deal_escrow"
 version = "0.1.0"
 dependencies = [
+ "rent_payments",
+ "rent_wallet",
  "soroban-pausable",
  "soroban-sdk",
  "soroban_access_control",

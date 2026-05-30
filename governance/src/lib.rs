@@ -83,23 +83,32 @@ pub struct Proposal {
 pub struct Governance;
 
 fn get_admin(env: &Env) -> Address {
-    env.storage().instance().get(&DataKey::Admin).expect("not init")
+    env.storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .expect("not init")
 }
 
 fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
     caller.require_auth();
-    if caller != &get_admin(env) { return Err(ContractError::NotAuthorized); }
+    if caller != &get_admin(env) {
+        return Err(ContractError::NotAuthorized);
+    }
     Ok(())
 }
 
 fn get_total_staked(env: &Env) -> i128 {
-    env.storage().instance().get::<_, i128>(&DataKey::TotalStaked).unwrap_or(0)
+    env.storage()
+        .instance()
+        .get::<_, i128>(&DataKey::TotalStaked)
+        .unwrap_or(0)
 }
 
 fn get_stake_for(env: &Env, voter: &Address) -> i128 {
     // In production this would cross-call staking_pool.staked_balance(voter).
     // In tests we use a per-voter storage entry set by admin via set_stake_for.
-    env.storage().persistent()
+    env.storage()
+        .persistent()
         .get::<_, i128>(&DataKey::Voted(0, voter.clone()))
         .unwrap_or(0)
 }
@@ -111,7 +120,9 @@ impl Governance {
             return Err(ContractError::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::TotalStaked, &total_staked);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalStaked, &total_staked);
         env.storage().instance().set(&DataKey::ProposalCount, &0u64);
         Ok(())
     }
@@ -124,10 +135,17 @@ impl Governance {
     }
 
     /// Set a voter's stake weight (admin-only; in production this reads from staking_pool).
-    pub fn set_voter_stake(env: Env, admin: Address, voter: Address, stake: i128) -> Result<(), ContractError> {
+    pub fn set_voter_stake(
+        env: Env,
+        admin: Address,
+        voter: Address,
+        stake: i128,
+    ) -> Result<(), ContractError> {
         require_admin(&env, &admin)?;
         // Reuse Voted(0, voter) as a stake-weight slot (proposal 0 is never created)
-        env.storage().persistent().set(&DataKey::Voted(0, voter), &stake);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Voted(0, voter), &stake);
         Ok(())
     }
 
@@ -146,7 +164,11 @@ impl Governance {
             return Err(ContractError::InsufficientStake);
         }
 
-        let count: u64 = env.storage().instance().get(&DataKey::ProposalCount).unwrap_or(0);
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalCount)
+            .unwrap_or(0);
         let id = count + 1;
 
         let now = env.ledger().timestamp();
@@ -163,11 +185,16 @@ impl Governance {
             voting_ends_at: now + VOTING_PERIOD_SECS,
         };
 
-        env.storage().persistent().set(&DataKey::Proposal(id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(id), &proposal);
         env.storage().instance().set(&DataKey::ProposalCount, &id);
 
         env.events().publish(
-            (Symbol::new(&env, "governance"), Symbol::new(&env, "proposal_created")),
+            (
+                Symbol::new(&env, "governance"),
+                Symbol::new(&env, "proposal_created"),
+            ),
             (id, proposer),
         );
         Ok(id)
@@ -182,7 +209,9 @@ impl Governance {
     ) -> Result<(), ContractError> {
         voter.require_auth();
 
-        let mut proposal: Proposal = env.storage().persistent()
+        let mut proposal: Proposal = env
+            .storage()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(ContractError::ProposalNotFound)?;
 
@@ -196,7 +225,11 @@ impl Governance {
         }
 
         // Prevent double voting
-        if env.storage().persistent().has(&DataKey::Voted(proposal_id, voter.clone())) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Voted(proposal_id, voter.clone()))
+        {
             return Err(ContractError::AlreadyVoted);
         }
 
@@ -207,8 +240,12 @@ impl Governance {
             proposal.votes_against += weight;
         }
 
-        env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
-        env.storage().persistent().set(&DataKey::Voted(proposal_id, voter.clone()), &true);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Voted(proposal_id, voter.clone()), &true);
 
         env.events().publish(
             (Symbol::new(&env, "governance"), Symbol::new(&env, "voted")),
@@ -219,7 +256,9 @@ impl Governance {
 
     /// Finalize proposal after voting period ends.
     pub fn finalize_proposal(env: Env, proposal_id: u64) -> Result<ProposalStatus, ContractError> {
-        let mut proposal: Proposal = env.storage().persistent()
+        let mut proposal: Proposal = env
+            .storage()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(ContractError::ProposalNotFound)?;
 
@@ -243,10 +282,15 @@ impl Governance {
         };
 
         let status = proposal.status.clone();
-        env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events().publish(
-            (Symbol::new(&env, "governance"), Symbol::new(&env, "proposal_finalized")),
+            (
+                Symbol::new(&env, "governance"),
+                Symbol::new(&env, "proposal_finalized"),
+            ),
             (proposal_id, proposal.votes_for, proposal.votes_against),
         );
         Ok(status)
@@ -254,7 +298,9 @@ impl Governance {
 
     /// Execute a passed proposal after timelock.
     pub fn execute_proposal(env: Env, proposal_id: u64) -> Result<(), ContractError> {
-        let mut proposal: Proposal = env.storage().persistent()
+        let mut proposal: Proposal = env
+            .storage()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(ContractError::ProposalNotFound)?;
 
@@ -272,20 +318,31 @@ impl Governance {
         }
 
         proposal.status = ProposalStatus::Executed;
-        env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events().publish(
-            (Symbol::new(&env, "governance"), Symbol::new(&env, "proposal_executed")),
+            (
+                Symbol::new(&env, "governance"),
+                Symbol::new(&env, "proposal_executed"),
+            ),
             (proposal_id, proposal.param_key, proposal.proposed_value),
         );
         Ok(())
     }
 
     /// Proposer can cancel before voting ends.
-    pub fn cancel_proposal(env: Env, proposer: Address, proposal_id: u64) -> Result<(), ContractError> {
+    pub fn cancel_proposal(
+        env: Env,
+        proposer: Address,
+        proposal_id: u64,
+    ) -> Result<(), ContractError> {
         proposer.require_auth();
 
-        let mut proposal: Proposal = env.storage().persistent()
+        let mut proposal: Proposal = env
+            .storage()
+            .persistent()
             .get(&DataKey::Proposal(proposal_id))
             .ok_or(ContractError::ProposalNotFound)?;
 
@@ -297,21 +354,31 @@ impl Governance {
         }
 
         proposal.status = ProposalStatus::Cancelled;
-        env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
 
         env.events().publish(
-            (Symbol::new(&env, "governance"), Symbol::new(&env, "proposal_cancelled")),
+            (
+                Symbol::new(&env, "governance"),
+                Symbol::new(&env, "proposal_cancelled"),
+            ),
             proposal_id,
         );
         Ok(())
     }
 
     pub fn get_proposal(env: Env, proposal_id: u64) -> Option<Proposal> {
-        env.storage().persistent().get(&DataKey::Proposal(proposal_id))
+        env.storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
     }
 
     pub fn proposal_count(env: Env) -> u64 {
-        env.storage().instance().get(&DataKey::ProposalCount).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::ProposalCount)
+            .unwrap_or(0)
     }
 }
 
@@ -336,7 +403,13 @@ mod tests {
         (admin, client)
     }
 
-    fn give_stake(_env: &Env, client: &GovernanceClient, admin: &Address, voter: &Address, stake: i128) {
+    fn give_stake(
+        _env: &Env,
+        client: &GovernanceClient,
+        admin: &Address,
+        voter: &Address,
+        stake: i128,
+    ) {
         client.set_voter_stake(admin, voter, &stake);
     }
 
@@ -353,25 +426,22 @@ mod tests {
         give_stake(&env, &client, &admin, &voter1, 600_000);
         give_stake(&env, &client, &admin, &voter2, 200_000);
 
-        let pid = client.create_proposal(
-            &proposer,
-            &Symbol::new(&env, "reward_amt"),
-            &100,
-            &200,
-        );
+        let pid = client.create_proposal(&proposer, &Symbol::new(&env, "reward_amt"), &100, &200);
         assert_eq!(pid, 1);
 
         client.vote(&voter1, &pid, &true);
         client.vote(&voter2, &pid, &false);
 
         // Advance past voting period
-        env.ledger().with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
 
         let status = client.finalize_proposal(&pid);
         assert!(matches!(status, ProposalStatus::Passed));
 
         // Advance past timelock
-        env.ledger().with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + TIMELOCK_SECS + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + TIMELOCK_SECS + 1);
         client.execute_proposal(&pid);
 
         let proposal = client.get_proposal(&pid).unwrap();
@@ -392,7 +462,8 @@ mod tests {
         // Only proposer votes (50_000 < 100_000 quorum)
         client.vote(&proposer, &pid, &true);
 
-        env.ledger().with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
         let status = client.finalize_proposal(&pid);
         assert!(matches!(status, ProposalStatus::Rejected));
     }
@@ -426,12 +497,16 @@ mod tests {
         let pid = client.create_proposal(&proposer, &Symbol::new(&env, "param"), &1, &2);
         client.vote(&voter, &pid, &true);
 
-        env.ledger().with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
         client.finalize_proposal(&pid);
 
         // Try to execute immediately (timelock not elapsed)
         let result = client.try_execute_proposal(&pid);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::TimelockNotElapsed);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::TimelockNotElapsed
+        );
     }
 
     #[test]
@@ -473,7 +548,10 @@ mod tests {
         let proposer = Address::generate(&env);
         // No stake set → defaults to 0 < MIN_STAKE_TO_PROPOSE
         let result = client.try_create_proposal(&proposer, &Symbol::new(&env, "param"), &1, &2);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::InsufficientStake);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::InsufficientStake
+        );
     }
 
     #[test]
@@ -489,13 +567,18 @@ mod tests {
         let pid = client.create_proposal(&proposer, &Symbol::new(&env, "param"), &1, &2);
         client.vote(&voter, &pid, &true);
 
-        env.ledger().with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
         client.finalize_proposal(&pid);
 
-        env.ledger().with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + TIMELOCK_SECS + 1);
+        env.ledger()
+            .with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + TIMELOCK_SECS + 1);
         client.execute_proposal(&pid);
 
         let result = client.try_execute_proposal(&pid);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::ProposalAlreadyExecuted);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::ProposalAlreadyExecuted
+        );
     }
 }

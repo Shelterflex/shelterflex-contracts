@@ -138,10 +138,7 @@ fn seal_before_epoch_end_returns_error() {
 
     // Timestamp is 0, epoch not expired
     let result = client.try_seal_epoch(&admin, &1, &100);
-    assert_eq!(
-        result.unwrap_err().unwrap(),
-        ContractError::EpochNotExpired
-    );
+    assert_eq!(result.unwrap_err().unwrap(), ContractError::EpochNotExpired);
 }
 
 // ── 6. Double claim ───────────────────────────────────────────────────────────
@@ -235,7 +232,11 @@ fn large_numbers_100_stakers_no_overflow() {
     let mut total_claimed: i128 = 0;
     for staker in &stakers {
         let r = client.get_claimable(staker);
-        assert!((r - 1_000_000).abs() <= 1, "staker reward {} out of range", r);
+        assert!(
+            (r - 1_000_000).abs() <= 1,
+            "staker reward {} out of range",
+            r
+        );
         total_claimed += r;
     }
     // Total claimed should be close to total funded (rounding losses ≤ 100)
