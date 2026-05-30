@@ -1,0 +1,14 @@
+[package]
+name = "integration_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+deal_escrow = { path = "../deal_escrow" }
+rent_payments = { path = "../rent_payments" }
+rent_wallet = { path = "../rent_wallet" }
+soroban-sdk = { version = "22.0.7", features = ["testutils"] }
