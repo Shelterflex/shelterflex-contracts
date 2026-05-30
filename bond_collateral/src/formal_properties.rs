@@ -183,17 +183,11 @@ fn prove_admin_only_invariant() {
 
     // If caller is not admin, result must always be an error
     if !caller_is_admin {
-        assert!(
-            result.is_err(),
-            "Non-admin call did not return error"
-        );
+        assert!(result.is_err(), "Non-admin call did not return error");
     }
 
     // If caller is admin, result must be Ok
     if caller_is_admin {
-        assert!(
-            result.is_ok(),
-            "Admin call returned error"
-        );
+        assert!(result.is_ok(), "Admin call returned error");
     }
 }
