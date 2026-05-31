@@ -289,10 +289,7 @@ fn max_depth_exceeded_returns_error() {
     let entry_point = create_entry_point(&env, "transfer");
 
     // Set max depth to 1 for testing
-    client
-        .try_set_max_call_depth(&admin, 1)
-        .unwrap()
-        .unwrap();
+    client.try_set_max_call_depth(&admin, 1).unwrap().unwrap();
 
     // Activate guard
     client
