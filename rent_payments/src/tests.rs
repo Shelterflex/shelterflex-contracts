@@ -21,6 +21,9 @@ fn test_record_payment_happy_path() {
     let payer = Address::generate(&env);
     let amount = 1000i128;
 
+    // Set ledger timestamp to ensure timestamp is recorded
+    env.ledger().set_timestamp(12345);
+
     env.mock_auths(&[MockAuth {
         address: &admin,
         invoke: &MockAuthInvoke {
