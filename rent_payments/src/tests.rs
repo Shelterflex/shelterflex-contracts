@@ -1,8 +1,5 @@
-#![no_std]
-
 use soroban_sdk::{
-    contracterror, contractimpl, contracttype,
-    testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     Address, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
