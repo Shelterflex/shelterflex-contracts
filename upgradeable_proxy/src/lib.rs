@@ -301,6 +301,9 @@ impl UpgradeableProxy {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod tests;
+
+#[cfg(test)]
 mod test {
     extern crate std;
 
