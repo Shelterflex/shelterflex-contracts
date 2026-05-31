@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use soroban_sdk::testutils::{Address as _, AuthorizedFunction, MockAuth, MockAuthInvoke};
+use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, BytesN, Env};
 
 use crate::{ContractError, ReentrancyGuard, ReentrancyGuardClient};
@@ -289,7 +289,7 @@ fn max_depth_exceeded_returns_error() {
     let entry_point = create_entry_point(&env, "transfer");
 
     // Set max depth to 1 for testing
-    client.try_set_max_call_depth(&admin, 1).unwrap().unwrap();
+    client.try_set_max_call_depth(&admin, &1).unwrap().unwrap();
 
     // Activate guard
     client
