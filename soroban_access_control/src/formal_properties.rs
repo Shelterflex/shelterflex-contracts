@@ -8,8 +8,8 @@
 
 #[cfg(kani)]
 mod formal_properties {
+    use crate::{require_admin_or_operator_permission, require_admin_permission};
     use soroban_sdk::{Address, Env};
-    use crate::{require_admin_permission, require_admin_or_operator_permission};
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -83,22 +83,20 @@ mod formal_properties {
         let grant_result = require_admin_permission(
             &env,
             &admin,
-            &admin,   // admin is the caller granting to grantee
+            &admin, // admin is the caller granting to grantee
             "grant_role",
             AccessError::NotAuthorized,
         );
 
         // Grant must succeed for admin
-        assert!(grant_result.is_ok(), "grant operation by admin must succeed");
+        assert!(
+            grant_result.is_ok(),
+            "grant operation by admin must succeed"
+        );
 
         // In the same state, the admin check is still valid (idempotent, no state corruption)
-        let verify_result = require_admin_permission(
-            &env,
-            &admin,
-            &admin,
-            "has_role",
-            AccessError::NotAuthorized,
-        );
+        let verify_result =
+            require_admin_permission(&env, &admin, &admin, "has_role", AccessError::NotAuthorized);
 
         assert!(
             verify_result.is_ok(),
