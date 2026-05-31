@@ -12,3 +12,6 @@ soroban_access_control = { version = "0.1.0", path = "../soroban_access_control"
 
 [dev-dependencies]
 soroban-sdk = { version = "22.0.7", features = ["testutils"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
