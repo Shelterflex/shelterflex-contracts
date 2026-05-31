@@ -2,6 +2,9 @@
 
 use soroban_sdk::{Address, Env, Symbol};
 
+#[cfg(kani)]
+mod formal_properties;
+
 /// Emit a standardized unauthorized-access event and return the provided contract error.
 #[inline]
 pub fn deny<E>(env: &Env, caller: &Address, operation: &str, err: E) -> E {
