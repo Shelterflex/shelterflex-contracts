@@ -851,3 +851,6 @@ fn generate_tx_id(
 
 mod integration_tests;
 mod test;
+mod tests;
+pub mod immutability_properties;
+
