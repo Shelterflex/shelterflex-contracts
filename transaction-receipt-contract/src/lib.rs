@@ -860,8 +860,7 @@ fn generate_tx_id(
     Ok(hash.into())
 }
 
+pub mod immutability_properties;
 mod integration_tests;
 mod test;
 mod tests;
-pub mod immutability_properties;
-

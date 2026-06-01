@@ -1,17 +1,17 @@
 #![cfg(test)]
 
-extern crate std;
 extern crate alloc;
+extern crate std;
 
 use crate::{
     ContractError, Receipt, ReceiptInput, TransactionReceiptContract,
     TransactionReceiptContractClient,
 };
+use alloc::format;
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _},
     Address, BytesN, Env, String, Symbol, TryFromVal,
 };
-use alloc::format;
 
 fn bytes_to_hex_string(env: &Env, bytes: &BytesN<32>) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -105,7 +105,10 @@ fn test_receipt_immutability() {
     // Second issuance with same ID should fail
     let res2 = client.try_record_receipt(&operator, &input);
     assert!(res2.is_err());
-    assert_eq!(res2.unwrap_err().unwrap(), ContractError::DuplicateTransaction);
+    assert_eq!(
+        res2.unwrap_err().unwrap(),
+        ContractError::DuplicateTransaction
+    );
 }
 
 #[test]
@@ -358,6 +361,9 @@ fn test_high_volume_isolation() {
     for (i, tx_id) in tx_ids.iter().enumerate() {
         let receipt = client.get_receipt(tx_id).unwrap();
         assert_eq!(receipt.amount_usdc, 1000 + i as i128);
-        assert_eq!(receipt.deal_id, String::from_str(&env, &format!("deal_{}", i)));
+        assert_eq!(
+            receipt.deal_id,
+            String::from_str(&env, &format!("deal_{}", i))
+        );
     }
 }
