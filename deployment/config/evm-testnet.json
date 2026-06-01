@@ -1,0 +1,12 @@
+{
+  "network": {
+    "name": "base-sepolia",
+    "rpc_url": "https://sepolia.base.org",
+    "chain_id": 84532,
+    "block_explorer": "https://sepolia.basescan.org"
+  },
+  "deployer": {
+    "address": "${EVM_DEPLOYER_ADDRESS}",
+    "_comment": "Set EVM_DEPLOYER_ADDRESS and EVM_DEPLOYER_PRIVATE_KEY as environment variables. Never hardcode secrets."
+  }
+}

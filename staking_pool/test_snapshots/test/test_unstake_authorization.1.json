@@ -209,24 +209,12 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "StakeTimestamps"
+                              "symbol": "StateSchemaVersion"
                             }
                           ]
                         },
                         "val": {
-                          "map": []
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "StakedBalances"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "map": []
+                          "u32": 1
                         }
                       },
                       {

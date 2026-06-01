@@ -1,0 +1,12 @@
+{
+  "_WARNING": "SECRETS MUST NEVER BE HARDCODED IN THIS FILE. Use environment variables exclusively.",
+  "network": {
+    "name": "mainnet",
+    "rpc_url": "https://soroban-rpc.mainnet.stellar.gateway.fm",
+    "network_passphrase": "Public Global Stellar Network ; September 2015"
+  },
+  "deployer": {
+    "address": "${STELLAR_DEPLOYER_ADDRESS}",
+    "_comment": "Set STELLAR_DEPLOYER_ADDRESS and STELLAR_SECRET_KEY via CI/CD secrets or a secure vault. NEVER commit secrets to version control."
+  }
+}

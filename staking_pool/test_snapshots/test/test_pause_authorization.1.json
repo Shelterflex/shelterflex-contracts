@@ -194,24 +194,12 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "StakeTimestamps"
+                              "symbol": "StateSchemaVersion"
                             }
                           ]
                         },
                         "val": {
-                          "map": []
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "StakedBalances"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "map": []
+                          "u32": 1
                         }
                       },
                       {
@@ -493,7 +481,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "staking_pool"
+                "symbol": "Pausable"
               },
               {
                 "symbol": "pause"

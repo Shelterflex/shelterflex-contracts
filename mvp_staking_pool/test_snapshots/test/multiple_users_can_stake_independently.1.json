@@ -141,12 +141,12 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "ClaimableRewards"
+                              "symbol": "ContractVersion"
                             }
                           ]
                         },
                         "val": {
-                          "map": []
+                          "u32": 2
                         }
                       },
                       {
@@ -162,18 +162,6 @@
                             "hi": 0,
                             "lo": 0
                           }
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "StakedBalances"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "map": []
                         }
                       },
                       {
@@ -201,18 +189,6 @@
                             "hi": 0,
                             "lo": 0
                           }
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "UserRewardIndex"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "map": []
                         }
                       }
                     ]

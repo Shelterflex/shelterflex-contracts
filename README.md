@@ -9,8 +9,49 @@ This folder contains Soroban smart contracts written in Rust.
 
 ## Workspace
 
-- `rent_wallet/` - Minimal reference contract for wallet-like credit/debit flows
-- `rent_payments/` - Contract for managing deals and receipts with paginated queries
+The contracts directory is a Cargo workspace. Each subdirectory is a separate contract crate:
+
+| Contract | Purpose |
+|---|---|
+| `rent_wallet/` | Custodial wallet for credit/debit flows (tenant rent balances) |
+| `rent_payments/` | Deal receipts and paginated payment history |
+| `deal_escrow/` | Escrow logic holding funds until deal conditions are met |
+| `staking_pool/` | Staking pool for platform liquidity providers |
+| `mvp_staking_pool/` | Minimal staking pool reference implementation |
+| `staking_rewards/` | Reward distribution for stakers |
+| `timelock/` | Time-locked governance actions |
+| `transaction-receipt-contract/` | On-chain transaction receipts with canonical tx_id |
+| `whistleblower_rewards/` | Reward allocation and claiming for whistleblowers who report fraudulent listings |
+| `upgradeable_proxy/` | Proxy pattern for contract upgrades |
+| `soroban_access_control/` | Shared access-control primitives |
+| `soroban_pausable/` | Shared pausable primitive used across contracts |
+| `contract_access/` | Contract-level access helpers |
+
+## Formal Verification
+
+The `staking_pool` contract includes Kani proof harnesses in
+`staking_pool/src/formal_properties.rs` that verify safety properties such as
+overflow/underflow protection, lock-period enforcement, balance conservation,
+reentrancy guarding, and upgrade timelock compliance.
+
+### Prerequisites
+
+- [Rust nightly](https://rust-lang.github.io/rustup/concepts/channels.html):
+  `rustup install nightly`
+- [Kani Rust Verifier](https://github.com/model-checking/kani):
+  `cargo install --locked kani-verifier && cargo kani setup`
+
+### Run proofs locally
+
+```bash
+cd contracts
+make kani-staking-pool
+# or:
+cargo kani --package staking_pool
+```
+
+Kani verification also runs in CI on push to `main` (when staking_pool changes)
+and on a weekly schedule (see `.github/workflows/kani.yml`).
 
 ## Build & test
 
@@ -186,6 +227,27 @@ The contract implements a role-based access control system with three roles:
 
 #### Use Case
 The operator role is designed for delegation scenarios where a property manager or similar role needs to credit tenant accounts (e.g., for security deposits or rent payments) without having full administrative control over the contract.
+
+### `deal_escrow`
+
+The `deal_escrow` contract securely holds tokens until a deal is finalized. Full-payments are routed with split rewards upon release.
+
+- `init(admin: Address, operator: Address, token: Address, receipt_contract: Address)`
+- `deposit(from: Address, deal_id: String, amount: i128)` (auth via `from`)
+- `release(caller: Address, deal_id: String, to: Address, principal_amount: i128, platform_addr: Address, platform_amount: i128, reporter_addr: Address, reporter_amount: i128, external_ref_source: Symbol, external_ref: String)` (auth via `admin` or `operator`) -> `i128`
+- `balance(deal_id: String) -> i128`
+- `pause()` (admin-auth)
+- `unpause()` (admin-auth)
+- `is_paused() -> bool`
+
+#### Events
+
+- **`deposit`**
+  - **Topic**: `("deal_escrow", "deposit")`
+  - **Data**: `(deal_id: String, from: Address, amount: i128)`
+- **`release`**
+  - **Topic**: `("deal_escrow", "release")`
+  - **Data**: `(deal_id: String, to: Address, principal_amount: i128, platform_addr: Address, platform_amount: i128, reporter_addr: Address, reporter_amount: i128, external_ref_source: Symbol, tx_id: BytesN<32>)`
 
 ### `rent_payments`
 
