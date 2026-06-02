@@ -601,6 +601,9 @@ mod migration_test_helpers;
 mod migration_tests;
 
 #[cfg(test)]
+mod tests;
+
+#[cfg(test)]
 mod test {
     extern crate std;
 
