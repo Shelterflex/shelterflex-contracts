@@ -7,6 +7,9 @@ use soroban_sdk::{
 #[cfg(kani)]
 pub mod formal_properties;
 
+#[cfg(test)]
+mod tests;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
