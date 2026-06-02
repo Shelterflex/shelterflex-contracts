@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke, Events as _};
+use soroban_sdk::testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::{token::StellarAssetClient, Address, Env, IntoVal};
 
 fn setup_contract(env: &Env) -> (Address, StakingPoolClient<'_>, Address, Address, Address) {
@@ -80,7 +80,10 @@ fn unstake_more_than_balance() {
 
     let result = client.try_unstake(&user, &200i128);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().unwrap(), ContractError::InsufficientUnusedStake);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        ContractError::InsufficientUnusedStake
+    );
 }
 
 #[test]
@@ -222,7 +225,7 @@ fn stake_emits_event() {
 
     let events = env.events().all();
     assert!(events.len() > 0);
-    
+
     // Verify at least one event was emitted
     // The event structure in soroban SDK is complex, so we just check events exist
     assert!(events.len() >= 1);
@@ -242,7 +245,7 @@ fn unstake_emits_event() {
 
     let events = env.events().all();
     assert!(events.len() > 0);
-    
+
     // Verify at least one event was emitted
     // The event structure in soroban SDK is complex, so we just check events exist
     assert!(events.len() >= 1);
