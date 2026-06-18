@@ -2340,4 +2340,91 @@ mod test {
         );
         assert_eq!(hash, expected);
     }
+
+    // ============================================================================
+    // Regression Tests for Reward Accounting (Issue #1040)
+    // ============================================================================
+    //
+    // These tests verify that reward distribution, when eventually implemented in
+    // the contract, matches the Kani-proven model in formal_properties.rs.
+    // They serve as regression tests to catch economic bugs (reward inflation,
+    // insolvency, rounding attacks) early.
+    //
+    // Currently the contract does not implement reward distribution, but these
+    // tests document the expected behavior that must be verified when reward logic
+    // is added. Future implementations MUST satisfy these invariants.
+
+    /// Regression test: Reward conservation invariant.
+    /// When reward logic is implemented, verify that:
+    /// claimed + unclaimed <= distributed (no reward inflation).
+    /// This is a forward-looking test; currently skipped since contract has no rewards.
+    #[test]
+    #[ignore] // Ignored until reward distribution is implemented
+    fn regression_reward_conservation_invariant() {
+        // Placeholder: When reward distribution methods are added to the contract,
+        // this test should verify the conservation property with real contract operations.
+        // Expected behavior:
+        // 1. Distribute N tokens as rewards
+        // 2. Multiple users stake at different times
+        // 3. Claims are made
+        // 4. Verify: sum(claims) + sum(pending) <= N
+        //
+        // This ensures the contract never inflates rewards.
+    }
+
+    /// Regression test: Solvency invariant.
+    /// When reward logic is implemented, verify that:
+    /// principal + claimable <= pool_balance always holds.
+    /// This ensures the pool never becomes insolvent.
+    #[test]
+    #[ignore] // Ignored until reward distribution is implemented
+    fn regression_reward_solvency_invariant() {
+        // Placeholder: When reward distribution methods are added to the contract,
+        // this test should verify solvency with real contract operations.
+        // Expected behavior:
+        // 1. Initialize pool with N reward tokens
+        // 2. Distribute rewards to users
+        // 3. Users claim rewards
+        // 4. Verify: total_staked + claimable <= pool_balance (never negative)
+        //
+        // This ensures the pool can always honor withdrawal/claim requests.
+    }
+
+    /// Regression test: No free rewards invariant.
+    /// When reward logic is implemented, verify that:
+    /// A user who stakes AFTER a distribution cannot claim any portion of that distribution.
+    /// This is enforced by per-share index snapshots in the model.
+    #[test]
+    #[ignore] // Ignored until reward distribution is implemented
+    fn regression_no_free_rewards_invariant() {
+        // Placeholder: When reward distribution methods are added to the contract,
+        // this test should verify the no-free-rewards property.
+        // Expected behavior:
+        // 1. User A stakes 100 tokens
+        // 2. Contract distributes 50 reward tokens
+        // 3. User B stakes 100 tokens (after distribution)
+        // 4. Both users claim
+        // 5. Verify: User B claims 0 from the distribution (only User A gets rewards)
+        //
+        // This prevents late-staker attacks that would dilute early staker rewards.
+    }
+
+    /// Regression test: Rounding direction invariant.
+    /// When reward logic is implemented, verify that:
+    /// Residual dust from reward % total_staked accrues to the pool, never to users.
+    /// This is standard behavior (same as Uniswap v2, Curve) and economically safe.
+    #[test]
+    #[ignore] // Ignored until reward distribution is implemented
+    fn regression_rounding_direction_invariant() {
+        // Placeholder: When reward distribution methods are added to the contract,
+        // this test should verify that rounding errors favor the pool.
+        // Expected behavior:
+        // 1. User stakes 100 tokens
+        // 2. Contract distributes 101 tokens as rewards (101 % 100 = 1 remainder)
+        // 3. User claims
+        // 4. Verify: User claims exactly 101 / 100 = 1 token (via integer division)
+        // 5. Verify: 1 token of dust remains in pool, not claimed
+        //
+        // This ensures pool balance never drops below total_staked + total_claimable.
+    }
 }
