@@ -285,7 +285,9 @@ impl PoolModel {
         }
 
         let scale = 1_000_000_000_000_000_000i128; // 1e18
-        let index_diff = self.per_share_index.saturating_sub(self.user_index_snapshot[user_idx]);
+        let index_diff = self
+            .per_share_index
+            .saturating_sub(self.user_index_snapshot[user_idx]);
 
         // Compute newly accrued rewards from balance change since last snapshot
         let accrued = (index_diff / scale).saturating_mul(self.balances[user_idx]);
