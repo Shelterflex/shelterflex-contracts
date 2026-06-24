@@ -151,7 +151,7 @@ impl OraclePriceFeeds {
         {
             let max_deviation_bps = get_max_deviation_bps(&env);
             let old_price = prev_feed.price;
-            
+
             // Calculate deviation in basis points: |new - old| * 10000 / old
             // Use absolute difference and avoid overflow by checking for zero
             if old_price != 0 {
@@ -161,7 +161,7 @@ impl OraclePriceFeeds {
                     old_price - price
                 };
                 let deviation_bps = (diff * 10000) / old_price.abs();
-                
+
                 if deviation_bps > max_deviation_bps as i128 {
                     return Err(ContractError::PriceDeviationTooLarge);
                 }
