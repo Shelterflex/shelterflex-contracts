@@ -275,7 +275,11 @@ impl SlashingModule {
     }
 
     fn next_slash_id(env: &Env) -> u64 {
-        let id: u64 = env.storage().instance().get(&DataKey::NextSlashId).unwrap_or(0);
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextSlashId)
+            .unwrap_or(0);
         let next = id + 1;
         env.storage().instance().set(&DataKey::NextSlashId, &next);
         next
@@ -374,9 +378,10 @@ impl SlashingModule {
             penalty_bps,
             slashed_amount: slash_amount,
         };
-        env.storage()
-            .persistent()
-            .set(&DataKey::SlashRecord(evidence_hash.clone()), &evidence_record);
+        env.storage().persistent().set(
+            &DataKey::SlashRecord(evidence_hash.clone()),
+            &evidence_record,
+        );
 
         // Emit proposed event
         env.events().publish(
@@ -898,7 +903,8 @@ mod tests {
         assert!(!client.is_jailed(&actor));
 
         // Advance past challenge window (default 604_800 seconds)
-        env.ledger().set_timestamp(env.ledger().timestamp() + 604_801);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
 
         // Finalize
         client.finalize_slash(&submitter, &slash_id);
@@ -926,7 +932,8 @@ mod tests {
         );
 
         // Advance time
-        env.ledger().set_timestamp(env.ledger().timestamp() + 604_801);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
         client.finalize_slash(&submitter, &slash_id);
 
         // 1 % of 100_000 = 1_000
@@ -974,7 +981,8 @@ mod tests {
             &Offence::DoubleSign,
         );
 
-        env.ledger().set_timestamp(env.ledger().timestamp() + 604_801);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
         client.finalize_slash(&submitter, &slash_id);
 
         assert!(client.staked_balance(&actor) >= 0);
@@ -997,7 +1005,8 @@ mod tests {
             &Offence::Downtime,
         );
 
-        env.ledger().set_timestamp(env.ledger().timestamp() + 604_801);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
         client.finalize_slash(&submitter, &slash_id);
         assert!(client.is_jailed(&actor));
 
@@ -1027,7 +1036,8 @@ mod tests {
             &Offence::Downtime,
         );
 
-        env.ledger().set_timestamp(env.ledger().timestamp() + 604_801);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
         client.finalize_slash(&submitter, &slash_id);
         assert!(client.is_jailed(&actor));
 
@@ -1060,7 +1070,8 @@ mod tests {
             &Offence::Downtime,
         );
 
-        env.ledger().set_timestamp(env.ledger().timestamp() + 604_801);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
         client.finalize_slash(&submitter, &slash_id);
 
         client.approve_unjail(&admin, &actor);
@@ -1125,12 +1136,7 @@ mod tests {
         seed_balance(&client, &admin, &actor, 10_000);
 
         let ev = evidence(&env, "ev_t2");
-        let slash_id = client.submit_evidence(
-            &submitter,
-            &ev,
-            &actor,
-            &Offence::DoubleSign,
-        );
+        let slash_id = client.submit_evidence(&submitter, &ev, &actor, &Offence::DoubleSign);
 
         // Cancel during challenge window
         client.cancel_slash(&admin, &slash_id);
@@ -1164,7 +1170,8 @@ mod tests {
         );
 
         // Stranger cannot finalize
-        env.ledger().set_timestamp(env.ledger().timestamp() + 604_801);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
         let res_fin = client.try_finalize_slash(&stranger, &slash_id);
         assert_eq!(res_fin.unwrap_err().unwrap(), ContractError::NotAuthorized);
 
@@ -1199,12 +1206,17 @@ mod tests {
         );
 
         // Should fail after 20 hours
-        env.ledger().set_timestamp(env.ledger().timestamp() + 72_000);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 72_000);
         let res1 = client.try_finalize_slash(&submitter, &slash_id);
-        assert_eq!(res1.unwrap_err().unwrap(), ContractError::ChallengeWindowNotElapsed);
+        assert_eq!(
+            res1.unwrap_err().unwrap(),
+            ContractError::ChallengeWindowNotElapsed
+        );
 
         // Should succeed after 25 hours
-        env.ledger().set_timestamp(env.ledger().timestamp() + 20_000); // 72_000 + 20_000 = 92_000 (which is > 86_400)
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 20_000); // 72_000 + 20_000 = 92_000 (which is > 86_400)
         client.finalize_slash(&submitter, &slash_id);
         assert_eq!(client.staked_balance(&actor), 9_000);
     }

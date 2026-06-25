@@ -388,8 +388,7 @@ impl InspectorBondContract {
         };
 
         let slash_id = Self::next_slash_id(&env);
-        let deadline = env.ledger().timestamp()
-            + Self::inspector_challenge_window(env.clone());
+        let deadline = env.ledger().timestamp() + Self::inspector_challenge_window(env.clone());
 
         let pending = PendingInspectorSlash {
             id: slash_id,
@@ -512,10 +511,7 @@ impl InspectorBondContract {
     }
 
     /// Query a pending slash proposal by ID.
-    pub fn get_pending_inspector_slash(
-        env: Env,
-        slash_id: u64,
-    ) -> Option<PendingInspectorSlash> {
+    pub fn get_pending_inspector_slash(env: Env, slash_id: u64) -> Option<PendingInspectorSlash> {
         env.storage()
             .persistent()
             .get(&DataKey::PendingInspectorSlash(slash_id))
@@ -699,8 +695,7 @@ mod tests {
 
         let report_id = BytesN::from_array(&env, &[10u8; 32]);
         let reason = soroban_sdk::String::from_str(&env, "misconduct");
-        let slash_id =
-            client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
 
         // Bond must NOT be reduced yet
         let bond = client.get_bond(&inspector).unwrap();
@@ -736,8 +731,7 @@ mod tests {
 
         let report_id = BytesN::from_array(&env, &[11u8; 32]);
         let reason = soroban_sdk::String::from_str(&env, "disputed");
-        let slash_id =
-            client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
 
         // Cancel during the challenge window
         client.cancel_inspector_slash(&admin, &slash_id);
@@ -770,8 +764,7 @@ mod tests {
 
         let report_id = BytesN::from_array(&env, &[12u8; 32]);
         let reason = soroban_sdk::String::from_str(&env, "too soon");
-        let slash_id =
-            client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
 
         // Finalize immediately (before deadline) must be rejected
         let result = client.try_finalize_inspector_slash(&admin, &slash_id);
@@ -794,17 +787,11 @@ mod tests {
         let reason = soroban_sdk::String::from_str(&env, "fraud");
 
         // Non-admin cannot propose
-        let result = client.try_propose_inspector_slash(
-            &attacker,
-            &inspector,
-            &report_id,
-            &reason,
-        );
+        let result = client.try_propose_inspector_slash(&attacker, &inspector, &report_id, &reason);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
 
         // Admin proposes, then attacker tries to finalize/cancel
-        let slash_id =
-            client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
 
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);
@@ -832,8 +819,7 @@ mod tests {
         client.stake_bond(&inspector, &10_000);
         let report_id = BytesN::from_array(&env, &[14u8; 32]);
         let reason = soroban_sdk::String::from_str(&env, "short window");
-        let slash_id =
-            client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
 
         // 20 hours not enough
         env.ledger()
