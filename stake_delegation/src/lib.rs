@@ -58,9 +58,9 @@ pub enum ContractError {
     /// Undelegation cooldown period has not elapsed
     CooldownNotElapsed = 9,
     /// No pending undelegation exists
-    NoPendingUndelegation = 9,
+    NoPendingUndelegation = 10,
     /// Slash amount exceeds available staked balance
-    SlashExceedsBalance = 10,
+    SlashExceedsBalance = 11,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────

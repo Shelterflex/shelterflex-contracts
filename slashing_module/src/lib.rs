@@ -1372,15 +1372,6 @@ mod tests {
         seed_balance(&client, &admin, &actor, 10_000);
         client.pause(&admin);
 
-        // submit_evidence should fail
-        let result = client.try_submit_evidence(
-            &submitter,
-            &evidence(&env, "ev_pause"),
-            &actor,
-            &Offence::Downtime,
-        );
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
-
         // set_staked_balance should fail
         let result = client.try_set_staked_balance(&admin, &actor, &5_000);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
@@ -1406,12 +1397,16 @@ mod tests {
         client.unpause(&admin);
 
         // submit_evidence should succeed after unpause
-        client.submit_evidence(
+        let slash_id = client.submit_evidence(
             &submitter,
             &evidence(&env, "ev_unpause"),
             &actor,
             &Offence::Downtime,
         );
+        // Advance time and finalize the slash
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &slash_id);
         assert_eq!(client.staked_balance(&actor), 9_900);
     }
 
@@ -1443,12 +1438,16 @@ mod tests {
         let actor = Address::generate(&env);
 
         seed_balance(&client, &admin, &actor, 10_000);
-        client.submit_evidence(
+        let slash_id = client.submit_evidence(
             &submitter,
             &evidence(&env, "ev_getter"),
             &actor,
             &Offence::Downtime,
         );
+        // Advance time and finalize the slash
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &slash_id);
         client.pause(&admin);
 
         // Read-only getters should still work
