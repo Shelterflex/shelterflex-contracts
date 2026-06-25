@@ -750,10 +750,7 @@ impl StakeDelegation {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events().publish(
-            (
-                Symbol::new(&env, "delegation"),
-                Symbol::new(&env, "paused"),
-            ),
+            (Symbol::new(&env, "delegation"), Symbol::new(&env, "paused")),
             admin,
         );
         Ok(())
