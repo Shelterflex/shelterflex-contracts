@@ -36,7 +36,10 @@ stellar contract invoke \
   --rpc-url "$ACTIVE_RPC" \
   --network-passphrase "$ACTIVE_PASSPHRASE" \
   -- init \
-  --admin "$ADMIN_ADDRESS"
+  --admin "$ADMIN_ADDRESS" \
+  --operator "$ADMIN_ADDRESS" \
+  --staleness_threshold 600 \
+  --max_deviation_bps 500
 
 echo "oracle_price_feeds deployed: $CONTRACT_ID"
 export ORACLE_PRICE_FEEDS_ID="$CONTRACT_ID"
