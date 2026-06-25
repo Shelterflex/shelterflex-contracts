@@ -8,6 +8,7 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
+    Paused,
     /// Epoch duration (used to enforce revocation windows)
     EpochDuration,
     /// Current epoch number (sourced externally / via init)
@@ -44,21 +45,23 @@ const SCALE: i128 = 1_000_000_000;
 pub enum ContractError {
     AlreadyInitialized = 1,
     NotAuthorized = 2,
-    InvalidAmount = 3,
+    Paused = 3,
+    InvalidAmount = 4,
     /// Delegation to self is treated uniformly (allowed, same as direct stake)
-    DelegationNotFound = 4,
+    DelegationNotFound = 5,
     /// Partial delegation amounts exceed stake
-    InsufficientStake = 5,
+    InsufficientStake = 6,
     /// Revocation requested in same epoch – must wait for epoch boundary
-    RevocationTooEarly = 6,
+    RevocationTooEarly = 7,
     /// Delegatee is the same as delegator (self-delegation allowed, not errored)
-    AlreadyDelegated = 7,
+    AlreadyDelegated = 8,
     /// Undelegation cooldown period has not elapsed
-    CooldownNotElapsed = 8,
+    CooldownNotElapsed = 9,
     /// No pending undelegation exists
     NoPendingUndelegation = 9,
     /// Slash amount exceeds available staked balance
     SlashExceedsBalance = 10,
+    NoPendingUndelegation = 10,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -133,8 +136,21 @@ impl StakeDelegation {
         Ok(())
     }
 
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(ContractError::Paused);
+        }
+        Ok(())
+    }
+
     /// Admin bumps the epoch counter (or it can be driven by an epoch_rewards contract).
     pub fn advance_epoch(env: Env, admin: Address) -> Result<u64, ContractError> {
+        Self::require_not_paused(&env)?;
         Self::require_admin(&env, &admin)?;
         let current: u64 = env
             .storage()
@@ -166,6 +182,7 @@ impl StakeDelegation {
         admin: Address,
         cooldown_secs: u64,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         Self::require_admin(&env, &admin)?;
         env.storage()
             .instance()
@@ -190,6 +207,7 @@ impl StakeDelegation {
     // ── Staking ───────────────────────────────────────────────────────────────
 
     pub fn stake(env: Env, from: Address, amount: i128) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         from.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -224,6 +242,7 @@ impl StakeDelegation {
     }
 
     pub fn unstake(env: Env, from: Address, amount: i128) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         from.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -277,6 +296,7 @@ impl StakeDelegation {
         delegatee: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         delegator.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -368,6 +388,7 @@ impl StakeDelegation {
         delegator: Address,
         delegatee: Address,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         delegator.require_auth();
 
         // Verify delegation exists
@@ -412,6 +433,7 @@ impl StakeDelegation {
         delegator: Address,
         delegatee: Address,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         delegator.require_auth();
 
         let current_epoch = Self::current_epoch(&env);
@@ -497,6 +519,7 @@ impl StakeDelegation {
         delegatee: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         delegator.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -556,6 +579,7 @@ impl StakeDelegation {
         delegator: Address,
         delegatee: Address,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         delegator.require_auth();
 
         let current_time = env.ledger().timestamp();
@@ -638,6 +662,7 @@ impl StakeDelegation {
     // ── Reward distribution ───────────────────────────────────────────────────
 
     pub fn fund_rewards(env: Env, admin: Address, amount: i128) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         Self::require_admin(&env, &admin)?;
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -661,6 +686,7 @@ impl StakeDelegation {
 
     /// Claim rewards as a delegatee (rewards are credited to delegatee, not delegator).
     pub fn claim_delegatee_rewards(env: Env, delegatee: Address) -> Result<i128, ContractError> {
+        Self::require_not_paused(&env)?;
         delegatee.require_auth();
 
         let reward_index = Self::get_reward_index(&env);
@@ -720,6 +746,39 @@ impl StakeDelegation {
 
     pub fn current_epoch_num(env: Env) -> u64 {
         Self::current_epoch(&env)
+    }
+
+    /// Pause the contract. Admin-only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish(
+            (Symbol::new(&env, "delegation"), Symbol::new(&env, "paused")),
+            admin,
+        );
+        Ok(())
+    }
+
+    /// Unpause the contract. Admin-only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (
+                Symbol::new(&env, "delegation"),
+                Symbol::new(&env, "unpaused"),
+            ),
+            admin,
+        );
+        Ok(())
+    }
+
+    /// True iff the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
@@ -1327,5 +1386,97 @@ mod tests {
         let stake = client.get_delegatee_claimable(&delegatee);
         // Stake is preserved during cooldown (can be slashed)
         assert!(stake >= 0);
+    }
+
+    // ── Pausable tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn pause_blocks_mutating_calls() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        client.stake(&delegator, &1_000);
+        client.pause(&admin);
+
+        // stake should fail
+        let result = client.try_stake(&delegator, &500);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
+
+        // unstake should fail
+        let result = client.try_unstake(&delegator, &500);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
+
+        // delegate should fail
+        let result = client.try_delegate(&delegator, &delegatee, &500);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
+
+        // request_revocation should fail
+        let result = client.try_request_revocation(&delegator, &delegatee);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
+
+        // fund_rewards should fail
+        let result = client.try_fund_rewards(&admin, &1_000);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
+
+        // claim_delegatee_rewards should fail
+        let result = client.try_claim_delegatee_rewards(&delegatee);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
+    }
+
+    #[test]
+    fn unpause_allows_mutating_calls() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let delegator = Address::generate(&env);
+        let _delegatee = Address::generate(&env);
+
+        client.stake(&delegator, &1_000);
+        client.pause(&admin);
+        client.unpause(&admin);
+
+        // stake should succeed after unpause
+        client.stake(&delegator, &500);
+        assert_eq!(client.staked_balance(&delegator), 1_500);
+    }
+
+    #[test]
+    fn pause_requires_admin() {
+        let env = Env::default();
+        let (_admin, client) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        let result = client.try_pause(&attacker);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+    }
+
+    #[test]
+    fn unpause_requires_admin() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        client.pause(&admin);
+        let result = client.try_unpause(&attacker);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+    }
+
+    #[test]
+    fn getters_work_while_paused() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        client.stake(&delegator, &1_000);
+        client.delegate(&delegator, &delegatee, &500);
+        client.pause(&admin);
+
+        // Read-only getters should still work
+        assert_eq!(client.staked_balance(&delegator), 1_000);
+        assert_eq!(client.get_delegations(&delegator).len(), 1);
+        assert_eq!(client.current_epoch_num(), 1);
+        assert!(client.is_paused());
     }
 }

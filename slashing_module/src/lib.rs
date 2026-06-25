@@ -10,6 +10,7 @@ use soroban_sdk::{
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
+    Paused,
     /// Authorized evidence submitters
     Submitter(Address),
     /// Slash record keyed by evidence hash (duplicate detection)
@@ -96,18 +97,20 @@ pub enum ContractError {
     AlreadyInitialized = 1,
     /// Caller is not authorized
     NotAuthorized = 2,
+    /// Contract is paused
+    Paused = 3,
     /// Evidence was already processed (duplicate)
-    DuplicateEvidence = 3,
+    DuplicateEvidence = 4,
     /// Slashed actor has no staked balance
-    ZeroBalance = 4,
+    ZeroBalance = 5,
     /// Actor is already jailed
-    AlreadyJailed = 5,
+    AlreadyJailed = 6,
     /// Actor is not jailed (unjail attempted on unjailed actor)
-    NotJailed = 6,
+    NotJailed = 7,
     /// No governance approval for unjail
-    UnjailNotApproved = 7,
+    UnjailNotApproved = 8,
     /// Unknown offence type
-    UnknownOffence = 8,
+    UnknownOffence = 9,
     /// Amount overflow or underflow
     ArithmeticError = 9,
     /// Slash ID not found
@@ -118,6 +121,7 @@ pub enum ContractError {
     SlashAlreadyResolved = 12,
     /// Invalid slash amount (e.g. <= 0)
     InvalidAmount = 13,
+    ArithmeticError = 10,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -186,6 +190,18 @@ impl SlashingModule {
         Ok(())
     }
 
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(ContractError::Paused);
+        }
+        Ok(())
+    }
+
     /// Register an authorized evidence submitter.
     pub fn set_submitter(
         env: Env,
@@ -193,6 +209,7 @@ impl SlashingModule {
         submitter: Address,
         enabled: bool,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         Self::require_admin(&env, &admin)?;
         env.storage()
             .instance()
@@ -230,6 +247,7 @@ impl SlashingModule {
         actor: Address,
         balance: i128,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         Self::require_admin(&env, &admin)?;
         env.storage()
             .persistent()
@@ -299,6 +317,8 @@ impl SlashingModule {
         actor: Address,
         offence: Offence,
     ) -> Result<u64, ContractError> {
+    ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         Self::require_submitter(&env, &submitter)?;
 
         // Duplicate evidence check
@@ -688,6 +708,7 @@ impl SlashingModule {
 
     /// Admin pre-approves unjail for an actor (governance step).
     pub fn approve_unjail(env: Env, admin: Address, actor: Address) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         Self::require_admin(&env, &admin)?;
         let jailed: bool = env
             .storage()
@@ -712,6 +733,7 @@ impl SlashingModule {
 
     /// Actor claims their governance-approved unjail.
     pub fn unjail(env: Env, actor: Address) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         actor.require_auth();
 
         let jailed: bool = env
@@ -765,6 +787,7 @@ impl SlashingModule {
         admin: Address,
         bond_contract: Address,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         Self::require_admin(&env, &admin)?;
         env.storage()
             .instance()
@@ -795,6 +818,7 @@ impl SlashingModule {
         inspection_id: String,
         reason: String,
     ) -> Result<i128, ContractError> {
+        Self::require_not_paused(&env)?;
         let registered: Address = env
             .storage()
             .instance()
@@ -843,6 +867,36 @@ impl SlashingModule {
             .persistent()
             .get(&DataKey::InspectorSlashHistory(inspector))
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Pause the contract. Admin-only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish(
+            (Symbol::new(&env, "slashing"), Symbol::new(&env, "paused")),
+            admin,
+        );
+        Ok(())
+    }
+
+    /// Unpause the contract. Admin-only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (Symbol::new(&env, "slashing"), Symbol::new(&env, "unpaused")),
+            admin,
+        );
+        Ok(())
+    }
+
+    /// True iff the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
     }
 }
 
@@ -1308,5 +1362,103 @@ mod tests {
         assert_eq!(entry.amount, 500);
         assert_eq!(entry.inspection_id, inspection);
         assert_eq!(entry.reason, reason);
+    }
+
+    // ── Pausable tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn pause_blocks_mutating_calls() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 10_000);
+        client.pause(&admin);
+
+        // submit_evidence should fail
+        let result = client.try_submit_evidence(
+            &submitter,
+            &evidence(&env, "ev_pause"),
+            &actor,
+            &Offence::Downtime,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
+
+        // set_staked_balance should fail
+        let result = client.try_set_staked_balance(&admin, &actor, &5_000);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
+
+        // approve_unjail should fail
+        let result = client.try_approve_unjail(&admin, &actor);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
+
+        // set_bond_contract should fail
+        let bond_contract = Address::generate(&env);
+        let result = client.try_set_bond_contract(&admin, &bond_contract);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
+    }
+
+    #[test]
+    fn unpause_allows_mutating_calls() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 10_000);
+        client.pause(&admin);
+        client.unpause(&admin);
+
+        // submit_evidence should succeed after unpause
+        client.submit_evidence(
+            &submitter,
+            &evidence(&env, "ev_unpause"),
+            &actor,
+            &Offence::Downtime,
+        );
+        assert_eq!(client.staked_balance(&actor), 9_900);
+    }
+
+    #[test]
+    fn pause_requires_admin() {
+        let env = Env::default();
+        let (_admin, _submitter, client) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        let result = client.try_pause(&attacker);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+    }
+
+    #[test]
+    fn unpause_requires_admin() {
+        let env = Env::default();
+        let (admin, _submitter, client) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        client.pause(&admin);
+        let result = client.try_unpause(&attacker);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+    }
+
+    #[test]
+    fn getters_work_while_paused() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 10_000);
+        client.submit_evidence(
+            &submitter,
+            &evidence(&env, "ev_getter"),
+            &actor,
+            &Offence::Downtime,
+        );
+        client.pause(&admin);
+
+        // Read-only getters should still work
+        assert_eq!(client.staked_balance(&actor), 9_900);
+        assert_eq!(client.total_slashed(&actor), 100);
+        assert_eq!(client.slash_count(&actor), 1);
+        assert!(client.is_jailed(&actor));
+        assert!(client.is_paused());
     }
 }
