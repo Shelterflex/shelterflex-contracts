@@ -112,19 +112,15 @@ pub enum ContractError {
     /// Unknown offence type
     UnknownOffence = 9,
     /// Amount overflow or underflow
-<<<<<<< HEAD
-    ArithmeticError = 9,
-    /// Slash ID not found
-    SlashNotFound = 10,
-    /// Try to finalize before the challenge window has elapsed
-    ChallengeWindowNotElapsed = 11,
-    /// Try to resolve or finalize an already resolved/finalized slash
-    SlashAlreadyResolved = 12,
-    /// Invalid slash amount (e.g. <= 0)
-    InvalidAmount = 13,
-=======
     ArithmeticError = 10,
->>>>>>> 7789f8bedb9279b3aef4b86909e26242f2756c17
+    /// Slash ID not found
+    SlashNotFound = 11,
+    /// Try to finalize before the challenge window has elapsed
+    ChallengeWindowNotElapsed = 12,
+    /// Try to resolve or finalize an already resolved/finalized slash
+    SlashAlreadyResolved = 13,
+    /// Invalid slash amount (e.g. <= 0)
+    InvalidAmount = 14,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -319,12 +315,7 @@ impl SlashingModule {
         evidence_hash: Bytes,
         actor: Address,
         offence: Offence,
-<<<<<<< HEAD
     ) -> Result<u64, ContractError> {
-=======
-    ) -> Result<(), ContractError> {
-        Self::require_not_paused(&env)?;
->>>>>>> 7789f8bedb9279b3aef4b86909e26242f2756c17
         Self::require_submitter(&env, &submitter)?;
 
         // Duplicate evidence check
