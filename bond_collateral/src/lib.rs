@@ -829,10 +829,7 @@ impl BondCollateral {
         require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events().publish(
-            (
-                Symbol::new(&env, "bond"),
-                Symbol::new(&env, "paused"),
-            ),
+            (Symbol::new(&env, "bond"), Symbol::new(&env, "paused")),
             admin,
         );
         Ok(())
@@ -843,10 +840,7 @@ impl BondCollateral {
         require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events().publish(
-            (
-                Symbol::new(&env, "bond"),
-                Symbol::new(&env, "unpaused"),
-            ),
+            (Symbol::new(&env, "bond"), Symbol::new(&env, "unpaused")),
             admin,
         );
         Ok(())
@@ -1215,11 +1209,15 @@ mod inspector_bond_tests {
         assert_eq!(result, Err(Ok(ContractError::Paused)));
 
         // lock_bond should fail
-        let result = s.bond.try_lock_bond(&s.operator, &s.inspector, &inspection(&s.env, "INSP-1"));
+        let result = s
+            .bond
+            .try_lock_bond(&s.operator, &s.inspector, &inspection(&s.env, "INSP-1"));
         assert_eq!(result, Err(Ok(ContractError::Paused)));
 
         // unlock_bond should fail
-        let result = s.bond.try_unlock_bond(&s.operator, &s.inspector, &inspection(&s.env, "INSP-1"));
+        let result =
+            s.bond
+                .try_unlock_bond(&s.operator, &s.inspector, &inspection(&s.env, "INSP-1"));
         assert_eq!(result, Err(Ok(ContractError::Paused)));
 
         // execute_slash should fail
