@@ -12,6 +12,7 @@ mod formal_properties;
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
+    Paused,
     Token,
     BondCollateral(BytesN<32>),
     TotalCollateral,
@@ -46,25 +47,26 @@ pub struct CollateralPosition {
 pub enum ContractError {
     AlreadyInitialized = 1,
     NotAuthorized = 2,
-    InvalidAmount = 3,
-    InsufficientCollateral = 4,
-    PositionNotFound = 5,
-    CannotLiquidate = 6,
-    BelowThreshold = 7,
-    InvalidThreshold = 8,
-    InvalidRewardCap = 9,
-    CollateralRatioTooLow = 10,
-    NoSurplus = 11,
+    Paused = 3,
+    InvalidAmount = 4,
+    InsufficientCollateral = 5,
+    PositionNotFound = 6,
+    CannotLiquidate = 7,
+    BelowThreshold = 8,
+    InvalidThreshold = 9,
+    InvalidRewardCap = 10,
+    CollateralRatioTooLow = 11,
+    NoSurplus = 12,
     /// Issue #925: bond is locked for a pending inspection dispute.
-    BondLocked = 12,
+    BondLocked = 13,
     /// Issue #925: inspector has no bond / bond is not large enough for the slash.
-    InsufficientBond = 13,
+    InsufficientBond = 14,
     /// Issue #925: lock attempted for an inspection_id that already has a lock.
-    LockAlreadyExists = 14,
+    LockAlreadyExists = 15,
     /// Issue #925: unlock attempted for an inspection_id that is not locked.
-    LockNotFound = 15,
+    LockNotFound = 16,
     /// Issue #925: slashing_module address has not been configured.
-    SlashingModuleNotSet = 16,
+    SlashingModuleNotSet = 17,
 }
 
 impl From<access_control::AccessControlError> for ContractError {
@@ -199,6 +201,7 @@ impl BondCollateral {
     }
 
     pub fn set_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(&env, &current_admin, &admin, "set_admin")?;
 
@@ -220,6 +223,7 @@ impl BondCollateral {
         warning: u32,
         liquidation: u32,
     ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(&env, &current_admin, &admin, "set_thresholds")?;
 
@@ -250,6 +254,7 @@ impl BondCollateral {
         admin: Address,
         cap_bps: u32,
     ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(
             &env,
@@ -283,6 +288,7 @@ impl BondCollateral {
         position_id: BytesN<32>,
         amount: i128,
     ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         owner.require_auth();
 
         if amount <= 0 {
@@ -349,6 +355,7 @@ impl BondCollateral {
         position_id: BytesN<32>,
         bond_amount: i128,
     ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         owner.require_auth();
 
         if bond_amount <= 0 {
@@ -411,6 +418,7 @@ impl BondCollateral {
         position_id: BytesN<32>,
         bond_amount: i128,
     ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         owner.require_auth();
 
         if bond_amount <= 0 {
@@ -449,6 +457,7 @@ impl BondCollateral {
         position_id: BytesN<32>,
         amount: i128,
     ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         owner.require_auth();
 
         if amount <= 0 {
@@ -500,6 +509,7 @@ impl BondCollateral {
         keeper: Address,
         position_id: BytesN<32>,
     ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         keeper.require_auth();
 
         let position = get_position(&env, &position_id).ok_or(ContractError::PositionNotFound)?;
@@ -602,6 +612,7 @@ impl BondCollateral {
         admin: Address,
         slashing_module: Address,
     ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         require_admin(&env, &admin)?;
         env.storage()
             .instance()
@@ -615,6 +626,7 @@ impl BondCollateral {
 
     /// Configure the operator address allowed to lock/unlock inspector bonds.
     pub fn set_operator(env: Env, admin: Address, operator: Address) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Operator, &operator);
         env.events().publish(
@@ -626,6 +638,7 @@ impl BondCollateral {
 
     /// Inspector deposits collateral as a bond. The inspector must auth.
     pub fn deposit_bond(env: Env, inspector: Address, amount: i128) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         inspector.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -649,6 +662,7 @@ impl BondCollateral {
     /// Inspector withdraws part or all of their bond. Blocked when any
     /// inspection_id lock is active on the inspector.
     pub fn withdraw_bond(env: Env, inspector: Address, amount: i128) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         inspector.require_auth();
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -688,6 +702,7 @@ impl BondCollateral {
         inspector: Address,
         inspection_id: String,
     ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         require_operator(&env, &operator)?;
         let mut locks = get_inspector_locks(&env, &inspector);
         for existing in locks.iter() {
@@ -718,6 +733,7 @@ impl BondCollateral {
         inspector: Address,
         inspection_id: String,
     ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         require_operator(&env, &operator)?;
         let locks = get_inspector_locks(&env, &inspector);
         let mut pruned: Vec<String> = Vec::new(&env);
@@ -761,6 +777,7 @@ impl BondCollateral {
         inspection_id: String,
         reason: String,
     ) -> Result<(), ContractError> {
+        require_not_paused(&env)?;
         require_admin(&env, &admin)?;
         if slash_amount <= 0 {
             return Err(ContractError::InvalidAmount);
@@ -806,6 +823,36 @@ impl BondCollateral {
         );
         Ok(())
     }
+
+    /// Pause the contract. Admin-only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish(
+            (Symbol::new(&env, "bond"), Symbol::new(&env, "paused")),
+            admin,
+        );
+        Ok(())
+    }
+
+    /// Unpause the contract. Admin-only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish(
+            (Symbol::new(&env, "bond"), Symbol::new(&env, "unpaused")),
+            admin,
+        );
+        Ok(())
+    }
+
+    /// True iff the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+    }
 }
 
 // ── Inspector bond helpers ───────────────────────────────────────────────────
@@ -829,6 +876,18 @@ fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
     let admin = get_admin(env);
     if caller != &admin {
         return Err(ContractError::NotAuthorized);
+    }
+    Ok(())
+}
+
+fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    if env
+        .storage()
+        .instance()
+        .get::<_, bool>(&DataKey::Paused)
+        .unwrap_or(false)
+    {
+        return Err(ContractError::Paused);
     }
     Ok(())
 }
@@ -1131,5 +1190,86 @@ mod inspector_bond_tests {
             inspection(&s.env, "B")
         );
         assert_eq!(s.bond.get_bond(&s.inspector), 10_000 - 100 - 250);
+    }
+
+    // ── Pausable tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn pause_blocks_mutating_calls() {
+        let s = setup();
+        s.bond.deposit_bond(&s.inspector, &1_000);
+        s.bond.pause(&s.admin);
+
+        // deposit_bond should fail
+        let result = s.bond.try_deposit_bond(&s.inspector, &500);
+        assert_eq!(result, Err(Ok(ContractError::Paused)));
+
+        // withdraw_bond should fail
+        let result = s.bond.try_withdraw_bond(&s.inspector, &100);
+        assert_eq!(result, Err(Ok(ContractError::Paused)));
+
+        // lock_bond should fail
+        let result = s
+            .bond
+            .try_lock_bond(&s.operator, &s.inspector, &inspection(&s.env, "INSP-1"));
+        assert_eq!(result, Err(Ok(ContractError::Paused)));
+
+        // unlock_bond should fail
+        let result =
+            s.bond
+                .try_unlock_bond(&s.operator, &s.inspector, &inspection(&s.env, "INSP-1"));
+        assert_eq!(result, Err(Ok(ContractError::Paused)));
+
+        // execute_slash should fail
+        let result = s.bond.try_execute_slash(
+            &s.admin,
+            &s.inspector,
+            &100,
+            &inspection(&s.env, "INSP-2"),
+            &String::from_str(&s.env, "r"),
+        );
+        assert_eq!(result, Err(Ok(ContractError::Paused)));
+    }
+
+    #[test]
+    fn unpause_allows_mutating_calls() {
+        let s = setup();
+        s.bond.deposit_bond(&s.inspector, &1_000);
+        s.bond.pause(&s.admin);
+        s.bond.unpause(&s.admin);
+
+        // deposit_bond should succeed after unpause
+        s.bond.deposit_bond(&s.inspector, &500);
+        assert_eq!(s.bond.get_bond(&s.inspector), 1_500);
+    }
+
+    #[test]
+    fn pause_requires_admin() {
+        let s = setup();
+        let attacker = Address::generate(&s.env);
+
+        let result = s.bond.try_pause(&attacker);
+        assert_eq!(result, Err(Ok(ContractError::NotAuthorized)));
+    }
+
+    #[test]
+    fn unpause_requires_admin() {
+        let s = setup();
+        let attacker = Address::generate(&s.env);
+
+        s.bond.pause(&s.admin);
+        let result = s.bond.try_unpause(&attacker);
+        assert_eq!(result, Err(Ok(ContractError::NotAuthorized)));
+    }
+
+    #[test]
+    fn getters_work_while_paused() {
+        let s = setup();
+        s.bond.deposit_bond(&s.inspector, &1_000);
+        s.bond.pause(&s.admin);
+
+        // Read-only getters should still work
+        assert_eq!(s.bond.get_bond(&s.inspector), 1_000);
+        assert!(s.bond.is_paused());
     }
 }
