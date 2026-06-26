@@ -386,3 +386,67 @@ fn pure_calculate_claimable_amount_subtracts_already_claimed_and_honours_cliff()
     schedule.claimed_amount = 1_000;
     assert_eq!(calculate_claimable_amount(&schedule, 2_500), 0);
 }
+
+// ── Reentrancy guard tests ─────────────────────────────────────────────────────
+
+#[test]
+fn claim_succeeds_and_releases_guard() {
+    let ctx = setup();
+    create_default(&ctx, true);
+    set_time(&ctx.env, END);
+
+    // Normal claim should succeed
+    let claimed = ctx.contract.claim(&ctx.beneficiary);
+    assert_eq!(claimed, TOTAL);
+
+    // Verify guard is released by calling again (should return NothingToClaim, not ReentrancyDetected)
+    let second = ctx.contract.try_claim(&ctx.beneficiary);
+    assert_eq!(second, Err(Ok(ContractError::NothingToClaim)));
+}
+
+#[test]
+fn claim_releases_guard_on_error() {
+    let ctx = setup();
+    create_default(&ctx, true);
+
+    // Try to claim before cliff (should fail)
+    set_time(&ctx.env, CLIFF - 1);
+    let result = ctx.contract.try_claim(&ctx.beneficiary);
+    assert_eq!(result, Err(Ok(ContractError::CliffNotReached)));
+
+    // After error, guard should be released - try again after cliff
+    set_time(&ctx.env, END);
+    let claimed = ctx.contract.claim(&ctx.beneficiary);
+    assert_eq!(claimed, TOTAL);
+}
+
+#[test]
+fn revoke_succeeds_and_releases_guard() {
+    let ctx = setup();
+    create_default(&ctx, true);
+
+    // Revoke should succeed
+    let returned = ctx.contract.revoke(&ctx.admin, &ctx.beneficiary);
+    assert_eq!(returned, TOTAL);
+
+    // Verify guard Released by trying again (should return AlreadyRevoked, not ReentrancyDetected)
+    let second = ctx.contract.try_revoke(&ctx.admin, &ctx.beneficiary);
+    assert_eq!(second, Err(Ok(ContractError::AlreadyRevoked)));
+}
+
+#[test]
+fn revoke_releases_guard_on_error() {
+    let ctx = setup();
+    create_default(&ctx, false); // non-revocable
+
+    // Try to revoke non-revocable schedule (should fail)
+    let result = ctx.contract.try_revoke(&ctx.admin, &ctx.beneficiary);
+    assert_eq!(result, Err(Ok(ContractError::NotRevocable)));
+
+    // After error, guard should be released - create revocable and try again
+    let stranger = Address::generate(&ctx.env);
+    ctx.contract
+        .create_vesting_schedule(&ctx.admin, &stranger, &TOTAL, &START, &END, &CLIFF, &true);
+    let returned = ctx.contract.revoke(&ctx.admin, &stranger);
+    assert_eq!(returned, TOTAL);
+}
