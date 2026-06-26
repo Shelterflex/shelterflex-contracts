@@ -182,11 +182,8 @@ fn compute_seize_amount(collateral: i128, bond: i128, price: i128, target_ratio:
 /// feed address has been set, allowing callers to fall back to 1:1 pricing.
 fn try_fetch_oracle_price(env: &Env) -> Option<OraclePrice> {
     let feed: Address = env.storage().instance().get(&DataKey::OracleFeed)?;
-    let price_data = env.invoke_contract::<OraclePrice>(
-        &feed,
-        &Symbol::new(env, "price"),
-        Vec::new(env),
-    );
+    let price_data =
+        env.invoke_contract::<OraclePrice>(&feed, &Symbol::new(env, "price"), Vec::new(env));
     Some(price_data)
 }
 
@@ -355,7 +352,9 @@ impl BondCollateral {
         require_not_paused(&env)?;
         require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::OracleFeed, &feed);
-        env.storage().instance().set(&DataKey::OracleStaleness, &staleness);
+        env.storage()
+            .instance()
+            .set(&DataKey::OracleStaleness, &staleness);
         env.events().publish(
             (
                 Symbol::new(&env, "bond_collateral"),
@@ -686,10 +685,7 @@ impl BondCollateral {
 
         if new_collateral == 0 || new_bond == 0 {
             remove_position(&env, &position_id);
-            put_total_collateral(
-                &env,
-                get_total_collateral(&env).saturating_sub(collateral),
-            );
+            put_total_collateral(&env, get_total_collateral(&env).saturating_sub(collateral));
         } else {
             position.collateral_amount = new_collateral;
             position.bond_amount = new_bond;
