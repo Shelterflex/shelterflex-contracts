@@ -73,6 +73,8 @@ pub enum ContractError {
     UpgradeDelayNotMet = 8,
     /// Amount exceeds the allowed maximum (prevents overflow cascades)
     AmountTooLarge = 9,
+    /// Credit would overflow the stored balance (checked arithmetic)
+    BalanceOverflow = 17,
     /// Time/lock value exceeds the safe upper bound
     InvalidTimeValue = 10,
     /// String field was empty
@@ -183,12 +185,13 @@ impl RentWallet {
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(&env, &current_admin, &admin, "credit")?;
         require_not_paused(&env)?;
-        if amount <= 0 {
-            return Err(ContractError::InvalidAmount);
-        }
+        validation::validate_amount(amount)?;
 
         let cur = get_balance(&env, &user);
-        put_balance(&env, &user, cur + amount);
+        let new_balance = cur
+            .checked_add(amount)
+            .ok_or(ContractError::BalanceOverflow)?;
+        put_balance(&env, &user, new_balance);
 
         env.events().publish(
             (
@@ -211,15 +214,14 @@ impl RentWallet {
         let current_admin = get_admin(&env);
         access_control::require_admin_permission(&env, &current_admin, &admin, "debit")?;
         require_not_paused(&env)?;
-        if amount <= 0 {
-            return Err(ContractError::InvalidAmount);
-        }
+        validation::validate_amount(amount)?;
 
         let cur = get_balance(&env, &user);
         if cur < amount {
             return Err(ContractError::InsufficientBalance);
         }
-        put_balance(&env, &user, cur - amount);
+        let new_balance = cur - amount;
+        put_balance(&env, &user, new_balance);
 
         env.events().publish(
             (
@@ -533,7 +535,7 @@ impl RentWallet {
 mod test {
     extern crate std;
 
-    use super::{ContractError, RentWallet, RentWalletClient};
+    use super::{validation, ContractError, DataKey, RentWallet, RentWalletClient};
     use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
     use soroban_sdk::{Address, BytesN, Env, IntoVal};
 
@@ -1399,5 +1401,242 @@ mod test {
             .unwrap_err()
             .unwrap();
         assert_eq!(err2, ContractError::UpgradeAlreadyPending);
+    }
+
+    // ============================================================================
+    // Arithmetic safety & property invariants (#1141)
+    // ============================================================================
+
+    fn mock_admin_credit(
+        env: &Env,
+        contract_id: &Address,
+        client: &RentWalletClient,
+        admin: &Address,
+        user: &Address,
+        amount: i128,
+    ) {
+        env.mock_auths(&[MockAuth {
+            address: admin,
+            invoke: &MockAuthInvoke {
+                contract: contract_id,
+                fn_name: "credit",
+                args: (admin.clone(), user.clone(), amount).into_val(env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_credit(admin, user, &amount).unwrap().unwrap();
+    }
+
+    #[test]
+    fn credit_overflow_returns_error_without_mutating_balance() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Balance(user.clone()), &(i128::MAX - 1));
+        });
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (admin.clone(), user.clone(), 2i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_credit(&admin, &user, &2i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::BalanceOverflow);
+        assert_eq!(client.balance(&user), i128::MAX - 1);
+    }
+
+    #[test]
+    fn credit_at_max_amount_boundary_succeeds_from_zero() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+        mock_admin_credit(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            &user,
+            validation::MAX_AMOUNT,
+        );
+        assert_eq!(client.balance(&user), validation::MAX_AMOUNT);
+    }
+
+    #[test]
+    fn debit_exact_balance_succeeds_and_debit_over_balance_is_rejected() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+        mock_admin_credit(&env, &contract_id, &client, &admin, &user, 75i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "debit",
+                args: (admin.clone(), user.clone(), 75i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_debit(&admin, &user, &75i128).unwrap().unwrap();
+        assert_eq!(client.balance(&user), 0i128);
+
+        let before = client.balance(&user);
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "debit",
+                args: (admin.clone(), user.clone(), 1i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_debit(&admin, &user, &1i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InsufficientBalance);
+        assert_eq!(client.balance(&user), before);
+    }
+
+    #[test]
+    fn rejected_credit_and_debit_leave_balance_unchanged() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+        mock_admin_credit(&env, &contract_id, &client, &admin, &user, 40i128);
+        let before = client.balance(&user);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (admin.clone(), user.clone(), 0i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert_eq!(
+            client
+                .try_credit(&admin, &user, &0i128)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InvalidAmount
+        );
+        assert_eq!(client.balance(&user), before);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "debit",
+                args: (admin.clone(), user.clone(), 100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert_eq!(
+            client
+                .try_debit(&admin, &user, &100i128)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::InsufficientBalance
+        );
+        assert_eq!(client.balance(&user), before);
+    }
+
+    #[test]
+    fn non_admin_cannot_credit_or_debit() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, non_admin) = setup(&env);
+        mock_admin_credit(&env, &contract_id, &client, &admin, &user, 10i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "credit",
+                args: (non_admin.clone(), user.clone(), 5i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert_eq!(
+            client
+                .try_credit(&non_admin, &user, &5i128)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotAuthorized
+        );
+
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "debit",
+                args: (non_admin.clone(), user.clone(), 1i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert_eq!(
+            client
+                .try_debit(&non_admin, &user, &1i128)
+                .unwrap_err()
+                .unwrap(),
+            ContractError::NotAuthorized
+        );
+        assert_eq!(client.balance(&user), 10i128);
+    }
+
+    #[test]
+    fn property_randomized_credit_debit_sequence_preserves_balance_invariant() {
+        let env = Env::default();
+        let (contract_id, client, admin, user, _non_admin) = setup(&env);
+
+        let mut rng: u64 = 0xC0FFEE_u64;
+        let mut net_applied: i128 = 0;
+        const OPS: u32 = 200;
+
+        for step in 0..OPS {
+            rng = rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let roll = (rng % 100) as u32;
+            let amount = ((rng % 50) + 1) as i128;
+
+            if roll < 45 {
+                env.mock_auths(&[MockAuth {
+                    address: &admin,
+                    invoke: &MockAuthInvoke {
+                        contract: &contract_id,
+                        fn_name: "credit",
+                        args: (admin.clone(), user.clone(), amount).into_val(&env),
+                        sub_invokes: &[],
+                    },
+                }]);
+                if matches!(client.try_credit(&admin, &user, &amount), Ok(Ok(()))) {
+                    net_applied += amount;
+                }
+            } else {
+                env.mock_auths(&[MockAuth {
+                    address: &admin,
+                    invoke: &MockAuthInvoke {
+                        contract: &contract_id,
+                        fn_name: "debit",
+                        args: (admin.clone(), user.clone(), amount).into_val(&env),
+                        sub_invokes: &[],
+                    },
+                }]);
+                if matches!(client.try_debit(&admin, &user, &amount), Ok(Ok(()))) {
+                    net_applied -= amount;
+                }
+            }
+
+            let balance = client.balance(&user);
+            assert!(balance >= 0, "negative balance at step {}", step);
+            assert_eq!(balance, net_applied, "balance drift at step {}", step);
+        }
     }
 }
