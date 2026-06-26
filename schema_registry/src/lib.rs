@@ -32,8 +32,12 @@ pub enum DataKey {
     Admin,
     /// Map<(source, target) → CompatMeta>.
     CompatibilityMatrix,
-    /// Executed migration receipts (idempotency guard).
+    /// Executed migration receipts (idempotency guard, keyed by source+target).
     MigrationReceipt(u32, u32), // (source_version, target_version)
+    /// Monotonic counter — next migration_id to assign.
+    NextMigrationId,
+    /// Receipt indexed by migration_id for verify_migration lookups.
+    MigrationReceiptById(u32),
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -63,6 +67,8 @@ pub struct CompatibilityMeta {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct MigrationReceipt {
+    /// Monotonic identifier assigned at execution time.
+    pub migration_id: u32,
     pub source: SchemaVersion,
     pub target: SchemaVersion,
     pub executed_by: Address,
@@ -93,6 +99,8 @@ pub enum RegistryError {
     AlreadyExecuted = 4,
     DryRunRequired = 5,
     InvalidVersion = 6,
+    /// Current registry schema version does not match the declared from-version.
+    VersionMismatch = 7,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -193,7 +201,25 @@ impl SchemaRegistry {
         let tgt_id = Self::version_id(&target);
         let key = (src_id, tgt_id);
 
-        // 1. Lookup registered transition
+        // 1. Source-version guard: current registry version must match declared source.
+        let current: SchemaVersion = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RegistrySchemaVersion)
+            .unwrap_or(SchemaVersion {
+                major: 1,
+                minor: 0,
+                patch: 0,
+            });
+        if current != source {
+            env.events().publish(
+                (Symbol::new(&env, "migration_rejected"),),
+                (Self::version_id(&current), src_id, tgt_id),
+            );
+            return Err(RegistryError::VersionMismatch);
+        }
+
+        // 2. Lookup registered transition.
         let matrix: Map<(u32, u32), CompatibilityMeta> = env
             .storage()
             .persistent()
@@ -204,42 +230,53 @@ impl SchemaRegistry {
             .get(key)
             .ok_or(RegistryError::UnsupportedTransition)?;
 
-        // 2. Idempotency guard — replay protection
+        // 3. Idempotency guard — replay protection.
         let receipt_key = DataKey::MigrationReceipt(src_id, tgt_id);
         if env.storage().persistent().has(&receipt_key) {
             return Err(RegistryError::AlreadyExecuted);
         }
 
-        // 3. Require dry-run if meta demands it
+        // 4. Require dry-run if meta demands it.
         if meta.requires_dry_run {
             match Self::check_invariants(&env, &source, &target) {
-                InvariantResult::Fail(reason) => {
-                    let _ = reason;
+                InvariantResult::Fail(_) => {
                     return Err(RegistryError::InvariantViolation);
                 }
                 InvariantResult::Pass => {}
             }
         }
 
-        // 4. Post-write invariant verification
+        // 5. Post-write invariant verification.
         let post_check = Self::check_invariants(&env, &source, &target);
         if post_check != InvariantResult::Pass {
             return Err(RegistryError::InvariantViolation);
         }
 
-        // 5. Persist receipt + emit event
+        // 6. Assign monotonic migration_id.
+        let migration_id = Self::next_migration_id(&env);
+
+        // 7. Advance registry schema version to target.
+        env.storage()
+            .persistent()
+            .set(&DataKey::RegistrySchemaVersion, &target);
+
+        // 8. Persist receipt under both lookup keys.
         let receipt = MigrationReceipt {
+            migration_id,
             source: source.clone(),
             target: target.clone(),
             executed_by: caller,
             ledger: env.ledger().sequence(),
-            verification_hash: verification_hash.clone(),
+            verification_hash,
         };
         env.storage().persistent().set(&receipt_key, &receipt);
+        env.storage()
+            .persistent()
+            .set(&DataKey::MigrationReceiptById(migration_id), &receipt);
 
         env.events().publish(
-            (Symbol::new(&env, "MigrationExecuted"),),
-            (src_id, tgt_id, env.ledger().sequence()),
+            (Symbol::new(&env, "migration_executed"),),
+            (migration_id, src_id, tgt_id, env.ledger().sequence()),
         );
 
         Ok(receipt)
@@ -266,6 +303,19 @@ impl SchemaRegistry {
         env.storage().persistent().get(&key)
     }
 
+    /// Returns true iff the given migration_id exists and its target version
+    /// matches expected_to — confirming the registry reached the intended state.
+    pub fn verify_migration(env: Env, migration_id: u32, expected_to: SchemaVersion) -> bool {
+        let receipt: Option<MigrationReceipt> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MigrationReceiptById(migration_id));
+        match receipt {
+            Some(r) => r.target == expected_to,
+            None => false,
+        }
+    }
+
     pub fn registry_version(env: Env) -> SchemaVersion {
         env.storage()
             .persistent()
@@ -277,7 +327,20 @@ impl SchemaRegistry {
             })
     }
 
-    // ── Internal ──────────────────────────────────────────────────────────────
+    // ── Internal ─────────────────────────────────────────────────────────────
+
+    fn next_migration_id(env: &Env) -> u32 {
+        let id: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextMigrationId)
+            .unwrap_or(0);
+        let next = id + 1;
+        env.storage()
+            .instance()
+            .set(&DataKey::NextMigrationId, &next);
+        next
+    }
 
     /// Encode a SchemaVersion as a single u32 for use as Map key.
     /// Supports major 0-999, minor 0-999, patch 0-999.
