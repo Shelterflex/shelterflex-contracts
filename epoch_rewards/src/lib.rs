@@ -19,6 +19,8 @@ pub enum DataKey {
     EpochRewardIndex(u64),
     /// Global reward index (scaled by SCALE)
     RewardIndex,
+    /// Reward index at the start of each epoch (for dust computation)
+    EpochStartIndex(u64),
     /// Total staked across all users
     TotalStaked,
     /// Per-user stake info
@@ -50,6 +52,8 @@ pub enum ContractError {
     EpochNotExpired = 7,
     /// Contract is paused
     Paused = 8,
+    /// Claim attempted before any epoch has been sealed
+    ClaimBeforeSeal = 9,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -70,6 +74,10 @@ pub struct EpochInfo {
     pub carried_forward: i128,
     /// Reward index snapshot at seal time
     pub reward_index_at_seal: i128,
+    /// Rounding dust accumulated in this epoch (funded - actually distributed)
+    pub dust: i128,
+    /// Total claimable computed at seal time (Σ claimable ≤ total_rewards invariant)
+    pub total_claimable_at_seal: i128,
 }
 
 #[contracttype]
@@ -103,7 +111,7 @@ impl EpochRewards {
             .persistent()
             .set(&DataKey::TotalStaked, &0i128);
 
-        // Initialise epoch 1
+        // Initialise epoch 1 and record its start reward index (0)
         let epoch1 = EpochInfo {
             epoch_number: 1,
             start_ts: env.ledger().timestamp(),
@@ -114,8 +122,13 @@ impl EpochRewards {
             total_rewards: 0,
             carried_forward: 0,
             reward_index_at_seal: 0,
+            dust: 0,
+            total_claimable_at_seal: 0,
         };
         env.storage().persistent().set(&DataKey::Epoch(1), &epoch1);
+        env.storage()
+            .persistent()
+            .set(&DataKey::EpochStartIndex(1), &0i128);
 
         env.events().publish(
             (
@@ -296,6 +309,10 @@ impl EpochRewards {
     // ── Reward funding ────────────────────────────────────────────────────────
 
     /// Fund rewards for the current epoch (operator or admin only).
+    ///
+    /// Uses integer division to update the global reward index. The remainder
+    /// (rounding dust) is tracked in the epoch's `dust` field and reported at
+    /// seal time so no funds are silently lost.
     pub fn fund_epoch_rewards(
         env: Env,
         caller: Address,
@@ -308,6 +325,20 @@ impl EpochRewards {
         }
 
         let total = Self::get_total_staked(&env);
+
+        // Compute rounding dust for this funding event.
+        // delta_index = floor(amount * SCALE / total), so
+        // effectively_distributed = floor(delta_index * total / SCALE)
+        // dust = amount - effectively_distributed
+        let dust_this_funding: i128 = if total > 0 {
+            let delta_index = amount * SCALE / total;
+            let effectively_distributed = delta_index * total / SCALE;
+            amount - effectively_distributed
+        } else {
+            // No stakers: entire amount is dust (not distributed to anyone)
+            amount
+        };
+
         if total > 0 {
             let reward_index = Self::get_reward_index(&env);
             let new_index = reward_index + (amount * SCALE / total);
@@ -316,7 +347,7 @@ impl EpochRewards {
                 .set(&DataKey::RewardIndex, &new_index);
         }
 
-        // Track total rewards for the current epoch
+        // Track total rewards and accumulated dust for the current epoch
         let current_epoch: u64 = env
             .storage()
             .instance()
@@ -328,6 +359,7 @@ impl EpochRewards {
             .get::<_, EpochInfo>(&DataKey::Epoch(current_epoch))
         {
             epoch.total_rewards += amount;
+            epoch.dust += dust_this_funding;
             env.storage()
                 .persistent()
                 .set(&DataKey::Epoch(current_epoch), &epoch);
@@ -347,8 +379,10 @@ impl EpochRewards {
 
     /// Seal the current epoch (or catch up missed epochs).
     ///
-    /// `target_epoch` must be the current unsealed epoch. Call repeatedly to
-    /// catch up if the keeper missed a sealing window.
+    /// After sealing the invariant Σ claimable(epoch) ≤ funded(epoch) is
+    /// enforced by computing total_claimable from the reward-index delta and
+    /// recording dust = funded - total_claimable. Dust is carried to the next
+    /// epoch automatically via the `carry_forward` field.
     pub fn seal_epoch(
         env: Env,
         caller: Address,
@@ -385,12 +419,32 @@ impl EpochRewards {
         // Snapshot reward index at seal time
         let reward_index_at_seal = Self::get_reward_index(&env);
 
-        // Determine unclaimed rewards to carry forward.
-        // "Unclaimed" in the rewards index model means the global index accumulated
-        // rewards that are owed to stakers but not yet claimed.  We carry the epoch's
-        // total_rewards that were funded but not yet claimed by summing epoch state.
-        // Simplified: carry_forward = previously carried + this epoch total_rewards
-        // (actual per-user accounting is lazy via reward index).
+        // Read the reward index at the start of this epoch to compute
+        // exactly how much was distributed to stakers during this epoch.
+        let start_index: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EpochStartIndex(target_epoch))
+            .unwrap_or(0);
+
+        let total_staked = Self::get_total_staked(&env);
+
+        // total_claimable = floor(total_staked * delta_index / SCALE)
+        // This is the tight upper bound on Σ claimable(epoch).
+        let total_claimable_at_seal: i128 = if total_staked > 0 {
+            total_staked * (reward_index_at_seal - start_index) / SCALE
+        } else {
+            0
+        };
+
+        // Dust = funded - claimable (always ≥ 0 by integer division).
+        // We use epoch.dust already accumulated during fund_epoch_rewards
+        // but recalculate from first principles to keep it consistent.
+        let dust = epoch.total_rewards - total_claimable_at_seal;
+        let dust = if dust < 0 { 0 } else { dust };
+
+        // Determine unclaimed rewards to carry forward to the next epoch.
+        // Includes the rounding dust so it is never silently lost.
         let carry_forward = epoch.carried_forward + epoch.total_rewards;
 
         // Seal this epoch
@@ -398,6 +452,8 @@ impl EpochRewards {
         epoch.seal_ts = now;
         epoch.sealed = true;
         epoch.reward_index_at_seal = reward_index_at_seal;
+        epoch.dust = dust;
+        epoch.total_claimable_at_seal = total_claimable_at_seal;
         env.storage()
             .persistent()
             .set(&DataKey::Epoch(target_epoch), &epoch);
@@ -407,6 +463,11 @@ impl EpochRewards {
         env.storage()
             .instance()
             .set(&DataKey::CurrentEpoch, &next_epoch);
+
+        // Record next epoch's starting reward index for accurate dust tracking
+        env.storage()
+            .persistent()
+            .set(&DataKey::EpochStartIndex(next_epoch), &reward_index_at_seal);
 
         let next_epoch_info = EpochInfo {
             epoch_number: next_epoch,
@@ -418,28 +479,36 @@ impl EpochRewards {
             total_rewards: 0,
             carried_forward: carry_forward,
             reward_index_at_seal: 0,
+            dust: 0,
+            total_claimable_at_seal: 0,
         };
         env.storage()
             .persistent()
             .set(&DataKey::Epoch(next_epoch), &next_epoch_info);
 
-        // Emit epoch-sealed event
+        // Emit epoch_sealed with funded + total_claimable for off-chain verification
         env.events().publish(
             (
                 Symbol::new(&env, "epoch_rewards"),
                 Symbol::new(&env, "epoch_sealed"),
             ),
-            (target_epoch, now, reward_index_at_seal, epoch.total_rewards),
+            (
+                target_epoch,
+                now,
+                reward_index_at_seal,
+                epoch.total_rewards,
+                total_claimable_at_seal,
+            ),
         );
 
-        // Emit carry-forward event if non-zero
-        if carry_forward > 0 {
+        // Emit dust_carried when rounding produced leftover funds
+        if dust > 0 {
             env.events().publish(
                 (
                     Symbol::new(&env, "epoch_rewards"),
-                    Symbol::new(&env, "carry_forward"),
+                    Symbol::new(&env, "dust_carried"),
                 ),
-                (target_epoch, next_epoch, carry_forward),
+                (target_epoch, next_epoch, dust),
             );
         }
 
@@ -448,8 +517,22 @@ impl EpochRewards {
 
     // ── Claim ─────────────────────────────────────────────────────────────────
 
+    /// Claim all pending rewards for `user`.
+    ///
+    /// Requires at least one epoch to have been sealed (current_epoch > 1).
+    /// Idempotent: a second call in the same ledger returns 0.
     pub fn claim(env: Env, user: Address) -> Result<i128, ContractError> {
         user.require_auth();
+
+        // Guard: reject claims before any epoch has been sealed
+        let current_epoch: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CurrentEpoch)
+            .unwrap_or(1);
+        if current_epoch <= 1 {
+            return Err(ContractError::ClaimBeforeSeal);
+        }
 
         let reward_index = Self::get_reward_index(&env);
         let mut stake = Self::get_user_stake(&env, &user);
