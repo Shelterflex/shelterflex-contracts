@@ -17,9 +17,6 @@ pub enum DataKey {
     Bond(Address),
     /// Reentrancy lock for cross-contract call protection
     Reentrancy,
-    /// Reentrancy lock for cross-contract call protection
-    Reentrancy,
-
     // ── Two-Phase Inspector Slash (Issue #1082) ──────────────────────────────
     /// Challenge window for inspector slashes in seconds.
     ChallengeWindow,
@@ -166,7 +163,7 @@ fn min_bond(env: &Env) -> i128 {
     env.storage()
         .instance()
         .get::<_, i128>(&DataKey::MinBondAmount)
-        .unwrap_or(1_000_0000000)
+        .unwrap_or(10_000_000_000)
 }
 
 fn slash_bps(env: &Env) -> i128 {
