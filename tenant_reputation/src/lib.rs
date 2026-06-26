@@ -174,7 +174,12 @@ impl TenantReputation {
         decay_rate_per_period: u32,
         period_secs: u64,
     ) -> Result<(), ContractError> {
-        access_control::require_admin_permission(&env, &get_admin(&env), &admin, "set_decay_config")?;
+        access_control::require_admin_permission(
+            &env,
+            &get_admin(&env),
+            &admin,
+            "set_decay_config",
+        )?;
         env.storage()
             .instance()
             .set(&DataKey::DecayRatePerPeriod, &decay_rate_per_period);
@@ -198,13 +203,14 @@ impl TenantReputation {
         score_min: u32,
         score_max: u32,
     ) -> Result<(), ContractError> {
-        access_control::require_admin_permission(&env, &get_admin(&env), &admin, "set_score_bounds")?;
-        env.storage()
-            .instance()
-            .set(&DataKey::ScoreMin, &score_min);
-        env.storage()
-            .instance()
-            .set(&DataKey::ScoreMax, &score_max);
+        access_control::require_admin_permission(
+            &env,
+            &get_admin(&env),
+            &admin,
+            "set_score_bounds",
+        )?;
+        env.storage().instance().set(&DataKey::ScoreMin, &score_min);
+        env.storage().instance().set(&DataKey::ScoreMax, &score_max);
         env.events().publish(
             (
                 Symbol::new(&env, "tenant_reputation"),
@@ -315,10 +321,7 @@ impl Pausable for TenantReputation {
             .map_err(|_| PausableError::NotAuthorized)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events().publish(
-            (
-                Symbol::new(&env, "Pausable"),
-                Symbol::new(&env, "pause"),
-            ),
+            (Symbol::new(&env, "Pausable"), Symbol::new(&env, "pause")),
             (),
         );
         Ok(())
@@ -598,7 +601,10 @@ mod test {
             .try_update_reputation(&operator, &tenant, &record, &r)
             .unwrap()
             .unwrap();
-        assert_eq!(client.get_reputation(&tenant).unwrap().composite_score, 1200);
+        assert_eq!(
+            client.get_reputation(&tenant).unwrap().composite_score,
+            1200
+        );
     }
 
     #[test]

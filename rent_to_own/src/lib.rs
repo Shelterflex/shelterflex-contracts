@@ -380,7 +380,10 @@ impl RentToOwn {
         env.storage().persistent().get(&DataKey::Deal(deal_id))
     }
 
-    pub fn get_default_settlement(env: Env, deal_id: BytesN<32>) -> Option<DefaultSettlementRecord> {
+    pub fn get_default_settlement(
+        env: Env,
+        deal_id: BytesN<32>,
+    ) -> Option<DefaultSettlementRecord> {
         env.storage()
             .persistent()
             .get(&DataKey::DefaultSettlement(deal_id))
@@ -577,7 +580,10 @@ mod tests {
         // 40_000 - 12_000 = 28_000 refundable
         assert_eq!(settlement.forfeited_usdc, 12_000);
         assert_eq!(settlement.refundable_usdc, 28_000);
-        assert_eq!(settlement.refundable_usdc + settlement.forfeited_usdc, 40_000);
+        assert_eq!(
+            settlement.refundable_usdc + settlement.forfeited_usdc,
+            40_000
+        );
         assert!(!settlement.settled);
     }
 
@@ -598,7 +604,10 @@ mod tests {
         assert!(s.settled);
 
         // Second settlement is rejected
-        let err = client.try_settle_default(&admin, &deal_id).unwrap_err().unwrap();
+        let err = client
+            .try_settle_default(&admin, &deal_id)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ContractError::AlreadySettled);
     }
 
@@ -661,7 +670,10 @@ mod tests {
 
         client.register_deal(&admin, &deal_id, &tenant, &10_000, &10_000, &1);
         // Still active — settle_default must fail
-        let err = client.try_settle_default(&admin, &deal_id).unwrap_err().unwrap();
+        let err = client
+            .try_settle_default(&admin, &deal_id)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ContractError::DealNotDefaulted);
     }
 }

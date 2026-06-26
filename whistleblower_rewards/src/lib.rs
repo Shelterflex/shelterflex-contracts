@@ -353,10 +353,7 @@ impl WhistleblowerRewards {
             .storage()
             .instance()
             .get::<_, Address>(&StorageKey::Guardian);
-        let is_authorized = caller == op
-            || guardian_opt
-                .as_ref()
-                .map_or(false, |g| &caller == g);
+        let is_authorized = caller == op || guardian_opt.as_ref().map_or(false, |g| &caller == g);
         if !is_authorized {
             return Err(ContractError::NotAuthorized);
         }
@@ -1703,10 +1700,7 @@ mod test {
                 sub_invokes: &[],
             },
         }]);
-        client
-            .try_set_guardian(&admin, &guardian)
-            .unwrap()
-            .unwrap();
+        client.try_set_guardian(&admin, &guardian).unwrap().unwrap();
 
         env.mock_auths(&[MockAuth {
             address: &operator,

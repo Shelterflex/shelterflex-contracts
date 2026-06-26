@@ -425,15 +425,17 @@ impl StakeDelegation {
                 remaining_delegators.push_back(delegator);
             }
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::DelegatorsOf(delegatee.clone()), &remaining_delegators);
+        env.storage().persistent().set(
+            &DataKey::DelegatorsOf(delegatee.clone()),
+            &remaining_delegators,
+        );
 
         // Reduce total staked by the sum actually removed from delegators
         let total = Self::get_total_staked(&env);
-        env.storage()
-            .persistent()
-            .set(&DataKey::TotalStaked, &(total - total_balance_slashed).max(0));
+        env.storage().persistent().set(
+            &DataKey::TotalStaked,
+            &(total - total_balance_slashed).max(0),
+        );
 
         env.events().publish(
             (
@@ -1758,7 +1760,10 @@ mod tests {
         let delegatee = Address::generate(&env);
 
         let result = client.try_set_commission(&delegatee, &10001u32);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::CommissionTooHigh);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::CommissionTooHigh
+        );
     }
 
     #[test]
@@ -1875,7 +1880,10 @@ mod tests {
         client.delegate(&delegator, &delegatee, &1_000);
 
         let result = client.try_apply_delegatee_slash(&slash_authority, &delegatee, &1_001);
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::SlashExceedsBalance);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::SlashExceedsBalance
+        );
     }
 
     #[test]
