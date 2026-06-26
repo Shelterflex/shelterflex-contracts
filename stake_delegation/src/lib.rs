@@ -59,6 +59,8 @@ pub enum ContractError {
     CooldownNotElapsed = 9,
     /// No pending undelegation exists
     NoPendingUndelegation = 10,
+    /// Slash amount exceeds available staked balance
+    SlashExceedsBalance = 11,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -857,6 +859,107 @@ impl StakeDelegation {
             total += d.amount;
         }
         total
+    }
+
+    // ── Slash integration (Issue #1082) ─────────────────────────────────────────────
+
+    /// Apply a finalized slash from the slashing module to a delegator's stake.
+    ///
+    /// The caller must be the contract admin (typically the authority that also
+    /// called `slashing_module::finalize_slash`).  The method:
+    ///
+    /// 1. Reduces the delegator's raw `StakedBalance` by `amount` (capped at
+    ///    the current balance to prevent underflow).
+    /// 2. Reduces the global `TotalStaked` by the same amount.
+    /// 3. Proportionally trims every active delegation so that delegated amounts
+    ///    never exceed the post-slash balance.
+    ///
+    /// This is the hook that lets callers "adopt the two-phase flow": once
+    /// `slashing_module::finalize_slash` fires, the admin calls `slash_stake`
+    /// here to propagate the penalty into delegated balances.
+    pub fn slash_stake(
+        env: Env,
+        admin: Address,
+        delegator: Address,
+        amount: i128,
+    ) -> Result<i128, ContractError> {
+        Self::require_admin(&env, &admin)?;
+
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedBalance(delegator.clone()))
+            .unwrap_or(0);
+
+        if amount > balance {
+            return Err(ContractError::SlashExceedsBalance);
+        }
+
+        // Settle pending rewards for all delegatees before touching balances.
+        Self::settle_all_delegates(&env, &delegator);
+
+        let new_balance = balance - amount;
+        env.storage()
+            .persistent()
+            .set(&DataKey::StakedBalance(delegator.clone()), &new_balance);
+
+        let total = Self::get_total_staked(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalStaked, &(total - amount));
+
+        // Proportionally reduce each active delegation so that the sum of
+        // delegated amounts does not exceed the post-slash balance.
+        let delegations: Vec<Delegation> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Delegations(delegator.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total_delegated = Self::total_delegated(&env, &delegator);
+        if total_delegated > 0 && new_balance < total_delegated {
+            // Each delegation is trimmed proportionally.
+            let mut new_delegations = Vec::new(&env);
+            for d in delegations.iter() {
+                let trimmed = d.amount * new_balance / total_delegated;
+                let delta = d.amount - trimmed;
+
+                // Reduce delegatee stake by the trimmed portion.
+                if delta > 0 {
+                    let ds = Self::get_delegatee_stake(&env, &d.delegatee);
+                    env.storage().persistent().set(
+                        &DataKey::DelegateeStake(d.delegatee.clone()),
+                        &(ds - delta).max(0),
+                    );
+                }
+
+                if trimmed > 0 {
+                    new_delegations.push_back(Delegation {
+                        delegatee: d.delegatee.clone(),
+                        amount: trimmed,
+                        activated_epoch: d.activated_epoch,
+                    });
+                }
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::Delegations(delegator.clone()), &new_delegations);
+        }
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "delegation"),
+                Symbol::new(&env, "stake_slashed"),
+                delegator,
+            ),
+            amount,
+        );
+
+        Ok(amount)
     }
 }
 

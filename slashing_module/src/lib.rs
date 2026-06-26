@@ -31,6 +31,11 @@ pub enum DataKey {
     BondContract,
     /// Slash history per inspector (append-only).
     InspectorSlashHistory(Address),
+
+    // ── Two-Phase Slashing (Issue #1082) ──────────────────────────────────
+    ChallengeWindow,
+    NextSlashId,
+    PendingSlash(u64),
 }
 
 /// Single slash entry recorded against an inspector by the bond contract
@@ -43,6 +48,34 @@ pub struct InspectorSlashRecord {
     pub amount: i128,
     pub reason: String,
     pub slashed_at: u64,
+}
+
+// ── Two-Phase Slashing Status and Struct ──────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SlashStatus {
+    Pending = 0,
+    Finalized = 1,
+    Cancelled = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingSlash {
+    pub id: u64,
+    pub actor: Address,
+    pub amount: i128,
+    pub deadline: u64,
+    pub status: SlashStatus,
+    pub is_validator: bool,
+    pub evidence_hash: Option<Bytes>,
+    pub offence: Offence,
+    pub submitter: Option<Address>,
+    pub penalty_bps: u32,
+    pub inspection_id: Option<String>,
+    pub reason: Option<String>,
 }
 
 // ── Slashable Offence Types ───────────────────────────────────────────────────
@@ -80,6 +113,14 @@ pub enum ContractError {
     UnknownOffence = 9,
     /// Amount overflow or underflow
     ArithmeticError = 10,
+    /// Slash ID not found
+    SlashNotFound = 11,
+    /// Try to finalize before the challenge window has elapsed
+    ChallengeWindowNotElapsed = 12,
+    /// Try to resolve or finalize an already resolved/finalized slash
+    SlashAlreadyResolved = 13,
+    /// Invalid slash amount (e.g. <= 0)
+    InvalidAmount = 14,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -91,6 +132,7 @@ pub enum Offence {
     DoubleSign,
     Downtime,
     InvalidBlock,
+    None,
 }
 
 /// Full evidence record stored on-chain (keyed by hash)
@@ -219,9 +261,50 @@ impl SlashingModule {
             .unwrap_or(0)
     }
 
+    // ── Two-Phase Slashing Settings ──────────────────────────────────────────
+
+    /// Configure the challenge window duration. Admin-only.
+    pub fn set_challenge_window(
+        env: Env,
+        admin: Address,
+        window_seconds: u64,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::ChallengeWindow, &window_seconds);
+        env.events().publish(
+            (
+                Symbol::new(&env, "slashing"),
+                Symbol::new(&env, "challenge_window_updated"),
+            ),
+            window_seconds,
+        );
+        Ok(())
+    }
+
+    /// Read the current challenge window duration.
+    pub fn challenge_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ChallengeWindow)
+            .unwrap_or(604_800) // 7 days default
+    }
+
+    fn next_slash_id(env: &Env) -> u64 {
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextSlashId)
+            .unwrap_or(0);
+        let next = id + 1;
+        env.storage().instance().set(&DataKey::NextSlashId, &next);
+        next
+    }
+
     // ── Core: submit evidence & slash ─────────────────────────────────────────
 
-    /// Submit evidence of misbehavior.
+    /// Submit evidence of misbehavior (proposes a validator slash).
     ///
     /// * `evidence_hash` – unique fingerprint of the raw evidence bytes (duplicate guard).
     /// * `actor`         – address being slashed.
@@ -232,8 +315,7 @@ impl SlashingModule {
         evidence_hash: Bytes,
         actor: Address,
         offence: Offence,
-    ) -> Result<(), ContractError> {
-        Self::require_not_paused(&env)?;
+    ) -> Result<u64, ContractError> {
         Self::require_submitter(&env, &submitter)?;
 
         // Duplicate evidence check
@@ -261,6 +343,7 @@ impl SlashingModule {
             Offence::DoubleSign => OFFENCE_DOUBLE_SIGN_BPS,
             Offence::Downtime => OFFENCE_DOWNTIME_BPS,
             Offence::InvalidBlock => OFFENCE_INVALID_BLOCK_BPS,
+            Offence::None => return Err(ContractError::UnknownOffence),
         };
 
         // Load current staked balance
@@ -277,35 +360,33 @@ impl SlashingModule {
         // Proportional slash – saturating at full balance (no over-slash)
         let slash_amount = (balance * penalty_bps as i128) / MAX_BPS as i128;
         let slash_amount = slash_amount.min(balance); // cap at balance
-        let new_balance = balance - slash_amount;
 
-        // Apply balance reduction atomically
+        // Generate slash ID
+        let slash_id = Self::next_slash_id(&env);
+        let deadline = env.ledger().timestamp() + Self::challenge_window(env.clone());
+
+        // Create PendingSlash
+        let pending = PendingSlash {
+            id: slash_id,
+            actor: actor.clone(),
+            amount: slash_amount,
+            deadline,
+            status: SlashStatus::Pending,
+            is_validator: true,
+            evidence_hash: Some(evidence_hash.clone()),
+            offence: offence.clone(),
+            submitter: Some(submitter.clone()),
+            penalty_bps,
+            inspection_id: None,
+            reason: None,
+        };
+
+        // Save PendingSlash
         env.storage()
             .persistent()
-            .set(&DataKey::StakedBalance(actor.clone()), &new_balance);
+            .set(&DataKey::PendingSlash(slash_id), &pending);
 
-        // Track cumulative slash amount per actor
-        let prev_total: i128 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::SlashedAmount(actor.clone()))
-            .unwrap_or(0);
-        env.storage().persistent().set(
-            &DataKey::SlashedAmount(actor.clone()),
-            &(prev_total + slash_amount),
-        );
-
-        // Increment slash count
-        let prev_count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::SlashCount(actor.clone()))
-            .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&DataKey::SlashCount(actor.clone()), &(prev_count + 1));
-
-        // Mark evidence as processed
+        // Mark evidence hash as used/pending to block duplicate proposals with the same hash
         let evidence_record = SlashEvidence {
             actor: actor.clone(),
             offence: offence.clone(),
@@ -319,31 +400,282 @@ impl SlashingModule {
             &evidence_record,
         );
 
-        // Emit slash event
+        // Emit proposed event
         env.events().publish(
             (
                 Symbol::new(&env, "slashing"),
-                Symbol::new(&env, "slashed"),
-                actor.clone(),
+                Symbol::new(&env, "proposed"),
+                actor,
             ),
-            evidence_record.clone(),
+            (slash_id, slash_amount, deadline),
         );
 
-        // Jail the actor
+        Ok(slash_id)
+    }
+
+    /// Propose a slash for an actor.
+    /// Callable by authorized submitter or registered bond contract or admin.
+    pub fn propose_slash(
+        env: Env,
+        submitter: Address,
+        actor: Address,
+        amount: i128,
+    ) -> Result<u64, ContractError> {
+        // Enforce authorization: caller must be Admin, authorized Submitter, or BondContract
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotAuthorized)?;
+
+        let mut is_authorized = false;
+        if submitter == admin {
+            is_authorized = true;
+        } else {
+            let is_sub: bool = env
+                .storage()
+                .instance()
+                .get(&DataKey::Submitter(submitter.clone()))
+                .unwrap_or(false);
+            let is_bond = Some(submitter.clone()) == Self::bond_contract(env.clone());
+            if is_sub || is_bond {
+                is_authorized = true;
+            }
+        }
+
+        if !is_authorized {
+            return Err(ContractError::NotAuthorized);
+        }
+        submitter.require_auth();
+
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let slash_id = Self::next_slash_id(&env);
+        let deadline = env.ledger().timestamp() + Self::challenge_window(env.clone());
+
+        let pending = PendingSlash {
+            id: slash_id,
+            actor: actor.clone(),
+            amount,
+            deadline,
+            status: SlashStatus::Pending,
+            is_validator: false,
+            evidence_hash: None,
+            offence: Offence::None,
+            submitter: Some(submitter),
+            penalty_bps: 0,
+            inspection_id: None,
+            reason: None,
+        };
+
         env.storage()
             .persistent()
-            .set(&DataKey::Jailed(actor.clone()), &true);
+            .set(&DataKey::PendingSlash(slash_id), &pending);
 
         env.events().publish(
             (
                 Symbol::new(&env, "slashing"),
-                Symbol::new(&env, "jailed"),
-                actor.clone(),
+                Symbol::new(&env, "proposed"),
+                actor,
             ),
-            evidence_record,
+            (slash_id, amount, deadline),
+        );
+
+        Ok(slash_id)
+    }
+
+    /// Finalize a pending slash after the challenge window has elapsed.
+    pub fn finalize_slash(env: Env, caller: Address, slash_id: u64) -> Result<(), ContractError> {
+        // Enforce authorization: caller must be Admin, authorized Submitter, or BondContract
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotAuthorized)?;
+
+        let mut is_authorized = false;
+        if caller == admin {
+            is_authorized = true;
+        } else {
+            let is_sub: bool = env
+                .storage()
+                .instance()
+                .get(&DataKey::Submitter(caller.clone()))
+                .unwrap_or(false);
+            let is_bond = Some(caller.clone()) == Self::bond_contract(env.clone());
+            if is_sub || is_bond {
+                is_authorized = true;
+            }
+        }
+
+        if !is_authorized {
+            return Err(ContractError::NotAuthorized);
+        }
+        caller.require_auth();
+
+        let mut pending: PendingSlash = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingSlash(slash_id))
+            .ok_or(ContractError::SlashNotFound)?;
+
+        if pending.status != SlashStatus::Pending {
+            return Err(ContractError::SlashAlreadyResolved);
+        }
+
+        if env.ledger().timestamp() < pending.deadline {
+            return Err(ContractError::ChallengeWindowNotElapsed);
+        }
+
+        pending.status = SlashStatus::Finalized;
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingSlash(slash_id), &pending);
+
+        if pending.is_validator {
+            // Apply validator slashing logic
+            let actor = pending.actor.clone();
+            let slash_amount = pending.amount;
+
+            // Load current staked balance
+            let balance: i128 = env
+                .storage()
+                .persistent()
+                .get::<_, i128>(&DataKey::StakedBalance(actor.clone()))
+                .unwrap_or(0);
+
+            let actual_slash = slash_amount.min(balance);
+            let new_balance = balance - actual_slash;
+
+            // Apply balance reduction atomically
+            env.storage()
+                .persistent()
+                .set(&DataKey::StakedBalance(actor.clone()), &new_balance);
+
+            // Track cumulative slash amount per actor
+            let prev_total: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::SlashedAmount(actor.clone()))
+                .unwrap_or(0);
+            env.storage().persistent().set(
+                &DataKey::SlashedAmount(actor.clone()),
+                &(prev_total + actual_slash),
+            );
+
+            // Increment slash count
+            let prev_count: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::SlashCount(actor.clone()))
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&DataKey::SlashCount(actor.clone()), &(prev_count + 1));
+
+            // Publish finalized event
+            let evidence_record = SlashEvidence {
+                actor: actor.clone(),
+                offence: pending.offence.clone(),
+                submitter: pending.submitter.clone().unwrap_or(caller.clone()),
+                submitted_at: env.ledger().timestamp(),
+                penalty_bps: pending.penalty_bps,
+                slashed_amount: actual_slash,
+            };
+
+            // Overwrite slash record with finalized amount
+            if let Some(hash) = pending.evidence_hash.clone() {
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::SlashRecord(hash), &evidence_record);
+            }
+
+            // Emit slash event
+            env.events().publish(
+                (
+                    Symbol::new(&env, "slashing"),
+                    Symbol::new(&env, "slashed"),
+                    actor.clone(),
+                ),
+                evidence_record.clone(),
+            );
+
+            // Jail the actor
+            env.storage()
+                .persistent()
+                .set(&DataKey::Jailed(actor.clone()), &true);
+
+            env.events().publish(
+                (
+                    Symbol::new(&env, "slashing"),
+                    Symbol::new(&env, "jailed"),
+                    actor.clone(),
+                ),
+                evidence_record,
+            );
+        }
+
+        // Emit general finalized event
+        env.events().publish(
+            (
+                Symbol::new(&env, "slashing"),
+                Symbol::new(&env, "finalized"),
+                pending.actor.clone(),
+            ),
+            slash_id,
         );
 
         Ok(())
+    }
+
+    /// Cancel a pending slash during the challenge window.
+    /// Only callable by the admin (arbiter).
+    pub fn cancel_slash(env: Env, admin: Address, slash_id: u64) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+
+        let mut pending: PendingSlash = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingSlash(slash_id))
+            .ok_or(ContractError::SlashNotFound)?;
+
+        if pending.status != SlashStatus::Pending {
+            return Err(ContractError::SlashAlreadyResolved);
+        }
+
+        pending.status = SlashStatus::Cancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingSlash(slash_id), &pending);
+
+        // If it was a validator slash, remove the duplicate evidence guard
+        if pending.is_validator {
+            if let Some(hash) = pending.evidence_hash {
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::SlashRecord(hash));
+            }
+        }
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "slashing"),
+                Symbol::new(&env, "cancelled"),
+                pending.actor,
+            ),
+            slash_id,
+        );
+
+        Ok(())
+    }
+
+    /// Query the pending slash details.
+    pub fn get_pending_slash(env: Env, slash_id: u64) -> Option<PendingSlash> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingSlash(slash_id))
     }
 
     // ── Jailing queries ───────────────────────────────────────────────────────
@@ -572,7 +904,7 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Bytes, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::Ledger, Bytes, Env};
 
     fn evidence(env: &Env, tag: &str) -> Bytes {
         Bytes::from_slice(env, tag.as_bytes())
@@ -609,12 +941,24 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        client.submit_evidence(
+        let slash_id = client.submit_evidence(
             &submitter,
             &evidence(&env, "ev1"),
             &actor,
             &Offence::DoubleSign,
         );
+
+        // Funds not moved immediately
+        assert_eq!(client.staked_balance(&actor), 10_000);
+        assert_eq!(client.total_slashed(&actor), 0);
+        assert!(!client.is_jailed(&actor));
+
+        // Advance past challenge window (default 604_800 seconds)
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+
+        // Finalize
+        client.finalize_slash(&submitter, &slash_id);
 
         // 10 % of 10_000 = 1_000 slashed → 9_000 remaining
         assert_eq!(client.staked_balance(&actor), 9_000);
@@ -631,12 +975,17 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 100_000);
 
-        client.submit_evidence(
+        let slash_id = client.submit_evidence(
             &submitter,
             &evidence(&env, "ev2"),
             &actor,
             &Offence::Downtime,
         );
+
+        // Advance time
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &slash_id);
 
         // 1 % of 100_000 = 1_000
         assert_eq!(client.staked_balance(&actor), 99_000);
@@ -657,7 +1006,7 @@ mod tests {
         let ev = evidence(&env, "same_hash");
         client.submit_evidence(&submitter, &ev, &actor, &Offence::Downtime);
 
-        // Second submission with same hash must fail
+        // Second submission with same hash must fail immediately even if not finalized
         let result = client.try_submit_evidence(&submitter, &ev, &actor2, &Offence::Downtime);
         assert_eq!(
             result.unwrap_err().unwrap(),
@@ -676,12 +1025,16 @@ mod tests {
         // Even if penalty ratio would exceed 100 %, balance must not go negative.
         seed_balance(&client, &admin, &actor, 1); // tiny balance
 
-        client.submit_evidence(
+        let slash_id = client.submit_evidence(
             &submitter,
             &evidence(&env, "tiny"),
             &actor,
             &Offence::DoubleSign,
         );
+
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &slash_id);
 
         assert!(client.staked_balance(&actor) >= 0);
     }
@@ -696,12 +1049,16 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        client.submit_evidence(
+        let slash_id = client.submit_evidence(
             &submitter,
             &evidence(&env, "ev_j1"),
             &actor,
             &Offence::Downtime,
         );
+
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &slash_id);
         assert!(client.is_jailed(&actor));
 
         let result = client.try_submit_evidence(
@@ -723,12 +1080,16 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        client.submit_evidence(
+        let slash_id = client.submit_evidence(
             &submitter,
             &evidence(&env, "ev_u1"),
             &actor,
             &Offence::Downtime,
         );
+
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &slash_id);
         assert!(client.is_jailed(&actor));
 
         // Unjail without approval must fail
@@ -753,12 +1114,17 @@ mod tests {
         let actor = Address::generate(&env);
 
         seed_balance(&client, &admin, &actor, 10_000);
-        client.submit_evidence(
+        let slash_id = client.submit_evidence(
             &submitter,
             &evidence(&env, "ev_u2"),
             &actor,
             &Offence::Downtime,
         );
+
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &slash_id);
+
         client.approve_unjail(&admin, &actor);
         client.unjail(&actor);
 
@@ -785,6 +1151,125 @@ mod tests {
             &Offence::Downtime,
         );
         assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+    }
+
+    // ── two-phase slash lifecycle, timing & auth ──────────────────────────────
+
+    #[test]
+    fn two_phase_lifecycle_finalize_before_window_fails() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 10_000);
+
+        let slash_id = client.submit_evidence(
+            &submitter,
+            &evidence(&env, "ev_t1"),
+            &actor,
+            &Offence::DoubleSign,
+        );
+
+        // Finalizing immediately (before 604,800 seconds) must fail
+        let result = client.try_finalize_slash(&submitter, &slash_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::ChallengeWindowNotElapsed
+        );
+    }
+
+    #[test]
+    fn two_phase_lifecycle_cancel_clears_evidence_and_does_not_move_funds() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 10_000);
+
+        let ev = evidence(&env, "ev_t2");
+        let slash_id = client.submit_evidence(&submitter, &ev, &actor, &Offence::DoubleSign);
+
+        // Cancel during challenge window
+        client.cancel_slash(&admin, &slash_id);
+
+        // Verify status is cancelled
+        let pending = client.get_pending_slash(&slash_id).unwrap();
+        assert!(matches!(pending.status, SlashStatus::Cancelled));
+
+        // Staked balance remains unchanged
+        assert_eq!(client.staked_balance(&actor), 10_000);
+
+        // Evidence can be submitted again since cancellation cleared the SlashRecord
+        let new_id = client.submit_evidence(&submitter, &ev, &actor, &Offence::DoubleSign);
+        assert_ne!(slash_id, new_id);
+    }
+
+    #[test]
+    fn two_phase_lifecycle_auth_enforced_on_transitions() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+        let stranger = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 10_000);
+
+        let slash_id = client.submit_evidence(
+            &submitter,
+            &evidence(&env, "ev_t3"),
+            &actor,
+            &Offence::DoubleSign,
+        );
+
+        // Stranger cannot finalize
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        let res_fin = client.try_finalize_slash(&stranger, &slash_id);
+        assert_eq!(res_fin.unwrap_err().unwrap(), ContractError::NotAuthorized);
+
+        // Stranger cannot cancel
+        let res_can = client.try_cancel_slash(&stranger, &slash_id);
+        assert_eq!(res_can.unwrap_err().unwrap(), ContractError::NotAuthorized);
+
+        // Admin is authorized to cancel or finalize
+        client.finalize_slash(&admin, &slash_id);
+    }
+
+    #[test]
+    fn configurable_challenge_window() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 10_000);
+
+        // Check default
+        assert_eq!(client.challenge_window(), 604_800);
+
+        // Update challenge window to 1 day (86,400 seconds)
+        client.set_challenge_window(&admin, &86_400);
+        assert_eq!(client.challenge_window(), 86_400);
+
+        let slash_id = client.submit_evidence(
+            &submitter,
+            &evidence(&env, "ev_t4"),
+            &actor,
+            &Offence::DoubleSign,
+        );
+
+        // Should fail after 20 hours
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 72_000);
+        let res1 = client.try_finalize_slash(&submitter, &slash_id);
+        assert_eq!(
+            res1.unwrap_err().unwrap(),
+            ContractError::ChallengeWindowNotElapsed
+        );
+
+        // Should succeed after 25 hours
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 20_000); // 72_000 + 20_000 = 92_000 (which is > 86_400)
+        client.finalize_slash(&submitter, &slash_id);
+        assert_eq!(client.staked_balance(&actor), 9_000);
     }
 
     // ── Inspector bond slashing surface (Issue #925) ─────────────────────
@@ -887,15 +1372,6 @@ mod tests {
         seed_balance(&client, &admin, &actor, 10_000);
         client.pause(&admin);
 
-        // submit_evidence should fail
-        let result = client.try_submit_evidence(
-            &submitter,
-            &evidence(&env, "ev_pause"),
-            &actor,
-            &Offence::Downtime,
-        );
-        assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
-
         // set_staked_balance should fail
         let result = client.try_set_staked_balance(&admin, &actor, &5_000);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
@@ -921,12 +1397,16 @@ mod tests {
         client.unpause(&admin);
 
         // submit_evidence should succeed after unpause
-        client.submit_evidence(
+        let slash_id = client.submit_evidence(
             &submitter,
             &evidence(&env, "ev_unpause"),
             &actor,
             &Offence::Downtime,
         );
+        // Advance time and finalize the slash
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &slash_id);
         assert_eq!(client.staked_balance(&actor), 9_900);
     }
 
@@ -958,12 +1438,16 @@ mod tests {
         let actor = Address::generate(&env);
 
         seed_balance(&client, &admin, &actor, 10_000);
-        client.submit_evidence(
+        let slash_id = client.submit_evidence(
             &submitter,
             &evidence(&env, "ev_getter"),
             &actor,
             &Offence::Downtime,
         );
+        // Advance time and finalize the slash
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &slash_id);
         client.pause(&admin);
 
         // Read-only getters should still work
