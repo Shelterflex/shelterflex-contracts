@@ -20,6 +20,8 @@ pub enum DataKey {
     VestingSchedule(Address),
     /// Token address being vested
     Token,
+    /// Reentrancy lock for cross-contract call protection
+    Reentrancy,
 }
 
 #[contracttype]
@@ -74,6 +76,8 @@ pub enum ContractError {
     Revoked = 14,
     /// Nothing left to claim
     NothingToClaim = 15,
+    /// Reentrancy detected — nested call rejected
+    ReentrancyDetected = 16,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -109,6 +113,42 @@ fn require_not_paused(env: &Env) -> Result<(), ContractError> {
         return Err(ContractError::Paused);
     }
     Ok(())
+}
+
+/// Reentrancy guard helpers
+fn enter_nonreentrant(env: &Env) -> Result<(), ContractError> {
+    if env
+        .storage()
+        .instance()
+        .get::<_, bool>(&DataKey::Reentrancy)
+        .unwrap_or(false)
+    {
+        return Err(ContractError::ReentrancyDetected);
+    }
+    env.storage().instance().set(&DataKey::Reentrancy, &true);
+    Ok(())
+}
+
+fn exit_nonreentrant(env: &Env) {
+    env.storage().instance().set(&DataKey::Reentrancy, &false);
+}
+
+/// Scope guard that ensures reentrancy lock is released on drop
+struct ReentrancyGuard<'a> {
+    env: &'a Env,
+}
+
+impl<'a> ReentrancyGuard<'a> {
+    fn new(env: &'a Env) -> Result<Self, ContractError> {
+        enter_nonreentrant(env)?;
+        Ok(ReentrancyGuard { env })
+    }
+}
+
+impl<'a> Drop for ReentrancyGuard<'a> {
+    fn drop(&mut self) {
+        exit_nonreentrant(self.env);
+    }
 }
 
 fn get_vesting_schedule(env: &Env, beneficiary: &Address) -> Option<VestingSchedule> {
@@ -258,6 +298,9 @@ impl VestingScheduleContract {
         schedule.claimed_amount += claimable;
         set_vesting_schedule(&env, &beneficiary, &schedule);
 
+        // Reentrancy guard before external operations - uses scope guard for automatic release
+        let _guard = ReentrancyGuard::new(&env)?;
+
         env.events().publish(
             (symbol_short!("vesting"), symbol_short!("claimed")),
             (beneficiary, claimable, current_time),
@@ -284,6 +327,9 @@ impl VestingScheduleContract {
         let unclaimed = schedule.total_amount - schedule.claimed_amount;
         schedule.revoked = true;
         set_vesting_schedule(&env, &beneficiary, &schedule);
+
+        // Reentrancy guard before external operations - uses scope guard for automatic release
+        let _guard = ReentrancyGuard::new(&env)?;
 
         env.events().publish(
             (symbol_short!("vesting"), symbol_short!("revoked")),
