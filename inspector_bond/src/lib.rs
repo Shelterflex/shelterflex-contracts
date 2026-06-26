@@ -17,6 +17,9 @@ pub enum DataKey {
     Bond(Address),
     /// Reentrancy lock for cross-contract call protection
     Reentrancy,
+    /// Reentrancy lock for cross-contract call protection
+    Reentrancy,
+
     // ── Two-Phase Inspector Slash (Issue #1082) ──────────────────────────────
     /// Challenge window for inspector slashes in seconds.
     ChallengeWindow,
