@@ -445,15 +445,8 @@ fn revoke_releases_guard_on_error() {
 
     // After error, guard should be released - create revocable and try again
     let stranger = Address::generate(&ctx.env);
-    ctx.contract.create_vesting_schedule(
-        &ctx.admin,
-        &stranger,
-        &TOTAL,
-        &START,
-        &END,
-        &CLIFF,
-        &true,
-    );
+    ctx.contract
+        .create_vesting_schedule(&ctx.admin, &stranger, &TOTAL, &START, &END, &CLIFF, &true);
     let returned = ctx.contract.revoke(&ctx.admin, &stranger);
     assert_eq!(returned, TOTAL);
 }

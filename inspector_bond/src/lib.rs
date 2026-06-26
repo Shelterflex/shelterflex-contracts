@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Symbol,
 };
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -17,6 +17,13 @@ pub enum DataKey {
     Bond(Address),
     /// Reentrancy lock for cross-contract call protection
     Reentrancy,
+    // ── Two-Phase Inspector Slash (Issue #1082) ──────────────────────────────
+    /// Challenge window for inspector slashes in seconds.
+    ChallengeWindow,
+    /// Monotonic slash-proposal counter.
+    NextSlashId,
+    /// Pending slash keyed by proposal ID.
+    PendingInspectorSlash(u64),
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -33,8 +40,14 @@ pub enum ContractError {
     LockNotExpired = 6,
     BondBelowMinimum = 7,
     NoBond = 8,
+    /// Slash proposal not found
+    SlashNotFound = 9,
+    /// Challenge window has not yet elapsed
+    ChallengeWindowNotElapsed = 10,
+    /// Slash is already finalized or cancelled
+    SlashAlreadyResolved = 11,
     /// Reentrancy detected — nested call rejected
-    ReentrancyDetected = 9,
+    ReentrancyDetected = 12,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -46,6 +59,33 @@ pub struct BondRecord {
     pub amount: i128,
     pub locked_until: u64,
     pub slash_count: u32,
+}
+
+/// Status of a two-phase inspector slash proposal.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum InspectorSlashStatus {
+    Pending = 0,
+    Finalized = 1,
+    Cancelled = 2,
+}
+
+/// A pending inspector slash proposal created by `propose_inspector_slash`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingInspectorSlash {
+    pub id: u64,
+    pub inspector: Address,
+    /// Pre-computed penalty amount (bps applied at proposal time).
+    pub penalty_amount: i128,
+    /// Ledger timestamp after which `finalize_inspector_slash` is allowed.
+    pub deadline: u64,
+    pub status: InspectorSlashStatus,
+    /// Unique report identifier supplied by the caller.
+    pub report_id: BytesN<32>,
+    /// Human-readable reason string.
+    pub reason: String,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -318,6 +358,207 @@ impl InspectorBondContract {
             .set(&DataKey::MinBondAmount, &amount);
         Ok(())
     }
+
+    // ── Two-Phase Inspector Slash (Issue #1082) ───────────────────────────────
+
+    /// Read the current challenge window (seconds). Default: 7 days.
+    pub fn inspector_challenge_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ChallengeWindow)
+            .unwrap_or(604_800)
+    }
+
+    /// Admin sets the challenge window duration (seconds).
+    pub fn set_inspector_challenge_window(
+        env: Env,
+        admin: Address,
+        window_secs: u64,
+    ) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::ChallengeWindow, &window_secs);
+        env.events().publish(
+            (
+                Symbol::new(&env, "inspector_bond"),
+                Symbol::new(&env, "challenge_window_updated"),
+            ),
+            window_secs,
+        );
+        Ok(())
+    }
+
+    fn next_slash_id(env: &Env) -> u64 {
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextSlashId)
+            .unwrap_or(0);
+        let next = id + 1;
+        env.storage().instance().set(&DataKey::NextSlashId, &next);
+        next
+    }
+
+    /// Propose a two-phase inspector slash.
+    ///
+    /// Records the penalty amount (computed from the current bond and configured
+    /// `slash_penalty_bps`) and sets a deadline equal to `now + challenge_window`.
+    /// The bond is NOT reduced yet.  Call `finalize_inspector_slash` after the
+    /// deadline, or `cancel_inspector_slash` to dismiss.
+    ///
+    /// Only the admin (arbiter) may propose.
+    pub fn propose_inspector_slash(
+        env: Env,
+        admin: Address,
+        inspector: Address,
+        report_id: BytesN<32>,
+        reason: String,
+    ) -> Result<u64, ContractError> {
+        require_admin(&env, &admin)?;
+
+        let bond: BondRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Bond(inspector.clone()))
+            .ok_or(ContractError::NoBond)?;
+
+        let penalty = bond.amount * slash_bps(&env) / 10_000;
+        let penalty_amount = if penalty > bond.amount {
+            bond.amount
+        } else {
+            penalty
+        };
+
+        let slash_id = Self::next_slash_id(&env);
+        let deadline = env.ledger().timestamp() + Self::inspector_challenge_window(env.clone());
+
+        let pending = PendingInspectorSlash {
+            id: slash_id,
+            inspector: inspector.clone(),
+            penalty_amount,
+            deadline,
+            status: InspectorSlashStatus::Pending,
+            report_id: report_id.clone(),
+            reason: reason.clone(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingInspectorSlash(slash_id), &pending);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "inspector_bond"),
+                Symbol::new(&env, "slash_proposed"),
+                inspector,
+            ),
+            (slash_id, penalty_amount, deadline),
+        );
+
+        Ok(slash_id)
+    }
+
+    /// Finalize a pending slash once the challenge window has elapsed.
+    ///
+    /// Applies the pre-computed penalty to the inspector's bond record.
+    /// Only the admin may finalize.
+    pub fn finalize_inspector_slash(
+        env: Env,
+        admin: Address,
+        slash_id: u64,
+    ) -> Result<i128, ContractError> {
+        require_admin(&env, &admin)?;
+
+        let mut pending: PendingInspectorSlash = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingInspectorSlash(slash_id))
+            .ok_or(ContractError::SlashNotFound)?;
+
+        if pending.status != InspectorSlashStatus::Pending {
+            return Err(ContractError::SlashAlreadyResolved);
+        }
+
+        if env.ledger().timestamp() < pending.deadline {
+            return Err(ContractError::ChallengeWindowNotElapsed);
+        }
+
+        // Apply bond reduction
+        let mut bond: BondRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Bond(pending.inspector.clone()))
+            .ok_or(ContractError::NoBond)?;
+
+        let actual_slash = pending.penalty_amount.min(bond.amount);
+        bond.amount = (bond.amount - actual_slash).max(0);
+        bond.slash_count += 1;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Bond(pending.inspector.clone()), &bond);
+
+        // Mark as finalized
+        pending.status = InspectorSlashStatus::Finalized;
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingInspectorSlash(slash_id), &pending);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "inspector_bond"),
+                Symbol::new(&env, "slash_finalized"),
+                pending.inspector.clone(),
+            ),
+            (slash_id, actual_slash, pending.report_id, pending.reason),
+        );
+
+        Ok(actual_slash)
+    }
+
+    /// Cancel a pending slash during the challenge window.
+    ///
+    /// Only the admin (arbiter) may cancel.  The bond is left unchanged.
+    pub fn cancel_inspector_slash(
+        env: Env,
+        admin: Address,
+        slash_id: u64,
+    ) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+
+        let mut pending: PendingInspectorSlash = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingInspectorSlash(slash_id))
+            .ok_or(ContractError::SlashNotFound)?;
+
+        if pending.status != InspectorSlashStatus::Pending {
+            return Err(ContractError::SlashAlreadyResolved);
+        }
+
+        pending.status = InspectorSlashStatus::Cancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingInspectorSlash(slash_id), &pending);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "inspector_bond"),
+                Symbol::new(&env, "slash_cancelled"),
+                pending.inspector,
+            ),
+            slash_id,
+        );
+
+        Ok(())
+    }
+
+    /// Query a pending slash proposal by ID.
+    pub fn get_pending_inspector_slash(env: Env, slash_id: u64) -> Option<PendingInspectorSlash> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingInspectorSlash(slash_id))
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -327,8 +568,7 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
-    use soroban_sdk::{Address, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env};
 
     fn setup(env: &Env) -> (Address, InspectorBondContractClient<'_>) {
         env.mock_all_auths();
@@ -540,5 +780,159 @@ mod tests {
         client.stake_bond(&inspector, &1_000);
         let amount = client.unstake_bond(&inspector);
         assert_eq!(amount, 1_000);
+    }
+
+    // ── Two-Phase Inspector Slash (Issue #1082) ───────────────────────────────
+
+    #[test]
+    fn two_phase_inspector_slash_happy_path() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let inspector = Address::generate(&env);
+
+        client.stake_bond(&inspector, &10_000);
+
+        let report_id = BytesN::from_array(&env, &[10u8; 32]);
+        let reason = soroban_sdk::String::from_str(&env, "misconduct");
+        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+
+        // Bond must NOT be reduced yet
+        let bond = client.get_bond(&inspector).unwrap();
+        assert_eq!(bond.amount, 10_000);
+        assert_eq!(bond.slash_count, 0);
+
+        // Status is Pending
+        let pending = client.get_pending_inspector_slash(&slash_id).unwrap();
+        assert!(matches!(pending.status, InspectorSlashStatus::Pending));
+
+        // Advance past the 7-day challenge window
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+
+        let slashed = client.finalize_inspector_slash(&admin, &slash_id);
+        assert_eq!(slashed, 1_000); // 10 % of 10_000
+
+        let bond = client.get_bond(&inspector).unwrap();
+        assert_eq!(bond.amount, 9_000);
+        assert_eq!(bond.slash_count, 1);
+
+        let pending = client.get_pending_inspector_slash(&slash_id).unwrap();
+        assert!(matches!(pending.status, InspectorSlashStatus::Finalized));
+    }
+
+    #[test]
+    fn two_phase_inspector_slash_cancel_preserves_bond() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let inspector = Address::generate(&env);
+
+        client.stake_bond(&inspector, &10_000);
+
+        let report_id = BytesN::from_array(&env, &[11u8; 32]);
+        let reason = soroban_sdk::String::from_str(&env, "disputed");
+        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+
+        // Cancel during the challenge window
+        client.cancel_inspector_slash(&admin, &slash_id);
+
+        // Bond unchanged
+        let bond = client.get_bond(&inspector).unwrap();
+        assert_eq!(bond.amount, 10_000);
+
+        // Status is Cancelled
+        let pending = client.get_pending_inspector_slash(&slash_id).unwrap();
+        assert!(matches!(pending.status, InspectorSlashStatus::Cancelled));
+
+        // Trying to finalize a cancelled slash must fail
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        let result = client.try_finalize_inspector_slash(&admin, &slash_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::SlashAlreadyResolved
+        );
+    }
+
+    #[test]
+    fn two_phase_inspector_slash_finalize_before_window_fails() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let inspector = Address::generate(&env);
+
+        client.stake_bond(&inspector, &10_000);
+
+        let report_id = BytesN::from_array(&env, &[12u8; 32]);
+        let reason = soroban_sdk::String::from_str(&env, "too soon");
+        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+
+        // Finalize immediately (before deadline) must be rejected
+        let result = client.try_finalize_inspector_slash(&admin, &slash_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::ChallengeWindowNotElapsed
+        );
+    }
+
+    #[test]
+    fn two_phase_inspector_slash_non_admin_rejected() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let inspector = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        client.stake_bond(&inspector, &10_000);
+
+        let report_id = BytesN::from_array(&env, &[13u8; 32]);
+        let reason = soroban_sdk::String::from_str(&env, "fraud");
+
+        // Non-admin cannot propose
+        let result = client.try_propose_inspector_slash(&attacker, &inspector, &report_id, &reason);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+
+        // Admin proposes, then attacker tries to finalize/cancel
+        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+
+        let result = client.try_finalize_inspector_slash(&attacker, &slash_id);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+
+        let result = client.try_cancel_inspector_slash(&attacker, &slash_id);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+    }
+
+    #[test]
+    fn two_phase_inspector_slash_configurable_window() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let inspector = Address::generate(&env);
+
+        // Default window is 7 days
+        assert_eq!(client.inspector_challenge_window(), 604_800);
+
+        // Override to 1 day
+        client.set_inspector_challenge_window(&admin, &86_400);
+        assert_eq!(client.inspector_challenge_window(), 86_400);
+
+        client.stake_bond(&inspector, &10_000);
+        let report_id = BytesN::from_array(&env, &[14u8; 32]);
+        let reason = soroban_sdk::String::from_str(&env, "short window");
+        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+
+        // 20 hours not enough
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 72_000);
+        let result = client.try_finalize_inspector_slash(&admin, &slash_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::ChallengeWindowNotElapsed
+        );
+
+        // 25 hours → past 1-day window
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 18_001); // 72_000 + 18_001 = 90_001 > 86_400
+        let slashed = client.finalize_inspector_slash(&admin, &slash_id);
+        assert_eq!(slashed, 1_000);
     }
 }
