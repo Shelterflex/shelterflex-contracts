@@ -13,6 +13,7 @@ members = [
   "deal_escrow",
   "contract_access",
   "timelock",
+  "rent_schedule",
   "vesting_schedule",
 
   "schema_registry",
