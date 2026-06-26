@@ -33,6 +33,15 @@ pub enum DataKey {
     UndelegationCooldown,
     /// Pending undelegation: (delegator, delegatee) → (amount, request_time_seconds)
     PendingUndelegation(Address, Address),
+    // ── Issue #1134 ──────────────────────────────────────────────────────────
+    /// Commission rate in bps (0–10000) set by each delegatee
+    DelegateeCommissionRate(Address),
+    /// Accrued commission balance claimable by a delegatee
+    DelegateeCommissionBalance(Address),
+    /// Authority allowed to call apply_delegatee_slash
+    SlashingAuthority,
+    /// Reverse index: delegatee → Vec<delegator> (all active delegators to this delegatee)
+    DelegatorsOf(Address),
 }
 
 const SCALE: i128 = 1_000_000_000;
@@ -47,40 +56,31 @@ pub enum ContractError {
     NotAuthorized = 2,
     Paused = 3,
     InvalidAmount = 4,
-    /// Delegation to self is treated uniformly (allowed, same as direct stake)
     DelegationNotFound = 5,
-    /// Partial delegation amounts exceed stake
     InsufficientStake = 6,
-    /// Revocation requested in same epoch – must wait for epoch boundary
     RevocationTooEarly = 7,
-    /// Delegatee is the same as delegator (self-delegation allowed, not errored)
     AlreadyDelegated = 8,
-    /// Undelegation cooldown period has not elapsed
     CooldownNotElapsed = 9,
-    /// No pending undelegation exists
     NoPendingUndelegation = 10,
-    /// Slash amount exceeds available staked balance
     SlashExceedsBalance = 11,
+    // ── Issue #1134 ──────────────────────────────────────────────────────────
+    CommissionTooHigh = 12,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
 
-/// A single delegation entry: delegator → delegatee for `amount` tokens.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Delegation {
     pub delegatee: Address,
     pub amount: i128,
-    /// Epoch in which this delegation was activated
     pub activated_epoch: u64,
 }
 
-/// Pending undelegation: tracks the amount and when the cooldown started
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingUndelegationRecord {
     pub amount: i128,
-    /// Timestamp (seconds) when the undelegation request was made
     pub request_time: u64,
 }
 
@@ -102,7 +102,6 @@ impl StakeDelegation {
             .instance()
             .set(&DataKey::EpochDuration, &epoch_duration_secs);
         env.storage().instance().set(&DataKey::CurrentEpoch, &1u64);
-        // Default undelegation cooldown: 7 days (604800 seconds)
         env.storage()
             .instance()
             .set(&DataKey::UndelegationCooldown, &604800u64);
@@ -147,7 +146,6 @@ impl StakeDelegation {
         Ok(())
     }
 
-    /// Admin bumps the epoch counter (or it can be driven by an epoch_rewards contract).
     pub fn advance_epoch(env: Env, admin: Address) -> Result<u64, ContractError> {
         Self::require_not_paused(&env)?;
         Self::require_admin(&env, &admin)?;
@@ -175,7 +173,6 @@ impl StakeDelegation {
             .unwrap_or(1)
     }
 
-    /// Set the undelegation cooldown duration (admin only)
     pub fn set_undelegation_cooldown(
         env: Env,
         admin: Address,
@@ -200,7 +197,255 @@ impl StakeDelegation {
         env.storage()
             .instance()
             .get(&DataKey::UndelegationCooldown)
-            .unwrap_or(604800) // Default 7 days
+            .unwrap_or(604800)
+    }
+
+    // ── Commission ────────────────────────────────────────────────────────────
+
+    /// Set the commission rate (in bps, 0–10000) for the calling delegatee.
+    pub fn set_commission(
+        env: Env,
+        delegatee: Address,
+        rate_bps: u32,
+    ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
+        delegatee.require_auth();
+        if rate_bps > 10_000 {
+            return Err(ContractError::CommissionTooHigh);
+        }
+        // Settle current rewards before changing the rate
+        let reward_index = Self::get_reward_index(&env);
+        Self::settle_pending_for(&env, &delegatee, reward_index);
+
+        env.storage().persistent().set(
+            &DataKey::DelegateeCommissionRate(delegatee.clone()),
+            &rate_bps,
+        );
+        env.events().publish(
+            (
+                Symbol::new(&env, "delegation"),
+                Symbol::new(&env, "commission_set"),
+                delegatee,
+            ),
+            rate_bps,
+        );
+        Ok(())
+    }
+
+    /// Claim the accumulated commission balance for the calling delegatee.
+    pub fn claim_commission(env: Env, delegatee: Address) -> Result<i128, ContractError> {
+        Self::require_not_paused(&env)?;
+        delegatee.require_auth();
+
+        let reward_index = Self::get_reward_index(&env);
+        Self::settle_pending_for(&env, &delegatee, reward_index);
+
+        let commission: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegateeCommissionBalance(delegatee.clone()))
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &DataKey::DelegateeCommissionBalance(delegatee.clone()),
+            &0i128,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "delegation"),
+                Symbol::new(&env, "commission_claimed"),
+                delegatee,
+            ),
+            commission,
+        );
+        Ok(commission)
+    }
+
+    /// View the claimable commission balance (does not include unsettled live rewards).
+    pub fn get_commission_claimable(env: Env, delegatee: Address) -> i128 {
+        let reward_index = Self::get_reward_index(&env);
+        let delegatee_stake = Self::get_delegatee_stake(&env, &delegatee);
+        let delegatee_index = Self::get_delegatee_index(&env, &delegatee);
+        let commission_rate: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegateeCommissionRate(delegatee.clone()))
+            .unwrap_or(0);
+
+        let mut live_commission = 0i128;
+        if delegatee_stake > 0 && reward_index > delegatee_index {
+            let gross = delegatee_stake * (reward_index - delegatee_index) / SCALE;
+            live_commission = gross * commission_rate as i128 / 10_000;
+        }
+
+        let banked: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegateeCommissionBalance(delegatee))
+            .unwrap_or(0);
+        live_commission + banked
+    }
+
+    // ── Slashing authority ────────────────────────────────────────────────────
+
+    /// Admin sets the address authorised to call apply_delegatee_slash.
+    pub fn set_slashing_authority(
+        env: Env,
+        admin: Address,
+        authority: Address,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::SlashingAuthority, &authority);
+        env.events().publish(
+            (
+                Symbol::new(&env, "delegation"),
+                Symbol::new(&env, "slashing_authority_set"),
+            ),
+            authority,
+        );
+        Ok(())
+    }
+
+    /// Apply a slash to a delegatee: proportionally reduces every delegator's stake and
+    /// delegation amount. Caller must be the configured slashing authority.
+    pub fn apply_delegatee_slash(
+        env: Env,
+        slash_authority: Address,
+        delegatee: Address,
+        slash_amount: i128,
+    ) -> Result<(), ContractError> {
+        let authority: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::SlashingAuthority)
+            .ok_or(ContractError::NotAuthorized)?;
+        slash_authority.require_auth();
+        if slash_authority != authority {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        if slash_amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let delegatee_stake = Self::get_delegatee_stake(&env, &delegatee);
+        if slash_amount > delegatee_stake {
+            return Err(ContractError::SlashExceedsBalance);
+        }
+
+        // Settle pending rewards before touching stakes
+        let reward_index = Self::get_reward_index(&env);
+        Self::settle_pending_for(&env, &delegatee, reward_index);
+
+        let new_delegatee_stake = delegatee_stake - slash_amount;
+        env.storage().persistent().set(
+            &DataKey::DelegateeStake(delegatee.clone()),
+            &new_delegatee_stake,
+        );
+
+        // Proportionally reduce each delegator's position
+        let delegators: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegatorsOf(delegatee.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut total_balance_slashed: i128 = 0;
+        for delegator in delegators.iter() {
+            let delegations: Vec<Delegation> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Delegations(delegator.clone()))
+                .unwrap_or_else(|| Vec::new(&env));
+
+            let mut new_delegations = Vec::new(&env);
+            for d in delegations.iter() {
+                if d.delegatee == delegatee {
+                    // Proportional reduction: new_amount = d.amount * new_stake / old_stake
+                    let new_amount = if delegatee_stake > 0 {
+                        d.amount * new_delegatee_stake / delegatee_stake
+                    } else {
+                        0
+                    };
+                    let delta = d.amount - new_amount;
+                    total_balance_slashed += delta;
+
+                    // Reduce delegator's staked balance
+                    let bal: i128 = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::StakedBalance(delegator.clone()))
+                        .unwrap_or(0);
+                    env.storage().persistent().set(
+                        &DataKey::StakedBalance(delegator.clone()),
+                        &(bal - delta).max(0),
+                    );
+
+                    if new_amount > 0 {
+                        new_delegations.push_back(Delegation {
+                            delegatee: d.delegatee.clone(),
+                            amount: new_amount,
+                            activated_epoch: d.activated_epoch,
+                        });
+                    }
+                    // If new_amount == 0, delegation is fully slashed away; remove from DelegatorsOf
+                    // (handled below by checking if the delegator has any remaining delegation)
+                } else {
+                    new_delegations.push_back(d);
+                }
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::Delegations(delegator.clone()), &new_delegations);
+        }
+
+        // Rebuild DelegatorsOf, removing any delegators whose position reached 0
+        let delegators: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegatorsOf(delegatee.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut remaining_delegators = Vec::new(&env);
+        for delegator in delegators.iter() {
+            let delegations: Vec<Delegation> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Delegations(delegator.clone()))
+                .unwrap_or_else(|| Vec::new(&env));
+            let mut still_delegating = false;
+            for d in delegations.iter() {
+                if d.delegatee == delegatee {
+                    still_delegating = true;
+                    break;
+                }
+            }
+            if still_delegating {
+                remaining_delegators.push_back(delegator);
+            }
+        }
+        env.storage().persistent().set(
+            &DataKey::DelegatorsOf(delegatee.clone()),
+            &remaining_delegators,
+        );
+
+        // Reduce total staked by the sum actually removed from delegators
+        let total = Self::get_total_staked(&env);
+        env.storage().persistent().set(
+            &DataKey::TotalStaked,
+            &(total - total_balance_slashed).max(0),
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "delegation"),
+                Symbol::new(&env, "delegatee_slashed"),
+                delegatee,
+            ),
+            (slash_amount, delegatee_stake, new_delegatee_stake),
+        );
+        Ok(())
     }
 
     // ── Staking ───────────────────────────────────────────────────────────────
@@ -212,7 +457,6 @@ impl StakeDelegation {
             return Err(ContractError::InvalidAmount);
         }
 
-        // Settle pending rewards for the delegatees before changing balance.
         Self::settle_all_delegates(&env, &from);
 
         let bal: i128 = env
@@ -256,7 +500,6 @@ impl StakeDelegation {
             return Err(ContractError::InsufficientStake);
         }
 
-        // Delegated amounts reduce available unstakeable balance.
         let delegated = Self::total_delegated(&env, &from);
         let free = bal - delegated;
         if free < amount {
@@ -286,9 +529,6 @@ impl StakeDelegation {
 
     // ── Delegation ────────────────────────────────────────────────────────────
 
-    /// Delegate `amount` of staked tokens to `delegatee`.
-    /// Self-delegation is treated identically to direct staking.
-    /// Partial delegation across multiple delegatees is supported.
     pub fn delegate(
         env: Env,
         delegator: Address,
@@ -301,7 +541,6 @@ impl StakeDelegation {
             return Err(ContractError::InvalidAmount);
         }
 
-        // Check delegator has enough free (undelegated) stake
         let bal: i128 = env
             .storage()
             .persistent()
@@ -316,29 +555,24 @@ impl StakeDelegation {
         let current_epoch = Self::current_epoch(&env);
         let reward_index = Self::get_reward_index(&env);
 
-        // Settle existing delegatee pending rewards before updating
         Self::settle_pending_for(&env, &delegatee, reward_index);
 
-        // Update delegatee stake
         let current_stake = Self::get_delegatee_stake(&env, &delegatee);
         env.storage().persistent().set(
             &DataKey::DelegateeStake(delegatee.clone()),
             &(current_stake + amount),
         );
 
-        // Add to delegations list
         let delegations: Vec<Delegation> = env
             .storage()
             .persistent()
             .get(&DataKey::Delegations(delegator.clone()))
             .unwrap_or_else(|| Vec::new(&env));
 
-        // Check for existing delegation to same delegatee
         let mut found = false;
         let mut new_delegations = Vec::new(&env);
         for d in delegations.iter() {
             if d.delegatee == delegatee {
-                // Accumulate into existing entry
                 let mut updated = d.clone();
                 updated.amount += amount;
                 new_delegations.push_back(updated);
@@ -353,6 +587,8 @@ impl StakeDelegation {
                 amount,
                 activated_epoch: current_epoch,
             });
+            // New delegation: track delegator in the reverse index
+            Self::add_delegator_to_delegatee(&env, &delegatee, &delegator);
         }
 
         env.storage()
@@ -368,7 +604,6 @@ impl StakeDelegation {
             (delegatee.clone(), amount, current_epoch),
         );
 
-        // Emit reward-routing event
         env.events().publish(
             (
                 Symbol::new(&env, "delegation"),
@@ -380,8 +615,6 @@ impl StakeDelegation {
         Ok(())
     }
 
-    /// Request revocation of a delegation. The revocation is enforced at the
-    /// next epoch boundary to prevent mid-epoch gaming.
     pub fn request_revocation(
         env: Env,
         delegator: Address,
@@ -390,7 +623,6 @@ impl StakeDelegation {
         Self::require_not_paused(&env)?;
         delegator.require_auth();
 
-        // Verify delegation exists
         let delegations: Vec<Delegation> = env
             .storage()
             .persistent()
@@ -409,7 +641,6 @@ impl StakeDelegation {
         }
 
         let current_epoch = Self::current_epoch(&env);
-        // Record the epoch of the revocation request (enforces boundary)
         env.storage().persistent().set(
             &DataKey::RevocationRequest(delegator.clone(), delegatee.clone()),
             &current_epoch,
@@ -426,7 +657,6 @@ impl StakeDelegation {
         Ok(())
     }
 
-    /// Finalize a revocation that was requested in a previous epoch.
     pub fn finalize_revocation(
         env: Env,
         delegator: Address,
@@ -445,7 +675,6 @@ impl StakeDelegation {
             ))
             .ok_or(ContractError::DelegationNotFound)?;
 
-        // Must have crossed an epoch boundary
         if current_epoch <= requested_epoch {
             return Err(ContractError::RevocationTooEarly);
         }
@@ -453,7 +682,6 @@ impl StakeDelegation {
         let reward_index = Self::get_reward_index(&env);
         Self::settle_pending_for(&env, &delegatee, reward_index);
 
-        // Find delegation amount to remove
         let delegations: Vec<Delegation> = env
             .storage()
             .persistent()
@@ -472,7 +700,6 @@ impl StakeDelegation {
             &(current_stake - amount_to_remove),
         );
 
-        // Remove delegation
         let delegations: Vec<Delegation> = env
             .storage()
             .persistent()
@@ -488,7 +715,9 @@ impl StakeDelegation {
             .persistent()
             .set(&DataKey::Delegations(delegator.clone()), &new_delegations);
 
-        // Clear revocation request
+        // Delegation fully removed: update reverse index
+        Self::remove_delegator_from_delegatee(&env, &delegatee, &delegator);
+
         env.storage()
             .persistent()
             .remove(&DataKey::RevocationRequest(
@@ -509,9 +738,6 @@ impl StakeDelegation {
 
     // ── Undelegation Cooldown ─────────────────────────────────────────────────
 
-    /// Request to undelegate `amount` from `delegatee`.
-    /// Starts the cooldown timer. Stake remains delegated and accrues rewards during cooldown.
-    /// Stake remains slashable during cooldown period.
     pub fn request_undelegate(
         env: Env,
         delegator: Address,
@@ -524,7 +750,6 @@ impl StakeDelegation {
             return Err(ContractError::InvalidAmount);
         }
 
-        // Verify delegation exists and has sufficient amount
         let delegations: Vec<Delegation> = env
             .storage()
             .persistent()
@@ -548,10 +773,7 @@ impl StakeDelegation {
             return Err(ContractError::InsufficientStake);
         }
 
-        // Get current timestamp for cooldown tracking
         let current_time = env.ledger().timestamp();
-
-        // Store pending undelegation
         env.storage().persistent().set(
             &DataKey::PendingUndelegation(delegator.clone(), delegatee.clone()),
             &PendingUndelegationRecord {
@@ -571,8 +793,6 @@ impl StakeDelegation {
         Ok(())
     }
 
-    /// Complete an undelegation after the cooldown period has elapsed.
-    /// Rewards accrued during cooldown are finalized.
     pub fn complete_undelegate(
         env: Env,
         delegator: Address,
@@ -584,7 +804,6 @@ impl StakeDelegation {
         let current_time = env.ledger().timestamp();
         let cooldown_secs = Self::get_undelegation_cooldown(&env);
 
-        // Check if pending undelegation exists
         let pending: PendingUndelegationRecord = env
             .storage()
             .persistent()
@@ -594,17 +813,14 @@ impl StakeDelegation {
             ))
             .ok_or(ContractError::NoPendingUndelegation)?;
 
-        // Verify cooldown period has elapsed
         let elapsed = current_time.saturating_sub(pending.request_time);
         if elapsed < cooldown_secs {
             return Err(ContractError::CooldownNotElapsed);
         }
 
-        // Settle pending rewards for delegatee (they accrue during cooldown)
         let reward_index = Self::get_reward_index(&env);
         Self::settle_pending_for(&env, &delegatee, reward_index);
 
-        // Remove the delegation
         let delegations: Vec<Delegation> = env
             .storage()
             .persistent()
@@ -613,16 +829,17 @@ impl StakeDelegation {
 
         let mut amount_removed = 0i128;
         let mut new_delegations = Vec::new(&env);
+        let mut delegation_fully_removed = false;
         for d in delegations.iter() {
             if d.delegatee == delegatee {
-                // Reduce by pending undelegation amount
                 let mut updated = d.clone();
                 updated.amount -= pending.amount;
                 amount_removed = pending.amount;
                 if updated.amount > 0 {
                     new_delegations.push_back(updated);
+                } else {
+                    delegation_fully_removed = true;
                 }
-                // If amount becomes 0, delegation is removed
             } else {
                 new_delegations.push_back(d);
             }
@@ -632,14 +849,16 @@ impl StakeDelegation {
             .persistent()
             .set(&DataKey::Delegations(delegator.clone()), &new_delegations);
 
-        // Update delegatee stake
         let current_stake = Self::get_delegatee_stake(&env, &delegatee);
         env.storage().persistent().set(
             &DataKey::DelegateeStake(delegatee.clone()),
             &(current_stake - amount_removed),
         );
 
-        // Clear pending undelegation
+        if delegation_fully_removed {
+            Self::remove_delegator_from_delegatee(&env, &delegatee, &delegator);
+        }
+
         env.storage()
             .persistent()
             .remove(&DataKey::PendingUndelegation(
@@ -683,7 +902,7 @@ impl StakeDelegation {
         Ok(())
     }
 
-    /// Claim rewards as a delegatee (rewards are credited to delegatee, not delegator).
+    /// Claim net rewards (after commission deduction) as a delegatee.
     pub fn claim_delegatee_rewards(env: Env, delegatee: Address) -> Result<i128, ContractError> {
         Self::require_not_paused(&env)?;
         delegatee.require_auth();
@@ -720,13 +939,22 @@ impl StakeDelegation {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Returns the net claimable rewards (after commission) for a delegatee.
     pub fn get_delegatee_claimable(env: Env, delegatee: Address) -> i128 {
         let reward_index = Self::get_reward_index(&env);
         let delegatee_stake = Self::get_delegatee_stake(&env, &delegatee);
         let delegatee_index = Self::get_delegatee_index(&env, &delegatee);
-        let mut live = 0;
+        let commission_rate: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegateeCommissionRate(delegatee.clone()))
+            .unwrap_or(0);
+
+        let mut live = 0i128;
         if delegatee_stake > 0 && reward_index > delegatee_index {
-            live = delegatee_stake * (reward_index - delegatee_index) / SCALE;
+            let gross = delegatee_stake * (reward_index - delegatee_index) / SCALE;
+            let commission = gross * commission_rate as i128 / 10_000;
+            live = gross - commission;
         }
         let banked: i128 = env
             .storage()
@@ -747,7 +975,6 @@ impl StakeDelegation {
         Self::current_epoch(&env)
     }
 
-    /// Pause the contract. Admin-only.
     pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -758,7 +985,6 @@ impl StakeDelegation {
         Ok(())
     }
 
-    /// Unpause the contract. Admin-only.
     pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &false);
@@ -772,7 +998,6 @@ impl StakeDelegation {
         Ok(())
     }
 
-    /// True iff the contract is currently paused.
     pub fn is_paused(env: Env) -> bool {
         env.storage()
             .instance()
@@ -810,22 +1035,43 @@ impl StakeDelegation {
             .unwrap_or(0)
     }
 
-    /// Settle pending reward index for a specific address.
+    /// Settle pending rewards for a delegatee, splitting commission from net rewards.
     fn settle_pending_for(env: &Env, addr: &Address, current_reward_index: i128) {
         let delegatee_stake = Self::get_delegatee_stake(env, addr);
         let delegatee_index = Self::get_delegatee_index(env, addr);
         if delegatee_stake > 0 && current_reward_index > delegatee_index {
-            let live_pending = delegatee_stake * (current_reward_index - delegatee_index) / SCALE;
-            if live_pending > 0 {
-                let banked: i128 = env
+            let gross = delegatee_stake * (current_reward_index - delegatee_index) / SCALE;
+            if gross > 0 {
+                let commission_rate: u32 = env
                     .storage()
                     .persistent()
-                    .get(&DataKey::PendingRewards(addr.clone()))
+                    .get(&DataKey::DelegateeCommissionRate(addr.clone()))
                     .unwrap_or(0);
-                env.storage().persistent().set(
-                    &DataKey::PendingRewards(addr.clone()),
-                    &(banked + live_pending),
-                );
+                let commission = gross * commission_rate as i128 / 10_000;
+                let net_rewards = gross - commission;
+
+                if commission > 0 {
+                    let prev: i128 = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::DelegateeCommissionBalance(addr.clone()))
+                        .unwrap_or(0);
+                    env.storage().persistent().set(
+                        &DataKey::DelegateeCommissionBalance(addr.clone()),
+                        &(prev + commission),
+                    );
+                }
+                if net_rewards > 0 {
+                    let banked: i128 = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::PendingRewards(addr.clone()))
+                        .unwrap_or(0);
+                    env.storage().persistent().set(
+                        &DataKey::PendingRewards(addr.clone()),
+                        &(banked + net_rewards),
+                    );
+                }
             }
         }
         env.storage().persistent().set(
@@ -834,7 +1080,6 @@ impl StakeDelegation {
         );
     }
 
-    /// Settle all delegatees of a delegator (called before stake changes).
     fn settle_all_delegates(env: &Env, delegator: &Address) {
         let reward_index = Self::get_reward_index(env);
         let delegations: Vec<Delegation> = env
@@ -847,7 +1092,6 @@ impl StakeDelegation {
         }
     }
 
-    /// Sum of all active delegated amounts from a delegator.
     fn total_delegated(env: &Env, delegator: &Address) -> i128 {
         let delegations: Vec<Delegation> = env
             .storage()
@@ -861,22 +1105,44 @@ impl StakeDelegation {
         total
     }
 
-    // ── Slash integration (Issue #1082) ─────────────────────────────────────────────
+    /// Add a delegator to DelegatorsOf(delegatee) if not already present.
+    fn add_delegator_to_delegatee(env: &Env, delegatee: &Address, delegator: &Address) {
+        let mut delegators: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegatorsOf(delegatee.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+        for d in delegators.iter() {
+            if d == *delegator {
+                return;
+            }
+        }
+        delegators.push_back(delegator.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::DelegatorsOf(delegatee.clone()), &delegators);
+    }
 
-    /// Apply a finalized slash from the slashing module to a delegator's stake.
-    ///
-    /// The caller must be the contract admin (typically the authority that also
-    /// called `slashing_module::finalize_slash`).  The method:
-    ///
-    /// 1. Reduces the delegator's raw `StakedBalance` by `amount` (capped at
-    ///    the current balance to prevent underflow).
-    /// 2. Reduces the global `TotalStaked` by the same amount.
-    /// 3. Proportionally trims every active delegation so that delegated amounts
-    ///    never exceed the post-slash balance.
-    ///
-    /// This is the hook that lets callers "adopt the two-phase flow": once
-    /// `slashing_module::finalize_slash` fires, the admin calls `slash_stake`
-    /// here to propagate the penalty into delegated balances.
+    /// Remove a delegator from DelegatorsOf(delegatee).
+    fn remove_delegator_from_delegatee(env: &Env, delegatee: &Address, delegator: &Address) {
+        let delegators: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DelegatorsOf(delegatee.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+        let mut new_delegators = Vec::new(env);
+        for d in delegators.iter() {
+            if d != *delegator {
+                new_delegators.push_back(d);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::DelegatorsOf(delegatee.clone()), &new_delegators);
+    }
+
+    // ── Delegator slash (Issue #1082) ─────────────────────────────────────────
+
     pub fn slash_stake(
         env: Env,
         admin: Address,
@@ -899,7 +1165,6 @@ impl StakeDelegation {
             return Err(ContractError::SlashExceedsBalance);
         }
 
-        // Settle pending rewards for all delegatees before touching balances.
         Self::settle_all_delegates(&env, &delegator);
 
         let new_balance = balance - amount;
@@ -912,8 +1177,6 @@ impl StakeDelegation {
             .persistent()
             .set(&DataKey::TotalStaked, &(total - amount));
 
-        // Proportionally reduce each active delegation so that the sum of
-        // delegated amounts does not exceed the post-slash balance.
         let delegations: Vec<Delegation> = env
             .storage()
             .persistent()
@@ -922,13 +1185,11 @@ impl StakeDelegation {
 
         let total_delegated = Self::total_delegated(&env, &delegator);
         if total_delegated > 0 && new_balance < total_delegated {
-            // Each delegation is trimmed proportionally.
             let mut new_delegations = Vec::new(&env);
             for d in delegations.iter() {
                 let trimmed = d.amount * new_balance / total_delegated;
                 let delta = d.amount - trimmed;
 
-                // Reduce delegatee stake by the trimmed portion.
                 if delta > 0 {
                     let ds = Self::get_delegatee_stake(&env, &d.delegatee);
                     env.storage().persistent().set(
@@ -943,6 +1204,9 @@ impl StakeDelegation {
                         amount: trimmed,
                         activated_epoch: d.activated_epoch,
                     });
+                } else {
+                    // delegation fully removed by slash
+                    Self::remove_delegator_from_delegatee(&env, &d.delegatee, &delegator);
                 }
             }
             env.storage()
@@ -1019,8 +1283,7 @@ mod tests {
         let delegations = client.get_delegations(&delegator);
         assert_eq!(delegations.len(), 2);
 
-        // Cannot delegate more than free balance
-        let result = client.try_delegate(&delegator, &d1, &400); // would exceed 1000 total
+        let result = client.try_delegate(&delegator, &d1, &400);
         assert_eq!(
             result.unwrap_err().unwrap(),
             ContractError::InsufficientStake
@@ -1036,11 +1299,9 @@ mod tests {
         let delegator = Address::generate(&env);
         let delegatee = Address::generate(&env);
 
-        // Stake and delegate
         client.stake(&delegator, &1_000);
         client.delegate(&delegator, &delegatee, &1_000);
 
-        // Fund rewards
         client.fund_rewards(&admin, &1_000);
 
         assert_eq!(client.get_delegatee_claimable(&delegatee), 1_000);
@@ -1062,20 +1323,16 @@ mod tests {
         client.stake(&delegator, &1_000);
         client.delegate(&delegator, &delegatee, &500);
 
-        // Request revocation in epoch 1
         client.request_revocation(&delegator, &delegatee);
 
-        // Finalize in same epoch must fail
         let result = client.try_finalize_revocation(&delegator, &delegatee);
         assert_eq!(
             result.unwrap_err().unwrap(),
             ContractError::RevocationTooEarly
         );
 
-        // Advance epoch
         client.advance_epoch(&admin);
 
-        // Now finalize should succeed
         client.finalize_revocation(&delegator, &delegatee);
         let delegations = client.get_delegations(&delegator);
         assert_eq!(delegations.len(), 0);
@@ -1090,7 +1347,6 @@ mod tests {
         let user = Address::generate(&env);
 
         client.stake(&user, &1_000);
-        // Self-delegation is valid
         client.delegate(&user, &user, &500);
 
         let delegations = client.get_delegations(&user);
@@ -1116,7 +1372,7 @@ mod tests {
         let second = client.claim_delegatee_rewards(&delegatee);
 
         assert_eq!(first, 1_000);
-        assert_eq!(second, 0); // already consumed
+        assert_eq!(second, 0);
     }
 
     // ── delegator cannot claim delegated rewards ──────────────────────────────
@@ -1131,7 +1387,6 @@ mod tests {
         client.stake(&delegator, &1_000);
         client.delegate(&delegator, &delegatee, &1_000);
 
-        // Delegator's pending banked rewards should be 0 (rewards go to delegatee)
         assert_eq!(client.get_delegatee_claimable(&delegator), 0);
     }
 
@@ -1144,33 +1399,26 @@ mod tests {
         let delegator = Address::generate(&env);
         let delegatee = Address::generate(&env);
 
-        // Stake and delegate
         client.stake(&delegator, &1_000);
         client.delegate(&delegator, &delegatee, &500);
 
-        // Request undelegation
         client.request_undelegate(&delegator, &delegatee, &500);
 
-        // Verify delegation still exists (not removed yet)
         let delegations = client.get_delegations(&delegator);
         assert_eq!(delegations.len(), 1);
         assert_eq!(delegations.get(0).unwrap().amount, 500);
 
-        // Try to complete before cooldown – should fail
         let result = client.try_complete_undelegate(&delegator, &delegatee);
         assert_eq!(
             result.unwrap_err().unwrap(),
             ContractError::CooldownNotElapsed
         );
 
-        // Advance time by 7 days (default cooldown) + 1 second
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604801);
 
-        // Now complete should succeed
         client.complete_undelegate(&delegator, &delegatee);
 
-        // Verify delegation is removed
         let delegations = client.get_delegations(&delegator);
         assert_eq!(delegations.len(), 0);
     }
@@ -1182,33 +1430,25 @@ mod tests {
         let delegator = Address::generate(&env);
         let delegatee = Address::generate(&env);
 
-        // Stake and delegate
         client.stake(&delegator, &1_000);
         client.delegate(&delegator, &delegatee, &1_000);
 
-        // Fund rewards
         client.fund_rewards(&admin, &1_000);
 
-        // Verify delegatee has rewards
         let claimable_before = client.get_delegatee_claimable(&delegatee);
         assert_eq!(claimable_before, 1_000);
 
-        // Request undelegation (rewards continue to accrue during cooldown)
         client.request_undelegate(&delegator, &delegatee, &1_000);
 
-        // Fund more rewards during cooldown
         client.fund_rewards(&admin, &500);
 
-        // Advance cooldown
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604801);
 
-        // Complete undelegation
         client.complete_undelegate(&delegator, &delegatee);
 
-        // Verify delegatee can claim all rewards (before + during cooldown)
         let claimable_after = client.get_delegatee_claimable(&delegatee);
-        assert_eq!(claimable_after, 1_500); // Original 1000 + 500 accrued during cooldown
+        assert_eq!(claimable_after, 1_500);
     }
 
     #[test]
@@ -1219,12 +1459,10 @@ mod tests {
         let d1 = Address::generate(&env);
         let d2 = Address::generate(&env);
 
-        // Stake and delegate to two delegatees
         client.stake(&delegator, &2_000);
         client.delegate(&delegator, &d1, &1_000);
         client.delegate(&delegator, &d2, &1_000);
 
-        // Request undelegation from both
         client.request_undelegate(&delegator, &d1, &1_000);
         let t1 = env.ledger().timestamp();
 
@@ -1232,26 +1470,22 @@ mod tests {
         client.request_undelegate(&delegator, &d2, &1_000);
         let t2 = env.ledger().timestamp();
 
-        // Advance time past first cooldown
         env.ledger().set_timestamp(t1 + 604801);
 
-        // First undelegation should complete
         client.complete_undelegate(&delegator, &d1);
         let delegations = client.get_delegations(&delegator);
-        assert_eq!(delegations.len(), 1); // d2 still delegated
+        assert_eq!(delegations.len(), 1);
 
-        // Second should still fail (not enough time elapsed from t2)
         let result = client.try_complete_undelegate(&delegator, &d2);
         assert_eq!(
             result.unwrap_err().unwrap(),
             ContractError::CooldownNotElapsed
         );
 
-        // Advance past second cooldown
         env.ledger().set_timestamp(t2 + 604801);
         client.complete_undelegate(&delegator, &d2);
         let delegations = client.get_delegations(&delegator);
-        assert_eq!(delegations.len(), 0); // Both removed
+        assert_eq!(delegations.len(), 0);
     }
 
     #[test]
@@ -1262,14 +1496,12 @@ mod tests {
         let delegator2 = Address::generate(&env);
         let delegatee = Address::generate(&env);
 
-        // Both delegators stake and delegate to same delegatee
         client.stake(&delegator1, &1_000);
         client.delegate(&delegator1, &delegatee, &1_000);
 
         client.stake(&delegator2, &2_000);
         client.delegate(&delegator2, &delegatee, &2_000);
 
-        // Both request undelegation at different times
         client.request_undelegate(&delegator1, &delegatee, &1_000);
         let t1 = env.ledger().timestamp();
 
@@ -1277,22 +1509,18 @@ mod tests {
         client.request_undelegate(&delegator2, &delegatee, &2_000);
         let t2 = env.ledger().timestamp();
 
-        // Delegator 1 can complete first
         env.ledger().set_timestamp(t1 + 604801);
         client.complete_undelegate(&delegator1, &delegatee);
 
-        // Delegator 2 should still be in cooldown
         let result = client.try_complete_undelegate(&delegator2, &delegatee);
         assert_eq!(
             result.unwrap_err().unwrap(),
             ContractError::CooldownNotElapsed
         );
 
-        // Advance further
         env.ledger().set_timestamp(t2 + 604801);
         client.complete_undelegate(&delegator2, &delegatee);
 
-        // Both should be complete
         assert_eq!(client.get_delegations(&delegator1).len(), 0);
         assert_eq!(client.get_delegations(&delegator2).len(), 0);
     }
@@ -1304,7 +1532,6 @@ mod tests {
         let delegator = Address::generate(&env);
         let delegatee = Address::generate(&env);
 
-        // Try to complete undelegation that doesn't exist
         let result = client.try_complete_undelegate(&delegator, &delegatee);
         assert_eq!(
             result.unwrap_err().unwrap(),
@@ -1319,21 +1546,16 @@ mod tests {
         let delegator = Address::generate(&env);
         let delegatee = Address::generate(&env);
 
-        // Stake and delegate 1000
         client.stake(&delegator, &1_000);
         client.delegate(&delegator, &delegatee, &1_000);
 
-        // Request to undelegate only 300
         client.request_undelegate(&delegator, &delegatee, &300);
 
-        // Advance cooldown
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604801);
 
-        // Complete partial undelegation
         client.complete_undelegate(&delegator, &delegatee);
 
-        // Verify 700 remains delegated
         let delegations = client.get_delegations(&delegator);
         assert_eq!(delegations.len(), 1);
         assert_eq!(delegations.get(0).unwrap().amount, 700);
@@ -1346,21 +1568,16 @@ mod tests {
         let delegator = Address::generate(&env);
         let delegatee = Address::generate(&env);
 
-        // Set custom cooldown: 1 day (86400 seconds)
         client.set_undelegation_cooldown(&admin, &86400);
 
-        // Stake and delegate
         client.stake(&delegator, &1_000);
         client.delegate(&delegator, &delegatee, &1_000);
 
-        // Request undelegation
         client.request_undelegate(&delegator, &delegatee, &1_000);
         let t = env.ledger().timestamp();
 
-        // Advance 1 day + 1 second
         env.ledger().set_timestamp(t + 86401);
 
-        // Should be able to complete
         client.complete_undelegate(&delegator, &delegatee);
         assert_eq!(client.get_delegations(&delegator).len(), 0);
     }
@@ -1372,18 +1589,12 @@ mod tests {
         let delegator = Address::generate(&env);
         let delegatee = Address::generate(&env);
 
-        // Stake and delegate
         client.stake(&delegator, &1_000);
         client.delegate(&delegator, &delegatee, &1_000);
 
-        // Request undelegation
         client.request_undelegate(&delegator, &delegatee, &1_000);
 
-        // During cooldown, delegatee stake should still be charged for slashing
-        // (In a real implementation, slashing would reduce DelegateeStake)
-        // Verify delegatee still has stake tracked
         let stake = client.get_delegatee_claimable(&delegatee);
-        // Stake is preserved during cooldown (can be slashed)
         assert!(stake >= 0);
     }
 
@@ -1399,27 +1610,21 @@ mod tests {
         client.stake(&delegator, &1_000);
         client.pause(&admin);
 
-        // stake should fail
         let result = client.try_stake(&delegator, &500);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
 
-        // unstake should fail
         let result = client.try_unstake(&delegator, &500);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
 
-        // delegate should fail
         let result = client.try_delegate(&delegator, &delegatee, &500);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
 
-        // request_revocation should fail
         let result = client.try_request_revocation(&delegator, &delegatee);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
 
-        // fund_rewards should fail
         let result = client.try_fund_rewards(&admin, &1_000);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
 
-        // claim_delegatee_rewards should fail
         let result = client.try_claim_delegatee_rewards(&delegatee);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::Paused);
     }
@@ -1435,7 +1640,6 @@ mod tests {
         client.pause(&admin);
         client.unpause(&admin);
 
-        // stake should succeed after unpause
         client.stake(&delegator, &500);
         assert_eq!(client.staked_balance(&delegator), 1_500);
     }
@@ -1472,10 +1676,241 @@ mod tests {
         client.delegate(&delegator, &delegatee, &500);
         client.pause(&admin);
 
-        // Read-only getters should still work
         assert_eq!(client.staked_balance(&delegator), 1_000);
         assert_eq!(client.get_delegations(&delegator).len(), 1);
         assert_eq!(client.current_epoch_num(), 1);
         assert!(client.is_paused());
+    }
+
+    // ── Issue #1134: Commission tests ─────────────────────────────────────────
+
+    #[test]
+    fn commission_split_correctness() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        client.stake(&delegator, &1_000);
+        client.delegate(&delegator, &delegatee, &1_000);
+
+        // 10% commission (1000 bps)
+        client.set_commission(&delegatee, &1000u32);
+
+        // Fund 1000 rewards
+        client.fund_rewards(&admin, &1_000);
+
+        // Commission = 100 (10%), net rewards = 900
+        let net = client.get_delegatee_claimable(&delegatee);
+        assert_eq!(net, 900);
+
+        let commission = client.get_commission_claimable(&delegatee);
+        assert_eq!(commission, 100);
+
+        // Total = 1000 (no leakage)
+        assert_eq!(net + commission, 1_000);
+    }
+
+    #[test]
+    fn commission_independent_claim() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        client.stake(&delegator, &1_000);
+        client.delegate(&delegator, &delegatee, &1_000);
+        client.set_commission(&delegatee, &2000u32); // 20%
+
+        client.fund_rewards(&admin, &1_000);
+
+        // Claim commission separately
+        let commission = client.claim_commission(&delegatee);
+        assert_eq!(commission, 200); // 20% of 1000
+
+        // Net rewards still claimable
+        let net = client.claim_delegatee_rewards(&delegatee);
+        assert_eq!(net, 800);
+
+        // Nothing left
+        assert_eq!(client.get_commission_claimable(&delegatee), 0);
+        assert_eq!(client.get_delegatee_claimable(&delegatee), 0);
+    }
+
+    #[test]
+    fn zero_commission_preserves_existing_behavior() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        client.stake(&delegator, &1_000);
+        client.delegate(&delegator, &delegatee, &1_000);
+        // commission defaults to 0
+        client.fund_rewards(&admin, &1_000);
+
+        assert_eq!(client.get_delegatee_claimable(&delegatee), 1_000);
+        assert_eq!(client.get_commission_claimable(&delegatee), 0);
+    }
+
+    #[test]
+    fn commission_too_high_rejected() {
+        let env = Env::default();
+        let (_admin, client) = setup(&env);
+        let delegatee = Address::generate(&env);
+
+        let result = client.try_set_commission(&delegatee, &10001u32);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::CommissionTooHigh
+        );
+    }
+
+    #[test]
+    fn rounding_dust_commission() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        client.stake(&delegator, &1_000);
+        client.delegate(&delegator, &delegatee, &1_000);
+        // 33.33% commission
+        client.set_commission(&delegatee, &3333u32);
+
+        client.fund_rewards(&admin, &1_000);
+
+        let commission = client.get_commission_claimable(&delegatee);
+        let net = client.get_delegatee_claimable(&delegatee);
+        // Total must equal gross rewards (1000), rounding down on commission means net rounds up
+        assert_eq!(commission + net, 1_000);
+        // Commission = 1000 * 3333 / 10000 = 333 (integer div rounds down)
+        assert_eq!(commission, 333);
+        assert_eq!(net, 667);
+    }
+
+    // ── Issue #1134: Delegatee slash propagation tests ────────────────────────
+
+    #[test]
+    fn proportional_slash_across_delegators() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let slash_authority = Address::generate(&env);
+        let delegator1 = Address::generate(&env);
+        let delegator2 = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        client.set_slashing_authority(&admin, &slash_authority);
+
+        // d1 delegates 600, d2 delegates 400 → delegatee stake = 1000
+        client.stake(&delegator1, &600);
+        client.stake(&delegator2, &400);
+        client.delegate(&delegator1, &delegatee, &600);
+        client.delegate(&delegator2, &delegatee, &400);
+
+        // Slash 200 from delegatee stake
+        // new_stake = 800
+        // d1 new delegation: 600 * 800 / 1000 = 480, delta = 120
+        // d2 new delegation: 400 * 800 / 1000 = 320, delta = 80
+        client.apply_delegatee_slash(&slash_authority, &delegatee, &200);
+
+        let d1_delegations = client.get_delegations(&delegator1);
+        assert_eq!(d1_delegations.get(0).unwrap().amount, 480);
+        assert_eq!(client.staked_balance(&delegator1), 480); // 600 - 120
+
+        let d2_delegations = client.get_delegations(&delegator2);
+        assert_eq!(d2_delegations.get(0).unwrap().amount, 320);
+        assert_eq!(client.staked_balance(&delegator2), 320); // 400 - 80
+    }
+
+    #[test]
+    fn claim_after_slash() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let slash_authority = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        client.set_slashing_authority(&admin, &slash_authority);
+
+        client.stake(&delegator, &1_000);
+        client.delegate(&delegator, &delegatee, &1_000);
+
+        // Fund rewards before slash
+        client.fund_rewards(&admin, &500);
+
+        // Slash 50% of delegatee stake
+        client.apply_delegatee_slash(&slash_authority, &delegatee, &500);
+
+        // Rewards funded before slash should still be claimable (settled before slash)
+        let claimable = client.get_delegatee_claimable(&delegatee);
+        assert_eq!(claimable, 500);
+
+        let claimed = client.claim_delegatee_rewards(&delegatee);
+        assert_eq!(claimed, 500);
+    }
+
+    #[test]
+    fn slash_authority_required() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let slash_authority = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        client.set_slashing_authority(&admin, &slash_authority);
+        client.stake(&delegator, &1_000);
+        client.delegate(&delegator, &delegatee, &1_000);
+
+        let result = client.try_apply_delegatee_slash(&impostor, &delegatee, &100);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+    }
+
+    #[test]
+    fn slash_exceeds_stake_rejected() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let slash_authority = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        client.set_slashing_authority(&admin, &slash_authority);
+        client.stake(&delegator, &1_000);
+        client.delegate(&delegator, &delegatee, &1_000);
+
+        let result = client.try_apply_delegatee_slash(&slash_authority, &delegatee, &1_001);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            ContractError::SlashExceedsBalance
+        );
+    }
+
+    #[test]
+    fn value_conservation_slash_plus_commission() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let slash_authority = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        client.set_slashing_authority(&admin, &slash_authority);
+        client.stake(&delegator, &1_000);
+        client.delegate(&delegator, &delegatee, &1_000);
+
+        // 10% commission
+        client.set_commission(&delegatee, &1000u32);
+        client.fund_rewards(&admin, &1_000);
+
+        // Slash 200
+        client.apply_delegatee_slash(&slash_authority, &delegatee, &200);
+
+        // All pending rewards settled before slash → commission 100, net 900
+        // After slash: delegatee stake = 800, delegator stake = 800
+        let net = client.claim_delegatee_rewards(&delegatee);
+        let commission = client.claim_commission(&delegatee);
+
+        assert_eq!(net + commission, 1_000); // conserved
+        assert_eq!(client.staked_balance(&delegator), 800);
     }
 }

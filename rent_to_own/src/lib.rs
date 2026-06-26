@@ -12,6 +12,10 @@ pub enum DataKey {
     Admin,
     Deal(BytesN<32>),
     Payment(BytesN<32>, u32),
+    /// Forfeiture fraction in basis points (0–10000) applied on default
+    ForfeitureBps,
+    /// Default settlement record keyed by deal_id
+    DefaultSettlement(BytesN<32>),
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -28,6 +32,10 @@ pub enum ContractError {
     EquityOverflow = 6,
     InvalidAmount = 7,
     DealAlreadyExists = 8,
+    // ── Issue #1133 ──────────────────────────────────────────────────────────
+    AlreadySettled = 9,
+    DealNotDefaulted = 10,
+    SettlementNotFound = 11,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -64,6 +72,18 @@ pub struct EquityPayment {
     pub paid_at: u64,
 }
 
+/// Recorded equity entitlements after a default. Not settled until `settle_default` is called.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DefaultSettlementRecord {
+    /// Amount refundable to the tenant
+    pub refundable_usdc: i128,
+    /// Amount forfeited to the platform/landlord
+    pub forfeited_usdc: i128,
+    /// True once `settle_default` has been executed
+    pub settled: bool,
+}
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -84,13 +104,36 @@ fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
     Ok(())
 }
 
+fn get_forfeiture_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get::<_, u32>(&DataKey::ForfeitureBps)
+        .unwrap_or(0)
+}
+
+/// Compute `(refundable, forfeited)` from accumulated equity and the forfeiture rate.
+fn equity_split(equity: i128, forfeiture_bps: u32) -> (i128, i128) {
+    let forfeited = equity * forfeiture_bps as i128 / 10_000;
+    let refundable = equity - forfeited;
+    (refundable, forfeited)
+}
+
 #[contractimpl]
 impl RentToOwn {
-    pub fn init(env: Env, admin: Address) -> Result<(), ContractError> {
+    /// Initialise the contract.
+    /// `forfeiture_bps`: the portion of accrued equity forfeited to the platform on default,
+    /// expressed in basis points (0 = full refund, 10000 = full forfeiture).
+    pub fn init(env: Env, admin: Address, forfeiture_bps: u32) -> Result<(), ContractError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
+        if forfeiture_bps > 10_000 {
+            return Err(ContractError::InvalidAmount);
+        }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::ForfeitureBps, &forfeiture_bps);
         Ok(())
     }
 
@@ -163,7 +206,6 @@ impl RentToOwn {
             return Err(ContractError::DealNotActive);
         }
 
-        // Overpayment protection: equity cannot exceed property value
         let new_equity = deal.equity_accumulated_usdc + equity_amount;
         if new_equity > deal.property_value_usdc {
             return Err(ContractError::EquityOverflow);
@@ -198,7 +240,7 @@ impl RentToOwn {
         Ok(())
     }
 
-    /// Admin marks deal completed when all payments made.
+    /// Admin marks deal completed when all payments made; full equity entitlement transfers.
     pub fn complete_deal(
         env: Env,
         admin: Address,
@@ -229,12 +271,14 @@ impl RentToOwn {
                 Symbol::new(&env, "rent_to_own"),
                 Symbol::new(&env, "deal_completed"),
             ),
-            deal_id,
+            (deal_id, deal.tenant, deal.equity_accumulated_usdc),
         );
         Ok(())
     }
 
-    /// Admin marks deal defaulted.
+    /// Admin marks deal defaulted. Computes the equity split (refundable vs. forfeited)
+    /// according to the configured forfeiture fraction and records the settlement entitlement.
+    /// Call `settle_default` to execute the settlement.
     pub fn default_deal(
         env: Env,
         admin: Address,
@@ -254,23 +298,95 @@ impl RentToOwn {
         }
 
         let accumulated = deal.equity_accumulated_usdc;
+        let forfeiture_bps = get_forfeiture_bps(&env);
+        let (refundable, forfeited) = equity_split(accumulated, forfeiture_bps);
+
         deal.status = DealStatus::Defaulted;
         env.storage()
             .persistent()
             .set(&DataKey::Deal(deal_id.clone()), &deal);
+
+        let settlement = DefaultSettlementRecord {
+            refundable_usdc: refundable,
+            forfeited_usdc: forfeited,
+            settled: false,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::DefaultSettlement(deal_id.clone()), &settlement);
 
         env.events().publish(
             (
                 Symbol::new(&env, "rent_to_own"),
                 Symbol::new(&env, "deal_defaulted"),
             ),
-            (deal_id, reason, accumulated),
+            (deal_id, reason, accumulated, refundable, forfeited),
         );
         Ok(())
     }
 
+    /// Execute the settlement for a defaulted deal, exactly once.
+    /// Records that the refundable portion is owed to the tenant and the
+    /// forfeited portion is owed to the platform. Token movement is handled
+    /// by an escrow contract in a follow-up.
+    pub fn settle_default(
+        env: Env,
+        admin: Address,
+        deal_id: BytesN<32>,
+    ) -> Result<DefaultSettlementRecord, ContractError> {
+        require_admin(&env, &admin)?;
+
+        let deal: RentToOwnDeal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Deal(deal_id.clone()))
+            .ok_or(ContractError::DealNotFound)?;
+
+        if !matches!(deal.status, DealStatus::Defaulted) {
+            return Err(ContractError::DealNotDefaulted);
+        }
+
+        let mut settlement: DefaultSettlementRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DefaultSettlement(deal_id.clone()))
+            .ok_or(ContractError::SettlementNotFound)?;
+
+        if settlement.settled {
+            return Err(ContractError::AlreadySettled);
+        }
+
+        settlement.settled = true;
+        env.storage()
+            .persistent()
+            .set(&DataKey::DefaultSettlement(deal_id.clone()), &settlement);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "rent_to_own"),
+                Symbol::new(&env, "equity_settled"),
+            ),
+            (
+                deal_id,
+                deal.tenant,
+                settlement.refundable_usdc,
+                settlement.forfeited_usdc,
+            ),
+        );
+        Ok(settlement)
+    }
+
     pub fn get_deal(env: Env, deal_id: BytesN<32>) -> Option<RentToOwnDeal> {
         env.storage().persistent().get(&DataKey::Deal(deal_id))
+    }
+
+    pub fn get_default_settlement(
+        env: Env,
+        deal_id: BytesN<32>,
+    ) -> Option<DefaultSettlementRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DefaultSettlement(deal_id))
     }
 
     /// Returns equity as basis points of property value (0–10000).
@@ -300,7 +416,8 @@ mod tests {
         let id = env.register(RentToOwn, ());
         let client = RentToOwnClient::new(env, &id);
         let admin = Address::generate(env);
-        client.init(&admin);
+        // Default: 20% forfeiture on default
+        client.init(&admin, &2000u32);
         (admin, client)
     }
 
@@ -315,7 +432,6 @@ mod tests {
         let tenant = Address::generate(&env);
         let deal_id = make_deal_id(&env, 1);
 
-        // property = 100_000, monthly_equity = 10_000, 10 payments
         client.register_deal(&admin, &deal_id, &tenant, &100_000, &10_000, &10);
 
         for _ in 0..10 {
@@ -373,11 +489,9 @@ mod tests {
         let tenant = Address::generate(&env);
         let deal_id = make_deal_id(&env, 4);
 
-        // property = 10_000, monthly_equity = 6_000 — second payment would overflow
         client.register_deal(&admin, &deal_id, &tenant, &10_000, &6_000, &2);
         client.record_equity_payment(&admin, &deal_id, &8_000, &6_000);
 
-        // Second payment of 6_000 would push equity to 12_000 > 10_000
         let result = client.try_record_equity_payment(&admin, &deal_id, &8_000, &6_000);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::EquityOverflow);
     }
@@ -409,7 +523,6 @@ mod tests {
         client.register_deal(&admin, &deal_id, &tenant, &100_000, &25_000, &4);
         client.record_equity_payment(&admin, &deal_id, &30_000, &25_000);
 
-        // 25_000 / 100_000 * 10_000 = 2_500 bps = 25%
         assert_eq!(client.get_equity_percentage(&deal_id), 2_500);
     }
 
@@ -438,5 +551,129 @@ mod tests {
 
         let result = client.try_record_equity_payment(&admin, &deal_id, &10_000, &10_000);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::DealNotActive);
+    }
+
+    // ── Issue #1133: Default equity policy tests ──────────────────────────────
+
+    #[test]
+    fn default_equity_split_correct() {
+        let env = Env::default();
+        // 30% forfeiture
+        env.mock_all_auths();
+        let id = env.register(RentToOwn, ());
+        let client = RentToOwnClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let tenant = Address::generate(&env);
+        client.init(&admin, &3000u32); // 30% forfeiture
+        let deal_id = make_deal_id(&env, 20);
+
+        client.register_deal(&admin, &deal_id, &tenant, &100_000, &10_000, &10);
+        // Make 4 payments: equity = 40_000
+        for _ in 0..4 {
+            client.record_equity_payment(&admin, &deal_id, &15_000, &10_000);
+        }
+
+        client.default_deal(&admin, &deal_id, &Symbol::new(&env, "default"));
+
+        let settlement = client.get_default_settlement(&deal_id).unwrap();
+        // 40_000 * 3000 / 10_000 = 12_000 forfeited
+        // 40_000 - 12_000 = 28_000 refundable
+        assert_eq!(settlement.forfeited_usdc, 12_000);
+        assert_eq!(settlement.refundable_usdc, 28_000);
+        assert_eq!(
+            settlement.refundable_usdc + settlement.forfeited_usdc,
+            40_000
+        );
+        assert!(!settlement.settled);
+    }
+
+    #[test]
+    fn double_settlement_rejected() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let tenant = Address::generate(&env);
+        let deal_id = make_deal_id(&env, 21);
+
+        client.register_deal(&admin, &deal_id, &tenant, &100_000, &10_000, &10);
+        client.record_equity_payment(&admin, &deal_id, &15_000, &10_000);
+
+        client.default_deal(&admin, &deal_id, &Symbol::new(&env, "default"));
+
+        // First settlement succeeds
+        let s = client.settle_default(&admin, &deal_id);
+        assert!(s.settled);
+
+        // Second settlement is rejected
+        let err = client
+            .try_settle_default(&admin, &deal_id)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::AlreadySettled);
+    }
+
+    #[test]
+    fn complete_vs_default_divergence() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let tenant = Address::generate(&env);
+        let deal_id_a = make_deal_id(&env, 22);
+        let deal_id_b = make_deal_id(&env, 23);
+
+        // Deal A: completes normally — full equity to tenant, no split
+        client.register_deal(&admin, &deal_id_a, &tenant, &10_000, &10_000, &1);
+        client.record_equity_payment(&admin, &deal_id_a, &10_000, &10_000);
+        client.complete_deal(&admin, &deal_id_a);
+        let deal_a = client.get_deal(&deal_id_a).unwrap();
+        assert!(matches!(deal_a.status, DealStatus::Completed));
+        // No settlement record for completed deal
+        assert!(client.get_default_settlement(&deal_id_a).is_none());
+
+        // Deal B: defaults — equity is split
+        client.register_deal(&admin, &deal_id_b, &tenant, &10_000, &10_000, &1);
+        client.record_equity_payment(&admin, &deal_id_b, &10_000, &10_000);
+        // Can't complete if we want to default — use a fresh deal without completing
+        let deal_id_c = make_deal_id(&env, 24);
+        client.register_deal(&admin, &deal_id_c, &tenant, &10_000, &2_000, &5);
+        client.record_equity_payment(&admin, &deal_id_c, &5_000, &2_000);
+        client.default_deal(&admin, &deal_id_c, &Symbol::new(&env, "test"));
+        let deal_c = client.get_deal(&deal_id_c).unwrap();
+        assert!(matches!(deal_c.status, DealStatus::Defaulted));
+        assert!(client.get_default_settlement(&deal_id_c).is_some());
+    }
+
+    #[test]
+    fn zero_equity_default() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let tenant = Address::generate(&env);
+        let deal_id = make_deal_id(&env, 25);
+
+        client.register_deal(&admin, &deal_id, &tenant, &100_000, &10_000, &10);
+        // No payments made; equity = 0
+        client.default_deal(&admin, &deal_id, &Symbol::new(&env, "no_payments"));
+
+        let settlement = client.get_default_settlement(&deal_id).unwrap();
+        assert_eq!(settlement.refundable_usdc, 0);
+        assert_eq!(settlement.forfeited_usdc, 0);
+
+        // Settlement of zero-equity deal should still succeed once
+        let s = client.settle_default(&admin, &deal_id);
+        assert!(s.settled);
+    }
+
+    #[test]
+    fn settle_non_defaulted_deal_rejected() {
+        let env = Env::default();
+        let (admin, client) = setup(&env);
+        let tenant = Address::generate(&env);
+        let deal_id = make_deal_id(&env, 26);
+
+        client.register_deal(&admin, &deal_id, &tenant, &10_000, &10_000, &1);
+        // Still active — settle_default must fail
+        let err = client
+            .try_settle_default(&admin, &deal_id)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::DealNotDefaulted);
     }
 }
