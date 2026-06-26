@@ -15,6 +15,8 @@ pub enum DataKey {
     SlashPenaltyBps,
     UnstakeLockDays,
     Bond(Address),
+    /// Reentrancy lock for cross-contract call protection
+    Reentrancy,
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -31,6 +33,8 @@ pub enum ContractError {
     LockNotExpired = 6,
     BondBelowMinimum = 7,
     NoBond = 8,
+    /// Reentrancy detected — nested call rejected
+    ReentrancyDetected = 9,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -77,6 +81,42 @@ fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
         return Err(ContractError::NotAuthorized);
     }
     Ok(())
+}
+
+/// Reentrancy guard helpers
+fn enter_nonreentrant(env: &Env) -> Result<(), ContractError> {
+    if env
+        .storage()
+        .instance()
+        .get::<_, bool>(&DataKey::Reentrancy)
+        .unwrap_or(false)
+    {
+        return Err(ContractError::ReentrancyDetected);
+    }
+    env.storage().instance().set(&DataKey::Reentrancy, &true);
+    Ok(())
+}
+
+fn exit_nonreentrant(env: &Env) {
+    env.storage().instance().set(&DataKey::Reentrancy, &false);
+}
+
+/// Scope guard that ensures reentrancy lock is released on drop
+struct ReentrancyGuard<'a> {
+    env: &'a Env,
+}
+
+impl<'a> ReentrancyGuard<'a> {
+    fn new(env: &'a Env) -> Result<Self, ContractError> {
+        enter_nonreentrant(env)?;
+        Ok(ReentrancyGuard { env })
+    }
+}
+
+impl<'a> Drop for ReentrancyGuard<'a> {
+    fn drop(&mut self) {
+        exit_nonreentrant(self.env);
+    }
 }
 
 fn min_bond(env: &Env) -> i128 {
@@ -185,6 +225,9 @@ impl InspectorBondContract {
             .persistent()
             .remove(&DataKey::Bond(inspector.clone()));
 
+        // Reentrancy guard before external operations - uses scope guard for automatic release
+        let _guard = ReentrancyGuard::new(&env)?;
+
         env.events().publish(
             (
                 Symbol::new(&env, "inspector_bond"),
@@ -193,6 +236,7 @@ impl InspectorBondContract {
             ),
             amount,
         );
+
         Ok(amount)
     }
 
@@ -283,7 +327,8 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::{Address, Env};
 
     fn setup(env: &Env) -> (Address, InspectorBondContractClient<'_>) {
         env.mock_all_auths();
@@ -439,5 +484,61 @@ mod tests {
             &Symbol::new(&env, "fraud"),
         );
         assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
+    }
+
+    // ── Reentrancy guard tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn unstake_succeeds_and_releases_guard() {
+        let env = Env::default();
+        let (_admin, client) = setup(&env);
+        let inspector = Address::generate(&env);
+
+        client.stake_bond(&inspector, &1_000);
+        let amount = client.unstake_bond(&inspector);
+        assert_eq!(amount, 1_000);
+
+        // Verify guard is released by trying again (should return NoBond, not ReentrancyDetected)
+        let result = client.try_unstake_bond(&inspector);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::NoBond);
+    }
+
+    #[test]
+    fn unstake_releases_guard_on_lock_not_expired_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(InspectorBondContract, ());
+        let client = InspectorBondContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        // lock_days=30
+        client.init(&admin, &1_000, &1_000, &30);
+
+        let inspector = Address::generate(&env);
+        client.stake_bond(&inspector, &1_000);
+
+        // Try to unstake before lock expires (should fail)
+        let result = client.try_unstake_bond(&inspector);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::LockNotExpired);
+
+        // After error, guard should be released - advance time and try again
+        env.ledger().with_mut(|li| li.timestamp += 30 * 86_400);
+        let amount = client.unstake_bond(&inspector);
+        assert_eq!(amount, 1_000);
+    }
+
+    #[test]
+    fn unstake_releases_guard_on_no_bond_error() {
+        let env = Env::default();
+        let (_admin, client) = setup(&env);
+        let inspector = Address::generate(&env);
+
+        // Try to unstake without a bond (should fail)
+        let result = client.try_unstake_bond(&inspector);
+        assert_eq!(result.unwrap_err().unwrap(), ContractError::NoBond);
+
+        // After error, guard should be released - stake and unstake should work
+        client.stake_bond(&inspector, &1_000);
+        let amount = client.unstake_bond(&inspector);
+        assert_eq!(amount, 1_000);
     }
 }
