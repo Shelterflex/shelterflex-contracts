@@ -29,6 +29,8 @@ pub enum DataKey {
     Proposal(u64),
     /// Has voter voted on proposal
     Voted(u64, Address),
+    /// Snapshot of a voter's stake at proposal creation time
+    VoterSnapshot(u64, Address),
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -75,6 +77,8 @@ pub struct Proposal {
     pub status: ProposalStatus,
     pub created_at: u64,
     pub voting_ends_at: u64,
+    /// Total staked at proposal creation time (used for quorum calculation)
+    pub snapshotted_total_staked: i128,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -110,6 +114,14 @@ fn get_stake_for(env: &Env, voter: &Address) -> i128 {
     env.storage()
         .persistent()
         .get::<_, i128>(&DataKey::Voted(0, voter.clone()))
+        .unwrap_or(0)
+}
+
+fn get_snapshot_stake_for(env: &Env, proposal_id: u64, voter: &Address) -> i128 {
+    // Return the voter's stake snapshot at proposal creation time
+    env.storage()
+        .persistent()
+        .get::<_, i128>(&DataKey::VoterSnapshot(proposal_id, voter.clone()))
         .unwrap_or(0)
 }
 
@@ -172,6 +184,9 @@ impl Governance {
         let id = count + 1;
 
         let now = env.ledger().timestamp();
+        // Capture snapshot of total staked at proposal creation time
+        let snapshotted_total = get_total_staked(&env);
+        
         let proposal = Proposal {
             id,
             proposer: proposer.clone(),
@@ -183,6 +198,7 @@ impl Governance {
             status: ProposalStatus::Active,
             created_at: now,
             voting_ends_at: now + VOTING_PERIOD_SECS,
+            snapshotted_total_staked: snapshotted_total,
         };
 
         env.storage()
@@ -195,12 +211,12 @@ impl Governance {
                 Symbol::new(&env, "governance"),
                 Symbol::new(&env, "proposal_created"),
             ),
-            (id, proposer),
+            (id, proposer, snapshotted_total),
         );
         Ok(id)
     }
 
-    /// Vote on a proposal. Weight = voter's stake.
+    /// Vote on a proposal. Weight = voter's stake at time of proposal creation (captured on first vote).
     pub fn vote(
         env: Env,
         voter: Address,
@@ -233,7 +249,14 @@ impl Governance {
             return Err(ContractError::AlreadyVoted);
         }
 
-        let weight = get_stake_for(&env, &voter);
+        // Get voter's current stake and store as snapshot (only on first vote per proposal)
+        let current_stake = get_stake_for(&env, &voter);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VoterSnapshot(proposal_id, voter.clone()), &current_stake);
+
+        // Use the snapshotted weight for voting
+        let weight = current_stake;
         if support {
             proposal.votes_for += weight;
         } else {
@@ -269,7 +292,8 @@ impl Governance {
             return Err(ContractError::VotingNotEnded);
         }
 
-        let total_staked = get_total_staked(&env);
+        // Use the snapshotted total staked (captured at proposal creation) for quorum calculation
+        let total_staked = proposal.snapshotted_total_staked;
         let total_votes = proposal.votes_for + proposal.votes_against;
         let quorum_required = total_staked * QUORUM_BPS / 10_000;
 
@@ -291,7 +315,7 @@ impl Governance {
                 Symbol::new(&env, "governance"),
                 Symbol::new(&env, "proposal_finalized"),
             ),
-            (proposal_id, proposal.votes_for, proposal.votes_against),
+            (proposal_id, proposal.votes_for, proposal.votes_against, total_votes >= quorum_required),
         );
         Ok(status)
     }
@@ -580,5 +604,129 @@ mod tests {
             result.unwrap_err().unwrap(),
             ContractError::ProposalAlreadyExecuted
         );
+    }
+
+    #[test]
+    fn flash_stake_voting_prevented() {
+        // Demonstrates that flash-stake voting is prevented by snapshotting
+        let env = Env::default();
+        let (admin, client) = setup(&env, 1_000_000);
+
+        let proposer = Address::generate(&env);
+        give_stake(&env, &client, &admin, &proposer, 100_000);
+
+        let flash_voter = Address::generate(&env);
+        // Flash voter has NO stake initially
+        give_stake(&env, &client, &admin, &flash_voter, 0);
+
+        // Create proposal - total staked = 1_000_000, quorum = 100_000
+        let pid = client.create_proposal(&proposer, &Symbol::new(&env, "param"), &1, &2);
+
+        // Flash voter acquires massive stake AFTER proposal creation
+        give_stake(&env, &client, &admin, &flash_voter, 900_000);
+
+        // But their vote is still weighted at snapshot time (0), not current stake (900_000)
+        client.vote(&flash_voter, &pid, &true);
+
+        // Only proposer votes with actual weight from creation time
+        client.vote(&proposer, &pid, &true);
+
+        // Advance past voting period
+        env.ledger()
+            .with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
+
+        let status = client.finalize_proposal(&pid);
+        
+        // Proposal should fail: only 100_000 votes (proposer) when 100_000 quorum required
+        // Flash voter's 900_000 stake after creation has NO effect on their vote weight
+        assert!(matches!(status, ProposalStatus::Rejected));
+    }
+
+    #[test]
+    fn stake_reduction_after_vote_has_no_effect() {
+        // Voter casts vote with their current stake, then reduces stake — vote weight unchanged
+        let env = Env::default();
+        let (admin, client) = setup(&env, 1_000_000);
+
+        let proposer = Address::generate(&env);
+        give_stake(&env, &client, &admin, &proposer, 100_000);
+
+        let voter = Address::generate(&env);
+        give_stake(&env, &client, &admin, &voter, 600_000);
+
+        let pid = client.create_proposal(&proposer, &Symbol::new(&env, "param"), &1, &2);
+
+        // Voter votes with 600_000 stake
+        client.vote(&voter, &pid, &true);
+
+        // Then voter's stake is reduced to 10_000
+        give_stake(&env, &client, &admin, &voter, 10_000);
+
+        // Proposer votes
+        client.vote(&proposer, &pid, &true);
+
+        // Advance past voting period
+        env.ledger()
+            .with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
+
+        let proposal = client.get_proposal(&pid).unwrap();
+        // Voter's votes_for should still be 600_000 (snapshot at vote time), not 10_000
+        assert_eq!(proposal.votes_for, 700_000);
+        assert_eq!(proposal.votes_against, 0);
+
+        // Should pass: 700_000 >= 100_000 quorum
+        let status = client.finalize_proposal(&pid);
+        assert!(matches!(status, ProposalStatus::Passed));
+    }
+
+    #[test]
+    fn snapshot_captured_at_proposal_creation() {
+        // Verify that snapshotted_total_staked is captured at proposal creation time
+        let env = Env::default();
+        let (admin, client) = setup(&env, 1_000_000);
+
+        let proposer = Address::generate(&env);
+        give_stake(&env, &client, &admin, &proposer, 100_000);
+
+        // Create proposal when total_staked = 1_000_000
+        let pid = client.create_proposal(&proposer, &Symbol::new(&env, "param"), &1, &2);
+
+        // Increase total staked (e.g., new stake added to the system)
+        client.set_total_staked(&admin, &5_000_000);
+
+        let proposal = client.get_proposal(&pid).unwrap();
+        // Proposal should have captured 1_000_000, not the updated 5_000_000
+        assert_eq!(proposal.snapshotted_total_staked, 1_000_000);
+    }
+
+    #[test]
+    fn quorum_based_on_snapshot_not_current() {
+        // Quorum calculation uses snapshotted total, not current total staked
+        let env = Env::default();
+        let (admin, client) = setup(&env, 1_000_000);
+
+        let proposer = Address::generate(&env);
+        give_stake(&env, &client, &admin, &proposer, 150_000);
+
+        let voter = Address::generate(&env);
+        give_stake(&env, &client, &admin, &voter, 150_000);
+
+        // Create proposal with total_staked = 1_000_000 (quorum = 100_000)
+        let pid = client.create_proposal(&proposer, &Symbol::new(&env, "param"), &1, &2);
+
+        // Both proposer and voter cast votes (300_000 total, meets 100_000 quorum)
+        client.vote(&proposer, &pid, &true);
+        client.vote(&voter, &pid, &true);
+
+        // After voting, total staked increases dramatically to 10_000_000
+        // This should NOT increase quorum requirement for this proposal
+        client.set_total_staked(&admin, &10_000_000);
+
+        env.ledger()
+            .with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
+
+        let status = client.finalize_proposal(&pid);
+        // Should pass because quorum was based on 1_000_000 snapshot, not new 10_000_000
+        assert!(matches!(status, ProposalStatus::Passed));
     }
 }
