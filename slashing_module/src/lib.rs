@@ -95,9 +95,9 @@ pub struct PendingSlash {
 
 /// Default penalty ratios (bps). Overridden by `configure_tiers`.
 pub const DEFAULT_DOUBLE_SIGN_BPS: u32 = 1_000; // 10%
-pub const DEFAULT_DOWNTIME_BPS: u32 = 100;       // 1%
-pub const DEFAULT_INVALID_BLOCK_BPS: u32 = 500;  // 5%
-pub const DEFAULT_MAX_BPS: u32 = 10_000;          // 100%
+pub const DEFAULT_DOWNTIME_BPS: u32 = 100; // 1%
+pub const DEFAULT_INVALID_BLOCK_BPS: u32 = 500; // 5%
+pub const DEFAULT_MAX_BPS: u32 = 10_000; // 100%
 
 // Keep legacy exported names for backward compatibility
 pub const OFFENCE_DOUBLE_SIGN_BPS: u32 = DEFAULT_DOUBLE_SIGN_BPS;
@@ -251,7 +251,12 @@ impl SlashingModule {
                 Symbol::new(&env, "slashing"),
                 Symbol::new(&env, "tiers_configured"),
             ),
-            (double_sign_bps, downtime_bps, invalid_block_bps, max_slash_bps),
+            (
+                double_sign_bps,
+                downtime_bps,
+                invalid_block_bps,
+                max_slash_bps,
+            ),
         );
         Ok(())
     }
@@ -488,10 +493,9 @@ impl SlashingModule {
             penalty_bps,
             slashed_amount: 0, // updated at finalization
         };
-        env.storage().persistent().set(
-            &DataKey::SlashRecord(commitment.clone()),
-            &evidence_record,
-        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::SlashRecord(commitment.clone()), &evidence_record);
 
         // CommitmentRevealed starts false
         env.storage()
@@ -549,10 +553,7 @@ impl SlashingModule {
 
         let computed = Self::hash_commitment(&env, &evidence, &salt);
 
-        let commitment = pending
-            .evidence_hash
-            .clone()
-            .unwrap_or(Bytes::new(&env));
+        let commitment = pending.evidence_hash.clone().unwrap_or(Bytes::new(&env));
 
         if computed != commitment {
             return Err(ContractError::InvalidReveal);
@@ -1193,7 +1194,15 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev1", "salt1", &actor, &Offence::DoubleSign);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev1",
+            "salt1",
+            &actor,
+            &Offence::DoubleSign,
+        );
 
         // Funds not moved immediately
         assert_eq!(client.staked_balance(&actor), 10_000);
@@ -1222,7 +1231,15 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 100_000);
 
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev2", "salt2", &actor, &Offence::Downtime);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev2",
+            "salt2",
+            &actor,
+            &Offence::Downtime,
+        );
 
         // Advance time
         env.ledger()
@@ -1249,7 +1266,8 @@ mod tests {
         client.submit_evidence(&submitter, &commitment, &actor, &Offence::Downtime);
 
         // Second submission with same commitment must fail
-        let result = client.try_submit_evidence(&submitter, &commitment, &actor2, &Offence::Downtime);
+        let result =
+            client.try_submit_evidence(&submitter, &commitment, &actor2, &Offence::Downtime);
         assert_eq!(
             result.unwrap_err().unwrap(),
             ContractError::DuplicateEvidence
@@ -1267,7 +1285,8 @@ mod tests {
         seed_balance(&client, &admin, &actor, 10_000);
 
         let commitment = make_commitment(&env, "real_ev", "real_salt");
-        let slash_id = client.submit_evidence(&submitter, &commitment, &actor, &Offence::DoubleSign);
+        let slash_id =
+            client.submit_evidence(&submitter, &commitment, &actor, &Offence::DoubleSign);
 
         // Reveal with wrong salt → hash mismatch
         let wrong_salt = salt_bytes(&env, "wrong_salt");
@@ -1299,7 +1318,8 @@ mod tests {
         seed_balance(&client, &admin, &actor, 10_000);
 
         let commitment = make_commitment(&env, "evX", "saltX");
-        let slash_id = client.submit_evidence(&submitter, &commitment, &actor, &Offence::DoubleSign);
+        let slash_id =
+            client.submit_evidence(&submitter, &commitment, &actor, &Offence::DoubleSign);
 
         // Advance past challenge window WITHOUT revealing
         env.ledger()
@@ -1322,7 +1342,15 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 1); // tiny balance
 
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "tiny", "salttiny", &actor, &Offence::DoubleSign);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "tiny",
+            "salttiny",
+            &actor,
+            &Offence::DoubleSign,
+        );
 
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);
@@ -1341,7 +1369,15 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev_j1", "s1", &actor, &Offence::Downtime);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_j1",
+            "s1",
+            &actor,
+            &Offence::Downtime,
+        );
 
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);
@@ -1349,7 +1385,8 @@ mod tests {
         assert!(client.is_jailed(&actor));
 
         let commitment2 = make_commitment(&env, "ev_j2", "s2");
-        let result = client.try_submit_evidence(&submitter, &commitment2, &actor, &Offence::InvalidBlock);
+        let result =
+            client.try_submit_evidence(&submitter, &commitment2, &actor, &Offence::InvalidBlock);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::AlreadyJailed);
     }
 
@@ -1363,7 +1400,15 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev_u1", "su1", &actor, &Offence::Downtime);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_u1",
+            "su1",
+            &actor,
+            &Offence::Downtime,
+        );
 
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);
@@ -1392,7 +1437,15 @@ mod tests {
         let actor = Address::generate(&env);
 
         seed_balance(&client, &admin, &actor, 10_000);
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev_u2", "su2", &actor, &Offence::Downtime);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_u2",
+            "su2",
+            &actor,
+            &Offence::Downtime,
+        );
 
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);
@@ -1432,7 +1485,15 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev_t1", "st1", &actor, &Offence::DoubleSign);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_t1",
+            "st1",
+            &actor,
+            &Offence::DoubleSign,
+        );
 
         // Finalizing immediately (before 604,800 seconds) must fail
         let result = client.try_finalize_slash(&submitter, &slash_id);
@@ -1451,7 +1512,8 @@ mod tests {
         seed_balance(&client, &admin, &actor, 10_000);
 
         let commitment = make_commitment(&env, "ev_t2", "st2");
-        let slash_id = client.submit_evidence(&submitter, &commitment, &actor, &Offence::DoubleSign);
+        let slash_id =
+            client.submit_evidence(&submitter, &commitment, &actor, &Offence::DoubleSign);
 
         // Cancel during challenge window
         client.cancel_slash(&admin, &slash_id);
@@ -1477,7 +1539,15 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev_t3", "st3", &actor, &Offence::DoubleSign);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_t3",
+            "st3",
+            &actor,
+            &Offence::DoubleSign,
+        );
 
         // Stranger cannot finalize
         env.ledger()
@@ -1508,7 +1578,15 @@ mod tests {
         client.set_challenge_window(&admin, &86_400);
         assert_eq!(client.challenge_window(), 86_400);
 
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev_t4", "st4", &actor, &Offence::DoubleSign);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_t4",
+            "st4",
+            &actor,
+            &Offence::DoubleSign,
+        );
 
         // Should fail after 20 hours
         env.ledger()
@@ -1651,7 +1729,15 @@ mod tests {
         client.unpause(&admin);
 
         // submit_evidence should succeed after unpause
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev_unpause", "s_unpause", &actor, &Offence::Downtime);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_unpause",
+            "s_unpause",
+            &actor,
+            &Offence::Downtime,
+        );
         // Advance time and finalize the slash
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);
@@ -1687,7 +1773,15 @@ mod tests {
         let actor = Address::generate(&env);
 
         seed_balance(&client, &admin, &actor, 10_000);
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev_getter", "s_getter", &actor, &Offence::Downtime);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_getter",
+            "s_getter",
+            &actor,
+            &Offence::Downtime,
+        );
         // Advance time and finalize the slash
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);
@@ -1715,7 +1809,15 @@ mod tests {
         // Configure: DoubleSign = 5% (500 bps), max = 50% (5000 bps)
         client.configure_tiers(&admin, &500u32, &100u32, &200u32, &5000u32);
 
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev_tier", "st_tier", &actor, &Offence::DoubleSign);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_tier",
+            "st_tier",
+            &actor,
+            &Offence::DoubleSign,
+        );
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);
         client.finalize_slash(&submitter, &slash_id);
@@ -1735,7 +1837,15 @@ mod tests {
         // Configure: DoubleSign = 50% but max = 5% → capped at 5%
         client.configure_tiers(&admin, &5000u32, &100u32, &200u32, &500u32);
 
-        let slash_id = commit_and_reveal(&env, &client, &submitter, "ev_cap", "sc", &actor, &Offence::DoubleSign);
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_cap",
+            "sc",
+            &actor,
+            &Offence::DoubleSign,
+        );
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);
         client.finalize_slash(&submitter, &slash_id);
@@ -1755,8 +1865,24 @@ mod tests {
         seed_balance(&client, &admin, &actor_b, 100_000);
 
         // Default tiers: DoubleSign=10%, Downtime=1%
-        let id_a = commit_and_reveal(&env, &client, &submitter, "ev_ds", "ss_ds", &actor_a, &Offence::DoubleSign);
-        let id_b = commit_and_reveal(&env, &client, &submitter, "ev_dt", "ss_dt", &actor_b, &Offence::Downtime);
+        let id_a = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_ds",
+            "ss_ds",
+            &actor_a,
+            &Offence::DoubleSign,
+        );
+        let id_b = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_dt",
+            "ss_dt",
+            &actor_b,
+            &Offence::Downtime,
+        );
 
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);
@@ -1812,7 +1938,10 @@ mod tests {
         // Propose 50% (5000 bps) → capped to 10% (1000 bps)
         let slash_id = client.propose_slash(&admin, &actor, &5000u32);
         let pending = client.get_pending_slash(&slash_id).unwrap();
-        assert_eq!(pending.penalty_bps, 1000, "penalty should be capped at max 1000 bps");
+        assert_eq!(
+            pending.penalty_bps, 1000,
+            "penalty should be capped at max 1000 bps"
+        );
 
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);

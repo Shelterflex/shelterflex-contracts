@@ -182,12 +182,7 @@ impl OraclePriceFeeds {
         pair: Symbol,
         source: Address,
     ) -> Result<(), ContractError> {
-        access_control::require_admin_permission(
-            &env,
-            &get_admin(&env),
-            &caller,
-            "add_source",
-        )?;
+        access_control::require_admin_permission(&env, &get_admin(&env), &caller, "add_source")?;
         let mut sources: Vec<Address> = env
             .storage()
             .instance()
@@ -217,12 +212,7 @@ impl OraclePriceFeeds {
         pair: Symbol,
         source: Address,
     ) -> Result<(), ContractError> {
-        access_control::require_admin_permission(
-            &env,
-            &get_admin(&env),
-            &caller,
-            "remove_source",
-        )?;
+        access_control::require_admin_permission(&env, &get_admin(&env), &caller, "remove_source")?;
         let sources: Vec<Address> = env
             .storage()
             .instance()
@@ -256,12 +246,7 @@ impl OraclePriceFeeds {
         pair: Symbol,
         quorum: u32,
     ) -> Result<(), ContractError> {
-        access_control::require_admin_permission(
-            &env,
-            &get_admin(&env),
-            &caller,
-            "set_quorum",
-        )?;
+        access_control::require_admin_permission(&env, &get_admin(&env), &caller, "set_quorum")?;
         env.storage()
             .instance()
             .set(&DataKey::Quorum(pair), &quorum);
@@ -315,15 +300,12 @@ impl OraclePriceFeeds {
 
         // Per-source sequence guard
         let source_key = DataKey::SourceData(pair.clone(), caller.clone());
-        let current_seq: u64 = if let Some(prev_data) = env
-            .storage()
-            .instance()
-            .get::<_, SourceData>(&source_key)
-        {
-            prev_data.sequence
-        } else {
-            0u64
-        };
+        let current_seq: u64 =
+            if let Some(prev_data) = env.storage().instance().get::<_, SourceData>(&source_key) {
+                prev_data.sequence
+            } else {
+                0u64
+            };
 
         if sequence <= current_seq {
             return Err(ContractError::InvalidSequence);
@@ -343,21 +325,18 @@ impl OraclePriceFeeds {
 
         // Deviation check against the last price for this source
         let max_deviation_bps = get_max_deviation_bps(&env);
-        let prev_price: Option<i128> = if let Some(prev_data) = env
-            .storage()
-            .instance()
-            .get::<_, SourceData>(&source_key)
-        {
-            Some(prev_data.price)
-        } else if sources.is_empty() {
-            // Single-source: deviation against the feed-level price
-            env.storage()
-                .instance()
-                .get::<_, PriceFeed>(&DataKey::Feed(pair.clone()))
-                .map(|f| f.price)
-        } else {
-            None
-        };
+        let prev_price: Option<i128> =
+            if let Some(prev_data) = env.storage().instance().get::<_, SourceData>(&source_key) {
+                Some(prev_data.price)
+            } else if sources.is_empty() {
+                // Single-source: deviation against the feed-level price
+                env.storage()
+                    .instance()
+                    .get::<_, PriceFeed>(&DataKey::Feed(pair.clone()))
+                    .map(|f| f.price)
+            } else {
+                None
+            };
 
         if let Some(old_price) = prev_price {
             if old_price != 0 {
@@ -1007,7 +986,17 @@ mod test {
 
     // ── Multi-source aggregation tests ────────────────────────────────────────
 
-    fn setup_multi_source(env: &Env) -> (Address, OraclePriceFeedsClient<'_>, Address, Symbol, Address, Address, Address) {
+    fn setup_multi_source(
+        env: &Env,
+    ) -> (
+        Address,
+        OraclePriceFeedsClient<'_>,
+        Address,
+        Symbol,
+        Address,
+        Address,
+        Address,
+    ) {
         let (contract_id, client, admin, _operator, p) = setup(env);
         let src1 = Address::generate(env);
         let src2 = Address::generate(env);
@@ -1058,7 +1047,11 @@ mod test {
 
         // Quorum = 2: src1 + src2 fresh, src3 stale → median of [102, 104] = 103
         let feed = client.get_price(&p);
-        assert_eq!(feed.price, 103, "expected median of fresh sources 103, got {}", feed.price);
+        assert_eq!(
+            feed.price, 103,
+            "expected median of fresh sources 103, got {}",
+            feed.price
+        );
     }
 
     #[test]
@@ -1093,7 +1086,10 @@ mod test {
         // src3 first reports 100 then tries to jump to 200 (100% deviation → rejected)
         client.update_price(&src3, &p, &100i128, &1u64);
 
-        let err = client.try_update_price(&src3, &p, &200i128, &2u64).unwrap_err().unwrap();
+        let err = client
+            .try_update_price(&src3, &p, &200i128, &2u64)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ContractError::PriceDeviationTooLarge);
 
         // Median is still based on valid sources: 100, 102 → 101
@@ -1148,6 +1144,10 @@ mod test {
 
         // Only 2 fresh prices: [100, 200] → median = (100 + 200) / 2 = 150
         let feed = client.get_price(&p);
-        assert_eq!(feed.price, 150, "expected average median 150, got {}", feed.price);
+        assert_eq!(
+            feed.price, 150,
+            "expected average median 150, got {}",
+            feed.price
+        );
     }
 }
