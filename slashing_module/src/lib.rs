@@ -1,7 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Bytes, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, String,
+    Symbol, Vec,
 };
 
 // ── Storage Keys ─────────────────────────────────────────────────────────────
@@ -13,7 +14,7 @@ pub enum DataKey {
     Paused,
     /// Authorized evidence submitters
     Submitter(Address),
-    /// Slash record keyed by evidence hash (duplicate detection)
+    /// Slash record keyed by commitment hash (duplicate detection)
     SlashRecord(Bytes),
     /// Per-actor slash count (for indexing / audit)
     SlashCount(Address),
@@ -36,6 +37,17 @@ pub enum DataKey {
     ChallengeWindow,
     NextSlashId,
     PendingSlash(u64),
+
+    // ── Commit-Reveal (Issue #1131) ───────────────────────────────────────
+    /// Whether the commitment for a slash has been validly revealed
+    CommitmentRevealed(u64),
+
+    // ── Configurable tier BPS (Issue #1131) ──────────────────────────────
+    TierDoubleSignBps,
+    TierDowntimeBps,
+    TierInvalidBlockBps,
+    /// Hard cap on slash fraction (in bps). No slash may exceed this.
+    MaxSlashBps,
 }
 
 /// Single slash entry recorded against an inspector by the bond contract
@@ -70,6 +82,7 @@ pub struct PendingSlash {
     pub deadline: u64,
     pub status: SlashStatus,
     pub is_validator: bool,
+    /// Commitment hash (sha256 of evidence || salt) stored at commit time.
     pub evidence_hash: Option<Bytes>,
     pub offence: Offence,
     pub submitter: Option<Address>,
@@ -80,12 +93,17 @@ pub struct PendingSlash {
 
 // ── Slashable Offence Types ───────────────────────────────────────────────────
 
-/// Penalty ratios expressed as basis points (1 bp = 0.01%).
-/// Max stake reduction capped at 10_000 bp (100%).
-pub const OFFENCE_DOUBLE_SIGN_BPS: u32 = 1_000; // 10 %
-pub const OFFENCE_DOWNTIME_BPS: u32 = 100; // 1 %
-pub const OFFENCE_INVALID_BLOCK_BPS: u32 = 500; // 5 %
-pub const MAX_BPS: u32 = 10_000;
+/// Default penalty ratios (bps). Overridden by `configure_tiers`.
+pub const DEFAULT_DOUBLE_SIGN_BPS: u32 = 1_000; // 10%
+pub const DEFAULT_DOWNTIME_BPS: u32 = 100; // 1%
+pub const DEFAULT_INVALID_BLOCK_BPS: u32 = 500; // 5%
+pub const DEFAULT_MAX_BPS: u32 = 10_000; // 100%
+
+// Keep legacy exported names for backward compatibility
+pub const OFFENCE_DOUBLE_SIGN_BPS: u32 = DEFAULT_DOUBLE_SIGN_BPS;
+pub const OFFENCE_DOWNTIME_BPS: u32 = DEFAULT_DOWNTIME_BPS;
+pub const OFFENCE_INVALID_BLOCK_BPS: u32 = DEFAULT_INVALID_BLOCK_BPS;
+pub const MAX_BPS: u32 = DEFAULT_MAX_BPS;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -121,6 +139,10 @@ pub enum ContractError {
     SlashAlreadyResolved = 13,
     /// Invalid slash amount (e.g. <= 0)
     InvalidAmount = 14,
+    /// Evidence has not been revealed (commit-reveal not completed)
+    CommitmentNotRevealed = 15,
+    /// Revealed evidence does not match the stored commitment
+    InvalidReveal = 16,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -135,7 +157,7 @@ pub enum Offence {
     None,
 }
 
-/// Full evidence record stored on-chain (keyed by hash)
+/// Full evidence record stored on-chain (keyed by commitment hash)
 #[contracttype]
 #[derive(Clone)]
 pub struct SlashEvidence {
@@ -199,6 +221,72 @@ impl SlashingModule {
             return Err(ContractError::Paused);
         }
         Ok(())
+    }
+
+    /// Configure tier penalty BPS and global max. Admin-only.
+    /// Call after `init` to override the hardcoded defaults.
+    pub fn configure_tiers(
+        env: Env,
+        admin: Address,
+        double_sign_bps: u32,
+        downtime_bps: u32,
+        invalid_block_bps: u32,
+        max_slash_bps: u32,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::TierDoubleSignBps, &double_sign_bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::TierDowntimeBps, &downtime_bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::TierInvalidBlockBps, &invalid_block_bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxSlashBps, &max_slash_bps);
+        env.events().publish(
+            (
+                Symbol::new(&env, "slashing"),
+                Symbol::new(&env, "tiers_configured"),
+            ),
+            (
+                double_sign_bps,
+                downtime_bps,
+                invalid_block_bps,
+                max_slash_bps,
+            ),
+        );
+        Ok(())
+    }
+
+    fn get_tier_bps(env: &Env, offence: &Offence) -> u32 {
+        match offence {
+            Offence::DoubleSign => env
+                .storage()
+                .instance()
+                .get(&DataKey::TierDoubleSignBps)
+                .unwrap_or(DEFAULT_DOUBLE_SIGN_BPS),
+            Offence::Downtime => env
+                .storage()
+                .instance()
+                .get(&DataKey::TierDowntimeBps)
+                .unwrap_or(DEFAULT_DOWNTIME_BPS),
+            Offence::InvalidBlock => env
+                .storage()
+                .instance()
+                .get(&DataKey::TierInvalidBlockBps)
+                .unwrap_or(DEFAULT_INVALID_BLOCK_BPS),
+            Offence::None => 0,
+        }
+    }
+
+    fn get_max_slash_bps(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxSlashBps)
+            .unwrap_or(DEFAULT_MAX_BPS)
     }
 
     /// Register an authorized evidence submitter.
@@ -302,33 +390,44 @@ impl SlashingModule {
         next
     }
 
-    // ── Core: submit evidence & slash ─────────────────────────────────────────
+    // ── Commit-Reveal helpers ─────────────────────────────────────────────────
 
-    /// Submit evidence of misbehavior (proposes a validator slash).
+    /// Compute sha256(evidence || salt) as a `Bytes` value suitable for
+    /// comparison with the stored commitment.
+    fn hash_commitment(env: &Env, evidence: &Bytes, salt: &Bytes) -> Bytes {
+        let mut data = Bytes::new(env);
+        data.append(evidence);
+        data.append(salt);
+        let hash: BytesN<32> = env.crypto().sha256(&data).into();
+        Bytes::from(hash)
+    }
+
+    // ── Core: commit evidence ─────────────────────────────────────────────────
+
+    /// Phase 1 of commit-reveal: submit the commitment hash of evidence.
     ///
-    /// * `evidence_hash` – unique fingerprint of the raw evidence bytes (duplicate guard).
-    /// * `actor`         – address being slashed.
-    /// * `offence`       – classification used to look up the penalty ratio.
+    /// `commitment` must equal `sha256(evidence_bytes || salt_bytes)`.
+    /// The actual evidence is only revealed in `reveal_evidence`, preventing
+    /// front-running and griefing of evidence submission.
     pub fn submit_evidence(
         env: Env,
         submitter: Address,
-        evidence_hash: Bytes,
+        commitment: Bytes,
         actor: Address,
         offence: Offence,
     ) -> Result<u64, ContractError> {
         Self::require_submitter(&env, &submitter)?;
 
-        // Duplicate evidence check
+        // Duplicate commitment check (same commitment = same evidence+salt pair)
         if env
             .storage()
             .persistent()
-            .has(&DataKey::SlashRecord(evidence_hash.clone()))
+            .has(&DataKey::SlashRecord(commitment.clone()))
         {
             return Err(ContractError::DuplicateEvidence);
         }
 
-        // Actor must not already be jailed (cannot re-slash a jailed actor for a
-        // new offence until governance unjails them; prevents double-jailing races).
+        // Actor must not already be jailed
         let already_jailed: bool = env
             .storage()
             .persistent()
@@ -338,13 +437,13 @@ impl SlashingModule {
             return Err(ContractError::AlreadyJailed);
         }
 
-        // Determine penalty ratio
-        let penalty_bps: u32 = match offence {
-            Offence::DoubleSign => OFFENCE_DOUBLE_SIGN_BPS,
-            Offence::Downtime => OFFENCE_DOWNTIME_BPS,
-            Offence::InvalidBlock => OFFENCE_INVALID_BLOCK_BPS,
-            Offence::None => return Err(ContractError::UnknownOffence),
-        };
+        // Determine penalty ratio from configurable tiers, bounded by max
+        let raw_bps: u32 = Self::get_tier_bps(&env, &offence);
+        if raw_bps == 0 {
+            return Err(ContractError::UnknownOffence);
+        }
+        let max_bps = Self::get_max_slash_bps(&env);
+        let penalty_bps = raw_bps.min(max_bps);
 
         // Load current staked balance
         let balance: i128 = env
@@ -359,13 +458,13 @@ impl SlashingModule {
 
         // Proportional slash – saturating at full balance (no over-slash)
         let slash_amount = (balance * penalty_bps as i128) / MAX_BPS as i128;
-        let slash_amount = slash_amount.min(balance); // cap at balance
+        let slash_amount = slash_amount.min(balance);
 
         // Generate slash ID
         let slash_id = Self::next_slash_id(&env);
         let deadline = env.ledger().timestamp() + Self::challenge_window(env.clone());
 
-        // Create PendingSlash
+        // Create PendingSlash; revealed = false until reveal_evidence succeeds
         let pending = PendingSlash {
             id: slash_id,
             actor: actor.clone(),
@@ -373,7 +472,7 @@ impl SlashingModule {
             deadline,
             status: SlashStatus::Pending,
             is_validator: true,
-            evidence_hash: Some(evidence_hash.clone()),
+            evidence_hash: Some(commitment.clone()),
             offence: offence.clone(),
             submitter: Some(submitter.clone()),
             penalty_bps,
@@ -381,30 +480,33 @@ impl SlashingModule {
             reason: None,
         };
 
-        // Save PendingSlash
         env.storage()
             .persistent()
             .set(&DataKey::PendingSlash(slash_id), &pending);
 
-        // Mark evidence hash as used/pending to block duplicate proposals with the same hash
+        // Mark commitment as pending (duplicate guard); store minimal evidence record
         let evidence_record = SlashEvidence {
             actor: actor.clone(),
             offence: offence.clone(),
             submitter: submitter.clone(),
             submitted_at: env.ledger().timestamp(),
             penalty_bps,
-            slashed_amount: slash_amount,
+            slashed_amount: 0, // updated at finalization
         };
-        env.storage().persistent().set(
-            &DataKey::SlashRecord(evidence_hash.clone()),
-            &evidence_record,
-        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::SlashRecord(commitment.clone()), &evidence_record);
 
-        // Emit proposed event
+        // CommitmentRevealed starts false
+        env.storage()
+            .persistent()
+            .set(&DataKey::CommitmentRevealed(slash_id), &false);
+
+        // Emit evidence_committed event
         env.events().publish(
             (
                 Symbol::new(&env, "slashing"),
-                Symbol::new(&env, "proposed"),
+                Symbol::new(&env, "evidence_committed"),
                 actor,
             ),
             (slash_id, slash_amount, deadline),
@@ -413,13 +515,77 @@ impl SlashingModule {
         Ok(slash_id)
     }
 
-    /// Propose a slash for an actor.
-    /// Callable by authorized submitter or registered bond contract or admin.
+    /// Phase 2 of commit-reveal: reveal evidence and salt.
+    ///
+    /// Computes `sha256(evidence || salt)` on-chain and verifies it matches
+    /// the commitment stored at `submit_evidence` time. Must be called before
+    /// `finalize_slash` for validator slashes.
+    pub fn reveal_evidence(
+        env: Env,
+        submitter: Address,
+        slash_id: u64,
+        evidence: Bytes,
+        salt: Bytes,
+    ) -> Result<(), ContractError> {
+        Self::require_submitter(&env, &submitter)?;
+
+        let pending: PendingSlash = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingSlash(slash_id))
+            .ok_or(ContractError::SlashNotFound)?;
+
+        if pending.status != SlashStatus::Pending {
+            return Err(ContractError::SlashAlreadyResolved);
+        }
+
+        // Check we haven't already revealed
+        let already_revealed: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CommitmentRevealed(slash_id))
+            .unwrap_or(false);
+
+        // If already revealed, it's a no-op (idempotent)
+        if already_revealed {
+            return Ok(());
+        }
+
+        let computed = Self::hash_commitment(&env, &evidence, &salt);
+
+        let commitment = pending.evidence_hash.clone().unwrap_or(Bytes::new(&env));
+
+        if computed != commitment {
+            return Err(ContractError::InvalidReveal);
+        }
+
+        // Mark as revealed
+        env.storage()
+            .persistent()
+            .set(&DataKey::CommitmentRevealed(slash_id), &true);
+
+        // Emit evidence_revealed event
+        env.events().publish(
+            (
+                Symbol::new(&env, "slashing"),
+                Symbol::new(&env, "evidence_revealed"),
+                pending.actor,
+            ),
+            (slash_id, pending.penalty_bps),
+        );
+
+        Ok(())
+    }
+
+    /// Propose a slash for an actor with a specific penalty tier (bps).
+    ///
+    /// The `penalty_bps` is bounded by the configured `max_slash_bps`.
+    /// This flow does NOT require commit-reveal (non-validator slash).
     pub fn propose_slash(
         env: Env,
         submitter: Address,
         actor: Address,
-        amount: i128,
+        penalty_bps: u32,
     ) -> Result<u64, ContractError> {
         // Enforce authorization: caller must be Admin, authorized Submitter, or BondContract
         let admin: Address = env
@@ -448,6 +614,23 @@ impl SlashingModule {
         }
         submitter.require_auth();
 
+        let max_bps = Self::get_max_slash_bps(&env);
+        let effective_bps = penalty_bps.min(max_bps);
+
+        // Compute slash amount from the actor's staked balance
+        let balance: i128 = env
+            .storage()
+            .persistent()
+            .get::<_, i128>(&DataKey::StakedBalance(actor.clone()))
+            .unwrap_or(0);
+
+        if balance == 0 {
+            return Err(ContractError::ZeroBalance);
+        }
+
+        let amount = (balance * effective_bps as i128) / MAX_BPS as i128;
+        let amount = amount.min(balance);
+
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
@@ -465,7 +648,7 @@ impl SlashingModule {
             evidence_hash: None,
             offence: Offence::None,
             submitter: Some(submitter),
-            penalty_bps: 0,
+            penalty_bps: effective_bps,
             inspection_id: None,
             reason: None,
         };
@@ -480,13 +663,16 @@ impl SlashingModule {
                 Symbol::new(&env, "proposed"),
                 actor,
             ),
-            (slash_id, amount, deadline),
+            (slash_id, amount, deadline, effective_bps),
         );
 
         Ok(slash_id)
     }
 
     /// Finalize a pending slash after the challenge window has elapsed.
+    ///
+    /// For validator slashes (`is_validator = true`), the evidence commitment
+    /// must have been validly revealed via `reveal_evidence` before this call.
     pub fn finalize_slash(env: Env, caller: Address, slash_id: u64) -> Result<(), ContractError> {
         // Enforce authorization: caller must be Admin, authorized Submitter, or BondContract
         let admin: Address = env
@@ -527,6 +713,18 @@ impl SlashingModule {
 
         if env.ledger().timestamp() < pending.deadline {
             return Err(ContractError::ChallengeWindowNotElapsed);
+        }
+
+        // Validator slashes require a valid commit-reveal before finalization
+        if pending.is_validator {
+            let revealed: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CommitmentRevealed(slash_id))
+                .unwrap_or(false);
+            if !revealed {
+                return Err(ContractError::CommitmentNotRevealed);
+            }
         }
 
         pending.status = SlashStatus::Finalized;
@@ -575,7 +773,7 @@ impl SlashingModule {
                 .persistent()
                 .set(&DataKey::SlashCount(actor.clone()), &(prev_count + 1));
 
-            // Publish finalized event
+            // Update slash record with finalized amount
             let evidence_record = SlashEvidence {
                 actor: actor.clone(),
                 offence: pending.offence.clone(),
@@ -585,7 +783,6 @@ impl SlashingModule {
                 slashed_amount: actual_slash,
             };
 
-            // Overwrite slash record with finalized amount
             if let Some(hash) = pending.evidence_hash.clone() {
                 env.storage()
                     .persistent()
@@ -615,16 +812,41 @@ impl SlashingModule {
                 ),
                 evidence_record,
             );
+        } else {
+            // Non-validator slash (propose_slash flow): reduce staked balance and track.
+            let actor = pending.actor.clone();
+            let slash_amount = pending.amount;
+            if slash_amount > 0 {
+                let balance: i128 = env
+                    .storage()
+                    .persistent()
+                    .get::<_, i128>(&DataKey::StakedBalance(actor.clone()))
+                    .unwrap_or(0);
+                let actual_slash = slash_amount.min(balance);
+                let new_balance = balance - actual_slash;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::StakedBalance(actor.clone()), &new_balance);
+                let prev_total: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::SlashedAmount(actor.clone()))
+                    .unwrap_or(0);
+                env.storage().persistent().set(
+                    &DataKey::SlashedAmount(actor.clone()),
+                    &(prev_total + actual_slash),
+                );
+            }
         }
 
-        // Emit general finalized event
+        // Emit slash_finalized with tier and amount
         env.events().publish(
             (
                 Symbol::new(&env, "slashing"),
-                Symbol::new(&env, "finalized"),
+                Symbol::new(&env, "slash_finalized"),
                 pending.actor.clone(),
             ),
-            slash_id,
+            (slash_id, pending.amount, pending.penalty_bps),
         );
 
         Ok(())
@@ -651,6 +873,7 @@ impl SlashingModule {
             .set(&DataKey::PendingSlash(slash_id), &pending);
 
         // If it was a validator slash, remove the duplicate evidence guard
+        // so the same commitment can be re-submitted after cancellation.
         if pending.is_validator {
             if let Some(hash) = pending.evidence_hash {
                 env.storage()
@@ -658,6 +881,11 @@ impl SlashingModule {
                     .remove(&DataKey::SlashRecord(hash));
             }
         }
+
+        // Clear the revealed flag
+        env.storage()
+            .persistent()
+            .remove(&DataKey::CommitmentRevealed(slash_id));
 
         env.events().publish(
             (
@@ -771,12 +999,6 @@ impl SlashingModule {
     }
 
     // ── Inspector bond slashing (Issue #925) ──────────────────────────────────
-    //
-    // Companion flow to the validator slashing above: the `bond_collateral`
-    // contract calls `slash` here when an admin decides an inspector's
-    // collateral should be reduced for a specific inspection. We gate `slash`
-    // to the one registered bond contract so no other caller can record a
-    // slash against an inspector.
 
     /// Register the bond_collateral contract address authorised to call `slash`.
     pub fn set_bond_contract(
@@ -804,9 +1026,7 @@ impl SlashingModule {
         env.storage().instance().get(&DataKey::BondContract)
     }
 
-    /// Record a slash against an inspector for a specific inspection. Only
-    /// callable by the registered bond contract; the caller is checked against
-    /// both Soroban auth and the registered address. Returns the amount slashed.
+    /// Record a slash against an inspector for a specific inspection.
     pub fn slash(
         env: Env,
         caller: Address,
@@ -906,7 +1126,22 @@ mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, testutils::Ledger, Bytes, Env};
 
-    fn evidence(env: &Env, tag: &str) -> Bytes {
+    /// Build a sha256 commitment from raw tag string and a salt.
+    fn make_commitment(env: &Env, evidence_tag: &str, salt_tag: &str) -> Bytes {
+        let evidence = Bytes::from_slice(env, evidence_tag.as_bytes());
+        let salt = Bytes::from_slice(env, salt_tag.as_bytes());
+        let mut data = Bytes::new(env);
+        data.append(&evidence);
+        data.append(&salt);
+        let hash: BytesN<32> = env.crypto().sha256(&data).into();
+        Bytes::from(hash)
+    }
+
+    fn evidence_bytes(env: &Env, tag: &str) -> Bytes {
+        Bytes::from_slice(env, tag.as_bytes())
+    }
+
+    fn salt_bytes(env: &Env, tag: &str) -> Bytes {
         Bytes::from_slice(env, tag.as_bytes())
     }
 
@@ -931,6 +1166,24 @@ mod tests {
         client.set_staked_balance(admin, actor, &amount);
     }
 
+    /// Full commit-reveal helper: submit commitment then immediately reveal.
+    fn commit_and_reveal(
+        env: &Env,
+        client: &SlashingModuleClient<'_>,
+        submitter: &Address,
+        evidence_tag: &str,
+        salt_tag: &str,
+        actor: &Address,
+        offence: &Offence,
+    ) -> u64 {
+        let commitment = make_commitment(env, evidence_tag, salt_tag);
+        let slash_id = client.submit_evidence(submitter, &commitment, actor, offence);
+        let ev = evidence_bytes(env, evidence_tag);
+        let salt = salt_bytes(env, salt_tag);
+        client.reveal_evidence(submitter, &slash_id, &ev, &salt);
+        slash_id
+    }
+
     // ── happy-path slash ──────────────────────────────────────────────────────
 
     #[test]
@@ -941,9 +1194,12 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let slash_id = client.submit_evidence(
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
             &submitter,
-            &evidence(&env, "ev1"),
+            "ev1",
+            "salt1",
             &actor,
             &Offence::DoubleSign,
         );
@@ -975,9 +1231,12 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 100_000);
 
-        let slash_id = client.submit_evidence(
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
             &submitter,
-            &evidence(&env, "ev2"),
+            "ev2",
+            "salt2",
             &actor,
             &Offence::Downtime,
         );
@@ -1003,15 +1262,74 @@ mod tests {
         seed_balance(&client, &admin, &actor, 10_000);
         seed_balance(&client, &admin, &actor2, 10_000);
 
-        let ev = evidence(&env, "same_hash");
-        client.submit_evidence(&submitter, &ev, &actor, &Offence::Downtime);
+        let commitment = make_commitment(&env, "same_evidence", "same_salt");
+        client.submit_evidence(&submitter, &commitment, &actor, &Offence::Downtime);
 
-        // Second submission with same hash must fail immediately even if not finalized
-        let result = client.try_submit_evidence(&submitter, &ev, &actor2, &Offence::Downtime);
+        // Second submission with same commitment must fail
+        let result =
+            client.try_submit_evidence(&submitter, &commitment, &actor2, &Offence::Downtime);
         assert_eq!(
             result.unwrap_err().unwrap(),
             ContractError::DuplicateEvidence
         );
+    }
+
+    // ── bad reveal rejected ───────────────────────────────────────────────────
+
+    #[test]
+    fn bad_reveal_rejected() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 10_000);
+
+        let commitment = make_commitment(&env, "real_ev", "real_salt");
+        let slash_id =
+            client.submit_evidence(&submitter, &commitment, &actor, &Offence::DoubleSign);
+
+        // Reveal with wrong salt → hash mismatch
+        let wrong_salt = salt_bytes(&env, "wrong_salt");
+        let real_ev = evidence_bytes(&env, "real_ev");
+        let err = client
+            .try_reveal_evidence(&submitter, &slash_id, &real_ev, &wrong_salt)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidReveal);
+
+        // Reveal with wrong evidence → hash mismatch
+        let wrong_ev = evidence_bytes(&env, "wrong_ev");
+        let real_salt = salt_bytes(&env, "real_salt");
+        let err2 = client
+            .try_reveal_evidence(&submitter, &slash_id, &wrong_ev, &real_salt)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err2, ContractError::InvalidReveal);
+    }
+
+    // ── finalize without reveal rejected ─────────────────────────────────────
+
+    #[test]
+    fn finalize_without_reveal_fails() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 10_000);
+
+        let commitment = make_commitment(&env, "evX", "saltX");
+        let slash_id =
+            client.submit_evidence(&submitter, &commitment, &actor, &Offence::DoubleSign);
+
+        // Advance past challenge window WITHOUT revealing
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+
+        let err = client
+            .try_finalize_slash(&submitter, &slash_id)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::CommitmentNotRevealed);
     }
 
     // ── over-slash boundary ───────────────────────────────────────────────────
@@ -1022,12 +1340,14 @@ mod tests {
         let (admin, submitter, client) = setup(&env);
         let actor = Address::generate(&env);
 
-        // Even if penalty ratio would exceed 100 %, balance must not go negative.
         seed_balance(&client, &admin, &actor, 1); // tiny balance
 
-        let slash_id = client.submit_evidence(
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
             &submitter,
-            &evidence(&env, "tiny"),
+            "tiny",
+            "salttiny",
             &actor,
             &Offence::DoubleSign,
         );
@@ -1049,9 +1369,12 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let slash_id = client.submit_evidence(
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
             &submitter,
-            &evidence(&env, "ev_j1"),
+            "ev_j1",
+            "s1",
             &actor,
             &Offence::Downtime,
         );
@@ -1061,12 +1384,9 @@ mod tests {
         client.finalize_slash(&submitter, &slash_id);
         assert!(client.is_jailed(&actor));
 
-        let result = client.try_submit_evidence(
-            &submitter,
-            &evidence(&env, "ev_j2"),
-            &actor,
-            &Offence::InvalidBlock,
-        );
+        let commitment2 = make_commitment(&env, "ev_j2", "s2");
+        let result =
+            client.try_submit_evidence(&submitter, &commitment2, &actor, &Offence::InvalidBlock);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::AlreadyJailed);
     }
 
@@ -1080,9 +1400,12 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let slash_id = client.submit_evidence(
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
             &submitter,
-            &evidence(&env, "ev_u1"),
+            "ev_u1",
+            "su1",
             &actor,
             &Offence::Downtime,
         );
@@ -1114,9 +1437,12 @@ mod tests {
         let actor = Address::generate(&env);
 
         seed_balance(&client, &admin, &actor, 10_000);
-        let slash_id = client.submit_evidence(
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
             &submitter,
-            &evidence(&env, "ev_u2"),
+            "ev_u2",
+            "su2",
             &actor,
             &Offence::Downtime,
         );
@@ -1144,12 +1470,8 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let result = client.try_submit_evidence(
-            &stranger,
-            &evidence(&env, "ev_s1"),
-            &actor,
-            &Offence::Downtime,
-        );
+        let commitment = make_commitment(&env, "ev_s1", "ss1");
+        let result = client.try_submit_evidence(&stranger, &commitment, &actor, &Offence::Downtime);
         assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
     }
 
@@ -1163,9 +1485,12 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let slash_id = client.submit_evidence(
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
             &submitter,
-            &evidence(&env, "ev_t1"),
+            "ev_t1",
+            "st1",
             &actor,
             &Offence::DoubleSign,
         );
@@ -1186,8 +1511,9 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let ev = evidence(&env, "ev_t2");
-        let slash_id = client.submit_evidence(&submitter, &ev, &actor, &Offence::DoubleSign);
+        let commitment = make_commitment(&env, "ev_t2", "st2");
+        let slash_id =
+            client.submit_evidence(&submitter, &commitment, &actor, &Offence::DoubleSign);
 
         // Cancel during challenge window
         client.cancel_slash(&admin, &slash_id);
@@ -1199,8 +1525,8 @@ mod tests {
         // Staked balance remains unchanged
         assert_eq!(client.staked_balance(&actor), 10_000);
 
-        // Evidence can be submitted again since cancellation cleared the SlashRecord
-        let new_id = client.submit_evidence(&submitter, &ev, &actor, &Offence::DoubleSign);
+        // Commitment can be re-submitted since cancellation cleared the SlashRecord
+        let new_id = client.submit_evidence(&submitter, &commitment, &actor, &Offence::DoubleSign);
         assert_ne!(slash_id, new_id);
     }
 
@@ -1213,9 +1539,12 @@ mod tests {
 
         seed_balance(&client, &admin, &actor, 10_000);
 
-        let slash_id = client.submit_evidence(
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
             &submitter,
-            &evidence(&env, "ev_t3"),
+            "ev_t3",
+            "st3",
             &actor,
             &Offence::DoubleSign,
         );
@@ -1230,7 +1559,7 @@ mod tests {
         let res_can = client.try_cancel_slash(&stranger, &slash_id);
         assert_eq!(res_can.unwrap_err().unwrap(), ContractError::NotAuthorized);
 
-        // Admin is authorized to cancel or finalize
+        // Admin is authorized to finalize
         client.finalize_slash(&admin, &slash_id);
     }
 
@@ -1249,9 +1578,12 @@ mod tests {
         client.set_challenge_window(&admin, &86_400);
         assert_eq!(client.challenge_window(), 86_400);
 
-        let slash_id = client.submit_evidence(
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
             &submitter,
-            &evidence(&env, "ev_t4"),
+            "ev_t4",
+            "st4",
             &actor,
             &Offence::DoubleSign,
         );
@@ -1397,9 +1729,12 @@ mod tests {
         client.unpause(&admin);
 
         // submit_evidence should succeed after unpause
-        let slash_id = client.submit_evidence(
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
             &submitter,
-            &evidence(&env, "ev_unpause"),
+            "ev_unpause",
+            "s_unpause",
             &actor,
             &Offence::Downtime,
         );
@@ -1438,9 +1773,12 @@ mod tests {
         let actor = Address::generate(&env);
 
         seed_balance(&client, &admin, &actor, 10_000);
-        let slash_id = client.submit_evidence(
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
             &submitter,
-            &evidence(&env, "ev_getter"),
+            "ev_getter",
+            "s_getter",
             &actor,
             &Offence::Downtime,
         );
@@ -1456,5 +1794,160 @@ mod tests {
         assert_eq!(client.slash_count(&actor), 1);
         assert!(client.is_jailed(&actor));
         assert!(client.is_paused());
+    }
+
+    // ── Tiered slashing (Issue #1131) ─────────────────────────────────────────
+
+    #[test]
+    fn configurable_tiers_override_defaults() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 100_000);
+
+        // Configure: DoubleSign = 5% (500 bps), max = 50% (5000 bps)
+        client.configure_tiers(&admin, &500u32, &100u32, &200u32, &5000u32);
+
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_tier",
+            "st_tier",
+            &actor,
+            &Offence::DoubleSign,
+        );
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &slash_id);
+
+        // 5% of 100_000 = 5_000 slashed → 95_000 remaining
+        assert_eq!(client.staked_balance(&actor), 95_000);
+    }
+
+    #[test]
+    fn max_slash_bps_caps_penalty() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 100_000);
+
+        // Configure: DoubleSign = 50% but max = 5% → capped at 5%
+        client.configure_tiers(&admin, &5000u32, &100u32, &200u32, &500u32);
+
+        let slash_id = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_cap",
+            "sc",
+            &actor,
+            &Offence::DoubleSign,
+        );
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &slash_id);
+
+        // Capped at 5% of 100_000 = 5_000 slashed → 95_000 remaining
+        assert_eq!(client.staked_balance(&actor), 95_000);
+    }
+
+    #[test]
+    fn tier_mapping_downtime_vs_double_sign() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+
+        let actor_a = Address::generate(&env);
+        let actor_b = Address::generate(&env);
+        seed_balance(&client, &admin, &actor_a, 100_000);
+        seed_balance(&client, &admin, &actor_b, 100_000);
+
+        // Default tiers: DoubleSign=10%, Downtime=1%
+        let id_a = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_ds",
+            "ss_ds",
+            &actor_a,
+            &Offence::DoubleSign,
+        );
+        let id_b = commit_and_reveal(
+            &env,
+            &client,
+            &submitter,
+            "ev_dt",
+            "ss_dt",
+            &actor_b,
+            &Offence::Downtime,
+        );
+
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&submitter, &id_a);
+        client.finalize_slash(&submitter, &id_b);
+
+        // DoubleSign slashes more than Downtime
+        let slashed_a = client.total_slashed(&actor_a);
+        let slashed_b = client.total_slashed(&actor_b);
+        assert!(
+            slashed_a > slashed_b,
+            "DoubleSign should slash more: {} vs {}",
+            slashed_a,
+            slashed_b
+        );
+        // DoubleSign = 10_000, Downtime = 1_000
+        assert_eq!(slashed_a, 10_000);
+        assert_eq!(slashed_b, 1_000);
+    }
+
+    // ── propose_slash with tiered bps ─────────────────────────────────────────
+
+    #[test]
+    fn propose_slash_tiered_bps() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 10_000);
+
+        // Propose with 500 bps (5%)
+        let slash_id = client.propose_slash(&admin, &actor, &500u32);
+
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&admin, &slash_id);
+
+        // 5% of 10_000 = 500 slashed
+        assert_eq!(client.total_slashed(&actor), 500);
+    }
+
+    #[test]
+    fn propose_slash_bounded_by_max_bps() {
+        let env = Env::default();
+        let (admin, submitter, client) = setup(&env);
+        let actor = Address::generate(&env);
+
+        seed_balance(&client, &admin, &actor, 10_000);
+
+        // Set max to 10% (1000 bps)
+        client.configure_tiers(&admin, &1000u32, &100u32, &500u32, &1000u32);
+
+        // Propose 50% (5000 bps) → capped to 10% (1000 bps)
+        let slash_id = client.propose_slash(&admin, &actor, &5000u32);
+        let pending = client.get_pending_slash(&slash_id).unwrap();
+        assert_eq!(
+            pending.penalty_bps, 1000,
+            "penalty should be capped at max 1000 bps"
+        );
+
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 604_801);
+        client.finalize_slash(&admin, &slash_id);
+
+        // 10% of 10_000 = 1_000 slashed
+        assert_eq!(client.total_slashed(&actor), 1_000);
     }
 }

@@ -69,6 +69,16 @@ fn pro_rata_three_stakers() {
     assert!((ra - 500).abs() <= 1, "a expected ~500, got {}", ra);
     assert!((rb - 300).abs() <= 1, "b expected ~300, got {}", rb);
     assert!((rc - 200).abs() <= 1, "c expected ~200, got {}", rc);
+
+    // Conservation: sum of claimable must not exceed funded
+    assert!(
+        ra + rb + rc <= total_reward,
+        "conservation violated: {} + {} + {} > {}",
+        ra,
+        rb,
+        rc,
+        total_reward
+    );
 }
 
 // ── 3. Late joiner ────────────────────────────────────────────────────────────
@@ -105,6 +115,14 @@ fn late_joiner_earns_less() {
     );
     // Late joiner should still earn something (from second funding)
     assert!(late_rewards > 0);
+
+    // Conservation invariant
+    assert!(
+        early_rewards + late_rewards <= 1_000i128,
+        "conservation violated: {} + {} > 1000",
+        early_rewards,
+        late_rewards
+    );
 }
 
 // ── 4. Zero stakers ───────────────────────────────────────────────────────────
@@ -126,6 +144,8 @@ fn zero_stakers_distribute_does_not_panic() {
     let epoch = client.get_epoch(&1).unwrap();
     assert!(epoch.sealed);
     assert_eq!(epoch.total_rewards, 1_000);
+    // All funded amount is dust since no stakers received it
+    assert_eq!(epoch.dust, 1_000);
 }
 
 // ── 5. Epoch boundary ─────────────────────────────────────────────────────────
@@ -241,6 +261,12 @@ fn large_numbers_100_stakers_no_overflow() {
     }
     // Total claimed should be close to total funded (rounding losses ≤ 100)
     assert!((total_claimed - 100_000_000).abs() <= 100);
+    // Conservation: total claimed must never exceed funded
+    assert!(
+        total_claimed <= 100_000_000,
+        "over-distribution: {} > 100_000_000",
+        total_claimed
+    );
 }
 
 // ── 9. Paused state ───────────────────────────────────────────────────────────
@@ -261,4 +287,186 @@ fn distribute_rewards_fails_when_paused() {
     client.unpause(&admin);
     assert!(!client.is_paused());
     assert!(client.try_fund_epoch_rewards(&admin, &1_000).is_ok());
+}
+
+// ── 10. Conservation: uneven stake split ─────────────────────────────────────
+
+#[test]
+fn conservation_uneven_split_sum_never_exceeds_funded() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    // Stake amounts that don't divide evenly into the reward
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+
+    client.stake(&a, &7);
+    client.stake(&b, &3);
+    client.stake(&c, &1);
+
+    let funded: i128 = 11;
+    client.fund_epoch_rewards(&admin, &funded);
+
+    env.ledger().with_mut(|li| li.timestamp = duration + 1);
+    client.seal_epoch(&admin, &1, &100);
+
+    let ra = client.get_claimable(&a);
+    let rb = client.get_claimable(&b);
+    let rc = client.get_claimable(&c);
+
+    // Core invariant: no over-distribution
+    assert!(
+        ra + rb + rc <= funded,
+        "conservation violated: {} + {} + {} = {} > {}",
+        ra,
+        rb,
+        rc,
+        ra + rb + rc,
+        funded
+    );
+
+    // Dust must be non-negative and equal funded - sum_claimable
+    let epoch = client.get_epoch(&1).unwrap();
+    let dust = epoch.dust;
+    assert!(dust >= 0, "dust should be non-negative, got {}", dust);
+    assert_eq!(
+        dust,
+        funded - ra - rb - rc,
+        "dust mismatch: epoch.dust={} funded-sum={}",
+        dust,
+        funded - ra - rb - rc
+    );
+    assert_eq!(
+        epoch.total_claimable_at_seal,
+        ra + rb + rc,
+        "total_claimable_at_seal should match sum of claimable"
+    );
+}
+
+// ── 11. Dust carry: funded dust is tracked, not silently lost ────────────────
+
+#[test]
+fn dust_tracked_in_epoch_info() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    // 3 stakers, total 10 units. Fund 11 → remainder 1 distributes unevenly.
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    client.stake(&a, &4);
+    client.stake(&b, &3);
+    client.stake(&c, &3);
+
+    let funded: i128 = 11;
+    client.fund_epoch_rewards(&admin, &funded);
+
+    env.ledger().with_mut(|li| li.timestamp = duration + 1);
+    client.seal_epoch(&admin, &1, &100);
+
+    let epoch = client.get_epoch(&1).unwrap();
+    assert!(epoch.sealed);
+    // dust must be explicitly tracked
+    assert!(epoch.dust >= 0);
+    // funded = claimable + dust (no funds disappear)
+    assert_eq!(epoch.total_claimable_at_seal + epoch.dust, funded);
+
+    // Next epoch carries the full funded amount (including dust)
+    let epoch2 = client.get_epoch(&2).unwrap();
+    assert_eq!(epoch2.carried_forward, funded);
+}
+
+// ── 12. Claim idempotency ─────────────────────────────────────────────────────
+
+#[test]
+fn claim_is_idempotent() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    let user = Address::generate(&env);
+    client.stake(&user, &1_000);
+    client.fund_epoch_rewards(&admin, &500);
+
+    env.ledger().with_mut(|li| li.timestamp = duration + 1);
+    client.seal_epoch(&admin, &1, &100);
+
+    let first = client.claim(&user);
+    assert!(first > 0);
+
+    // Second claim: must return 0 (idempotent, not double-paying)
+    let second = client.claim(&user);
+    assert_eq!(second, 0, "second claim must be 0");
+
+    // Third claim: still 0
+    let third = client.claim(&user);
+    assert_eq!(third, 0, "third claim must be 0");
+}
+
+// ── 13. Claim before seal rejected ───────────────────────────────────────────
+
+#[test]
+fn claim_before_any_seal_is_rejected() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    let user = Address::generate(&env);
+    client.stake(&user, &1_000);
+    client.fund_epoch_rewards(&admin, &500);
+
+    // No seal yet — current_epoch is still 1
+    let result = client.try_claim(&user);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        ContractError::ClaimBeforeSeal,
+        "claim before any seal must be rejected"
+    );
+}
+
+// ── 14. Full-claim conservation across multiple epochs ───────────────────────
+
+#[test]
+fn full_claim_conservation_multi_epoch() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.stake(&a, &600);
+    client.stake(&b, &400);
+
+    let funded_e1: i128 = 1_000;
+    client.fund_epoch_rewards(&admin, &funded_e1);
+
+    // Seal epoch 1
+    env.ledger().with_mut(|li| li.timestamp = duration + 1);
+    client.seal_epoch(&admin, &1, &100);
+
+    // Epoch 2 funding
+    let funded_e2: i128 = 500;
+    client.fund_epoch_rewards(&admin, &funded_e2);
+
+    // Seal epoch 2
+    env.ledger().with_mut(|li| li.timestamp = 2 * duration + 2);
+    client.seal_epoch(&admin, &2, &100);
+
+    // Both users claim
+    let ra = client.claim(&a);
+    let rb = client.claim(&b);
+
+    let total_funded = funded_e1 + funded_e2;
+    assert!(
+        ra + rb <= total_funded,
+        "over-distribution across epochs: {} + {} = {} > {}",
+        ra,
+        rb,
+        ra + rb,
+        total_funded
+    );
 }
