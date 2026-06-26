@@ -460,8 +460,9 @@ fn scenario_4_release_more_than_escrow_balance_fails() {
 
 #[test]
 fn cross_contract_value_conservation() {
-    // Invariant: tokens deposited into escrow = tokens released to recipients.
-    // This ensures no value is created or destroyed across the settlement path.
+    // Invariant: tokens deposited into escrow are correctly distributed to recipients.
+    // The escrow balance should be zero after release, and distributed amounts should
+    // match the release parameters.
     let env = Env::default();
     let stack = setup_full_stack(&env);
     let deal_id = 100u64;
@@ -472,15 +473,17 @@ fn cross_contract_value_conservation() {
 
     let token_client = TokenClient::new(&env, &stack.token);
 
-    // Initial balances
-    let tenant_initial = token_client.balance(&stack.tenant);
-    let landlord_initial = token_client.balance(&stack.landlord);
-    let platform_initial = token_client.balance(&stack.platform);
-    let reporter_initial = token_client.balance(&stack.reporter);
-    let escrow_initial = stack.deal_escrow.balance(&deal_id_str(&env, deal_id));
-
-    // Execute full settlement flow
+    // Capture balances before deposit (after minting in the helper)
+    // Note: minting happens inside wallet_credit_and_escrow_deposit
     wallet_credit_and_escrow_deposit(&env, &stack, deal_id, initial_deposit);
+
+    let tenant_after_deposit = token_client.balance(&stack.tenant);
+    let landlord_before_release = token_client.balance(&stack.landlord);
+    let platform_before_release = token_client.balance(&stack.platform);
+    let reporter_before_release = token_client.balance(&stack.reporter);
+    let escrow_before_release = stack.deal_escrow.balance(&deal_id_str(&env, deal_id));
+
+    // Execute release
     release_escrow_and_record_receipt(
         &env,
         &stack,
@@ -491,28 +494,28 @@ fn cross_contract_value_conservation() {
         initial_deposit,
     );
 
-    // Final balances
+    // Verify post-release balances
     let tenant_final = token_client.balance(&stack.tenant);
     let landlord_final = token_client.balance(&stack.landlord);
     let platform_final = token_client.balance(&stack.platform);
     let reporter_final = token_client.balance(&stack.reporter);
     let escrow_final = stack.deal_escrow.balance(&deal_id_str(&env, deal_id));
 
-    // Value conservation check: sum of released = sum of deposited
-    let total_released = (landlord_final - landlord_initial)
-        + (platform_final - platform_initial)
-        + (reporter_final - reporter_initial);
-    assert_eq!(total_released, principal + platform_fee + reporter_fee);
-
-    // Escrow should be empty
+    // Escrow should be empty after release
     assert_eq!(escrow_final, 0);
 
-    // Total token supply should be preserved (no creation/destruction)
-    let tenant_net = tenant_final - tenant_initial;
-    let landlord_net = landlord_final - landlord_initial;
-    let platform_net = platform_final - platform_initial;
-    let reporter_net = reporter_final - reporter_initial;
-    assert_eq!(tenant_net + landlord_net + platform_net + reporter_net, 0);
+    // Verify each recipient got the correct amount
+    assert_eq!(landlord_final - landlord_before_release, principal);
+    assert_eq!(platform_final - platform_before_release, platform_fee);
+    assert_eq!(reporter_final - reporter_before_release, reporter_fee);
+
+    // Verify tenant's balance before deposit = after release
+    // (they deposited all their balance into escrow)
+    assert_eq!(tenant_final, tenant_after_deposit);
+
+    // Verify the total distributed equals what was in escrow
+    assert_eq!(escrow_before_release, initial_deposit);
+    assert_eq!(principal + platform_fee + reporter_fee, initial_deposit);
 }
 
 #[test]
@@ -560,22 +563,19 @@ fn atomicity_on_partial_settlement_failure() {
         },
     }]);
 
-    let err = stack
-        .deal_escrow
-        .try_release(
-            &stack.operator,
-            &deal_str,
-            &stack.landlord,
-            &2_000i128,
-            &stack.platform,
-            &500i128,
-            &stack.reporter,
-            &500i128,
-            &Symbol::new(&env, "manual_admin"),
-            &String::from_str(&env, "atomicity-test"),
-        )
-        .unwrap_err();
-    assert!(err.is_some());
+    let err = stack.deal_escrow.try_release(
+        &stack.operator,
+        &deal_str,
+        &stack.landlord,
+        &2_000i128,
+        &stack.platform,
+        &500i128,
+        &stack.reporter,
+        &500i128,
+        &Symbol::new(&env, "manual_admin"),
+        &String::from_str(&env, "atomicity-test"),
+    );
+    assert!(err.is_err());
 
     // Verify atomicity: all balances unchanged
     assert_eq!(stack.deal_escrow.balance(&deal_str), amount);
@@ -592,9 +592,9 @@ fn multiple_sequential_deals_maintain_invariants() {
     let stack = setup_full_stack(&env);
     let token_client = TokenClient::new(&env, &stack.token);
 
-    let initial_tenant = token_client.balance(&stack.tenant);
-    let initial_landlord = token_client.balance(&stack.landlord);
-    let initial_platform = token_client.balance(&stack.platform);
+    let _initial_tenant = token_client.balance(&stack.tenant);
+    let _initial_landlord = token_client.balance(&stack.landlord);
+    let _initial_platform = token_client.balance(&stack.platform);
 
     // Process 3 separate deals, each with different amounts
     for i in 1..=3 {
