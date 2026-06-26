@@ -283,6 +283,42 @@ impl Timelock {
         Ok(())
     }
 
+    /// Explicitly expire and remove a stale queued operation (past eta + grace).
+    /// Emits `operation_expired` so indexers can track the cleared operation.
+    /// Admin-only; anyone can detect expiry, but only admin may clear the slot.
+    pub fn expire(env: Env, admin: Address, tx_hash: BytesN<32>) -> Result<(), TimelockError> {
+        admin.require_auth();
+        let current_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if admin != current_admin {
+            return Err(TimelockError::NotAuthorized);
+        }
+
+        let stored_eta: u64 = env
+            .storage()
+            .temporary()
+            .get(&DataKey::Queued(tx_hash.clone()))
+            .ok_or(TimelockError::TransactionNotQueued)?;
+
+        let now = env.ledger().timestamp();
+        if now <= stored_eta + GRACE_PERIOD {
+            return Err(TimelockError::TimestampNotMet);
+        }
+
+        env.storage()
+            .temporary()
+            .remove(&DataKey::Queued(tx_hash.clone()));
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "timelock"),
+                Symbol::new(&env, "operation_expired"),
+            ),
+            (tx_hash, stored_eta),
+        );
+
+        Ok(())
+    }
+
     /// Admin increases minimum delay; decreases are rejected (governance-only).
     pub fn set_min_delay(
         env: Env,

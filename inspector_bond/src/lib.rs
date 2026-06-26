@@ -61,6 +61,20 @@ pub struct BondRecord {
     pub slash_count: u32,
 }
 
+/// Severity tier for a slash proposal — maps to a bounded fraction of the
+/// inspector's bond via `slash_penalty_bps`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SlashSeverity {
+    /// Low — 25 % of the configured slash_penalty_bps.
+    Low = 0,
+    /// Medium — 50 % of the configured slash_penalty_bps.
+    Medium = 1,
+    /// High — 100 % of the configured slash_penalty_bps (same as direct slash).
+    High = 2,
+}
+
 /// Status of a two-phase inspector slash proposal.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,6 +91,8 @@ pub enum InspectorSlashStatus {
 pub struct PendingInspectorSlash {
     pub id: u64,
     pub inspector: Address,
+    /// Severity tier used to compute the penalty.
+    pub severity: SlashSeverity,
     /// Pre-computed penalty amount (bps applied at proposal time).
     pub penalty_amount: i128,
     /// Ledger timestamp after which `finalize_inspector_slash` is allowed.
@@ -171,6 +187,16 @@ fn slash_bps(env: &Env) -> i128 {
         .instance()
         .get::<_, i128>(&DataKey::SlashPenaltyBps)
         .unwrap_or(1000)
+}
+
+/// Returns slash_penalty_bps scaled by the severity tier fraction.
+fn tier_penalty_bps(env: &Env, severity: SlashSeverity) -> i128 {
+    let base = slash_bps(env);
+    match severity {
+        SlashSeverity::Low => base * 25 / 100,
+        SlashSeverity::Medium => base * 50 / 100,
+        SlashSeverity::High => base,
+    }
 }
 
 fn lock_days(env: &Env) -> u64 {
@@ -400,12 +426,13 @@ impl InspectorBondContract {
         next
     }
 
-    /// Propose a two-phase inspector slash.
+    /// Propose a two-phase inspector slash with a severity tier.
     ///
-    /// Records the penalty amount (computed from the current bond and configured
-    /// `slash_penalty_bps`) and sets a deadline equal to `now + challenge_window`.
-    /// The bond is NOT reduced yet.  Call `finalize_inspector_slash` after the
-    /// deadline, or `cancel_inspector_slash` to dismiss.
+    /// The penalty is computed as `bond * tier_bps / 10_000` where `tier_bps`
+    /// is derived from the configured `slash_penalty_bps` scaled by the severity
+    /// fraction (Low = 25%, Medium = 50%, High = 100%).  The bond is NOT reduced
+    /// yet.  Call `finalize_inspector_slash` after the deadline elapses, or
+    /// `cancel_inspector_slash` to dismiss during the challenge window.
     ///
     /// Only the admin (arbiter) may propose.
     pub fn propose_inspector_slash(
@@ -414,6 +441,7 @@ impl InspectorBondContract {
         inspector: Address,
         report_id: BytesN<32>,
         reason: String,
+        severity: SlashSeverity,
     ) -> Result<u64, ContractError> {
         require_admin(&env, &admin)?;
 
@@ -423,12 +451,9 @@ impl InspectorBondContract {
             .get(&DataKey::Bond(inspector.clone()))
             .ok_or(ContractError::NoBond)?;
 
-        let penalty = bond.amount * slash_bps(&env) / 10_000;
-        let penalty_amount = if penalty > bond.amount {
-            bond.amount
-        } else {
-            penalty
-        };
+        let effective_bps = tier_penalty_bps(&env, severity);
+        let penalty = bond.amount * effective_bps / 10_000;
+        let penalty_amount = penalty.min(bond.amount);
 
         let slash_id = Self::next_slash_id(&env);
         let deadline = env.ledger().timestamp() + Self::inspector_challenge_window(env.clone());
@@ -436,6 +461,7 @@ impl InspectorBondContract {
         let pending = PendingInspectorSlash {
             id: slash_id,
             inspector: inspector.clone(),
+            severity,
             penalty_amount,
             deadline,
             status: InspectorSlashStatus::Pending,
@@ -453,7 +479,7 @@ impl InspectorBondContract {
                 Symbol::new(&env, "slash_proposed"),
                 inspector,
             ),
-            (slash_id, penalty_amount, deadline),
+            (slash_id, severity as u32, penalty_amount, deadline),
         );
 
         Ok(slash_id)
@@ -512,6 +538,19 @@ impl InspectorBondContract {
             ),
             (slash_id, actual_slash, pending.report_id, pending.reason),
         );
+
+        // If the bond has fallen below the minimum the inspector is flagged and
+        // blocked from new job assignments (is_bonded() returns false).
+        if bond.amount < min_bond(&env) {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "inspector_bond"),
+                    Symbol::new(&env, "bond_below_min"),
+                    pending.inspector,
+                ),
+                (bond.amount, min_bond(&env)),
+            );
+        }
 
         Ok(actual_slash)
     }
@@ -794,7 +833,13 @@ mod tests {
 
         let report_id = BytesN::from_array(&env, &[10u8; 32]);
         let reason = soroban_sdk::String::from_str(&env, "misconduct");
-        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+        let slash_id = client.propose_inspector_slash(
+            &admin,
+            &inspector,
+            &report_id,
+            &reason,
+            &SlashSeverity::High,
+        );
 
         // Bond must NOT be reduced yet
         let bond = client.get_bond(&inspector).unwrap();
@@ -830,7 +875,13 @@ mod tests {
 
         let report_id = BytesN::from_array(&env, &[11u8; 32]);
         let reason = soroban_sdk::String::from_str(&env, "disputed");
-        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+        let slash_id = client.propose_inspector_slash(
+            &admin,
+            &inspector,
+            &report_id,
+            &reason,
+            &SlashSeverity::High,
+        );
 
         // Cancel during the challenge window
         client.cancel_inspector_slash(&admin, &slash_id);
@@ -863,7 +914,13 @@ mod tests {
 
         let report_id = BytesN::from_array(&env, &[12u8; 32]);
         let reason = soroban_sdk::String::from_str(&env, "too soon");
-        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+        let slash_id = client.propose_inspector_slash(
+            &admin,
+            &inspector,
+            &report_id,
+            &reason,
+            &SlashSeverity::High,
+        );
 
         // Finalize immediately (before deadline) must be rejected
         let result = client.try_finalize_inspector_slash(&admin, &slash_id);
@@ -886,11 +943,23 @@ mod tests {
         let reason = soroban_sdk::String::from_str(&env, "fraud");
 
         // Non-admin cannot propose
-        let result = client.try_propose_inspector_slash(&attacker, &inspector, &report_id, &reason);
+        let result = client.try_propose_inspector_slash(
+            &attacker,
+            &inspector,
+            &report_id,
+            &reason,
+            &SlashSeverity::High,
+        );
         assert_eq!(result.unwrap_err().unwrap(), ContractError::NotAuthorized);
 
         // Admin proposes, then attacker tries to finalize/cancel
-        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+        let slash_id = client.propose_inspector_slash(
+            &admin,
+            &inspector,
+            &report_id,
+            &reason,
+            &SlashSeverity::High,
+        );
 
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 604_801);
@@ -918,7 +987,13 @@ mod tests {
         client.stake_bond(&inspector, &10_000);
         let report_id = BytesN::from_array(&env, &[14u8; 32]);
         let reason = soroban_sdk::String::from_str(&env, "short window");
-        let slash_id = client.propose_inspector_slash(&admin, &inspector, &report_id, &reason);
+        let slash_id = client.propose_inspector_slash(
+            &admin,
+            &inspector,
+            &report_id,
+            &reason,
+            &SlashSeverity::High,
+        );
 
         // 20 hours not enough
         env.ledger()
