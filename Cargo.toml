@@ -27,6 +27,7 @@ members = [
   "inspector_bond",
   "rent_to_own",
   "governance",
+  "multisig_admin",
 ]
 
 [profile.release]
