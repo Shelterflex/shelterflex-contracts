@@ -207,7 +207,7 @@ impl RentPayments {
         amount: i128,
         payer: Address,
     ) -> Result<Receipt, ContractError> {
-        let _ = require_admin(&env)?;
+        require_admin(&env)?;
         require_not_paused(&env)?;
 
         if amount <= 0 {
