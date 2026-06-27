@@ -493,13 +493,25 @@ mod test {
 
         // Test multiple enters and exits
         for i in 1..=3 {
-            client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
-            assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), i as u32);
+            client
+                .try_enter(&guarded_contract, &entry_point)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                client.get_call_depth(&guarded_contract, &entry_point),
+                i as u32
+            );
         }
 
         for i in (0..3).rev() {
-            client.try_exit(&guarded_contract, &entry_point).unwrap().unwrap();
-            assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), i as u32);
+            client
+                .try_exit(&guarded_contract, &entry_point)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                client.get_call_depth(&guarded_contract, &entry_point),
+                i as u32
+            );
         }
 
         // Exit without enter should fail
@@ -523,11 +535,17 @@ mod test {
             .unwrap();
 
         let max_depth = 3u32;
-        client.try_set_max_call_depth(&admin, &max_depth).unwrap().unwrap();
+        client
+            .try_set_max_call_depth(&admin, &max_depth)
+            .unwrap()
+            .unwrap();
 
         // Enter up to max_depth
         for _ in 0..max_depth {
-            client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
+            client
+                .try_enter(&guarded_contract, &entry_point)
+                .unwrap()
+                .unwrap();
         }
 
         // The next enter should fail
@@ -538,8 +556,14 @@ mod test {
         assert_eq!(err, ContractError::MaxDepthExceeded);
 
         // Exit and try again
-        client.try_exit(&guarded_contract, &entry_point).unwrap().unwrap();
-        client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
+        client
+            .try_exit(&guarded_contract, &entry_point)
+            .unwrap()
+            .unwrap();
+        client
+            .try_enter(&guarded_contract, &entry_point)
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
@@ -555,8 +579,11 @@ mod test {
             .unwrap();
 
         // By default, it should follow reentrancy rules
-        client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
-        
+        client
+            .try_enter(&guarded_contract, &entry_point)
+            .unwrap()
+            .unwrap();
++
         // Re-entering same entry point should fail due to lock (since it's not allowed yet)
         let err = client
             .try_enter(&guarded_contract, &entry_point)
@@ -564,10 +591,16 @@ mod test {
             .unwrap();
         assert_eq!(err, ContractError::ReentrancyDetected);
 
-        client.try_exit(&guarded_contract, &entry_point).unwrap().unwrap();
+        client
+            .try_exit(&guarded_contract, &entry_point)
+            .unwrap()
+            .unwrap();
 
         // Allow pattern
-        client.try_allow_pattern(&admin, &entry_point).unwrap().unwrap();
+        client
+            .try_allow_pattern(&admin, &entry_point)
+            .unwrap()
+            .unwrap();
 
         // Now it should bypass guard
         client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
@@ -578,7 +611,10 @@ mod test {
         assert!(!client.check_reentrancy(&guarded_contract));
 
         // Disallow pattern
-        client.try_disallow_pattern(&admin, &entry_point).unwrap().unwrap();
+        client
+            .try_disallow_pattern(&admin, &entry_point)
+            .unwrap()
+            .unwrap();
         
         // Now it should follow rules again
         client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
