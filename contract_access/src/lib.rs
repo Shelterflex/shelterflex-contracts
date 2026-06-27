@@ -91,7 +91,7 @@ pub enum Permission {
 }
 
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Copy)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct DelegationInfo {
     pub delegator: Address,
     pub permission: Permission,
@@ -429,7 +429,7 @@ impl AccessControl {
         permission: Permission,
     ) -> Result<(), AccessError> {
         delegator.require_auth();
-        if !has_permission(&env, &delegator, permission) {
+        if !Self::has_permission(&env, &delegator, permission) {
             return Err(AccessError::Unauthorized);
         }
 
@@ -505,7 +505,7 @@ impl AccessControl {
     ) -> Result<(), AccessError> {
         caller.require_auth();
 
-        if has_permission(env, caller, permission) {
+        if Self::has_permission(env, caller, permission) {
             Ok(())
         } else {
             Err(AccessError::Unauthorized)
