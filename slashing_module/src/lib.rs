@@ -5,6 +5,12 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
+/// Maximum reporter reward as a fraction of the slashed amount, in basis points.
+/// A reporter who surfaces a valid slash earns at most this percentage of the
+/// slashed tokens (issue #1199 — bounded reporter reward on finalized slash).
+/// 500 bps = 5 %.
+pub const MAX_REPORTER_REWARD_BPS: u32 = 500;
+
 // ── Storage Keys ─────────────────────────────────────────────────────────────
 
 #[contracttype]
