@@ -2556,4 +2556,618 @@ mod test {
             .unwrap();
         assert_eq!(err, ContractError::NoPendingRelease);
     }
+
+    // ── #1186 Storage-schema migration safety ────────────────────────────────
+
+    #[test]
+    fn migrate_wrong_source_version_rejected() {
+        let env = Env::default();
+        let (contract_id, client, admin, _, _, _, _) = setup(&env);
+        // Downgrade stored version to V2, then try to migrate from V1 → mismatch.
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::StorageSchemaVersion, &2u32);
+        });
+        let deal_ids = soroban_sdk::Vec::<String>::new(&env);
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "migrate_storage_schema",
+                args: (admin.clone(), 1u32, deal_ids.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_migrate_storage_schema(&admin, &1u32, &deal_ids)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidSchemaVersion);
+        // Version must not have advanced.
+        assert_eq!(client.storage_schema_version(), 2u32);
+    }
+
+    #[test]
+    fn migrate_v2_to_v3_preserves_per_deal_balance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, client, admin, _, token, token_admin, _) = setup(&env);
+        let depositor = Address::generate(&env);
+        let deal_id = String::from_str(&env, "v2-balance-deal");
+        let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+        token_sac.mint(&depositor, &300i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (depositor.clone(), deal_id.clone(), 300i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (depositor.clone(), contract_id.clone(), 300i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&depositor, &deal_id, &300i128)
+            .unwrap()
+            .unwrap();
+
+        // Simulate V2 layout: set schema to V2 and write legacy fields (both 0).
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::StorageSchemaVersion, &2u32);
+            env.storage()
+                .persistent()
+                .set(&DataKey::LegacyLockedAmountV2(deal_id.clone()), &0i128);
+            env.storage()
+                .persistent()
+                .set(&DataKey::LegacyPendingPayoutV2(deal_id.clone()), &0i128);
+        });
+
+        assert_eq!(client.balance(&deal_id), 300i128);
+
+        let deal_ids = soroban_sdk::Vec::from_array(&env, [deal_id.clone()]);
+        env.mock_all_auths();
+        client
+            .try_migrate_storage_schema(&admin, &2u32, &deal_ids)
+            .unwrap()
+            .unwrap();
+
+        // Balance must be preserved after migration.
+        assert_eq!(client.balance(&deal_id), 300i128);
+        assert_eq!(client.storage_schema_version(), 3u32);
+    }
+
+    #[test]
+    fn migrate_non_admin_rejected() {
+        let env = Env::default();
+        let (contract_id, client, _, _, _, _, _) = setup(&env);
+        let stranger = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::StorageSchemaVersion, &1u32);
+        });
+        let deal_ids = soroban_sdk::Vec::<String>::new(&env);
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "migrate_storage_schema",
+                args: (stranger.clone(), 1u32, deal_ids.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_migrate_storage_schema(&stranger, &1u32, &deal_ids)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
+    }
+
+    #[test]
+    fn migrate_already_at_v3_is_noop() {
+        // Current schema is V3 after init; any migration call is a no-op.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, client, admin, _, _, _, _) = setup(&env);
+        let deal_ids = soroban_sdk::Vec::<String>::new(&env);
+        client
+            .try_migrate_storage_schema(&admin, &3u32, &deal_ids)
+            .unwrap()
+            .unwrap();
+        assert_eq!(client.storage_schema_version(), 3u32);
+    }
+
+    #[test]
+    fn migrate_v1_balance_conservation_across_multiple_deals() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, client, admin, _, token, token_admin, _) = setup(&env);
+        let depositor = Address::generate(&env);
+        let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+        token_sac.mint(&depositor, &500i128);
+
+        // Deposit into two deals.
+        let deal_a = String::from_str(&env, "v1-deal-a");
+        let deal_b = String::from_str(&env, "v1-deal-b");
+        env.mock_auths(&[MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (depositor.clone(), deal_a.clone(), 200i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (depositor.clone(), contract_id.clone(), 200i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&depositor, &deal_a, &200i128)
+            .unwrap()
+            .unwrap();
+        env.mock_auths(&[MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (depositor.clone(), deal_b.clone(), 300i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (depositor.clone(), contract_id.clone(), 300i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&depositor, &deal_b, &300i128)
+            .unwrap()
+            .unwrap();
+
+        // Rewind schema to V1.
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::StorageSchemaVersion, &1u32);
+        });
+
+        let deal_ids = soroban_sdk::Vec::from_array(&env, [deal_a.clone(), deal_b.clone()]);
+        env.mock_all_auths();
+        client
+            .try_migrate_storage_schema(&admin, &1u32, &deal_ids)
+            .unwrap()
+            .unwrap();
+
+        // Per-deal balances are intact after migration.
+        assert_eq!(client.balance(&deal_a), 200i128);
+        assert_eq!(client.balance(&deal_b), 300i128);
+        assert_eq!(client.storage_schema_version(), 3u32);
+    }
+
+    // ── #1185 Dispute timeouts and circuit-breaker drain governance ──────────
+
+    #[test]
+    fn challenge_after_window_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, client, admin, operator, token, token_admin, _) = setup(&env);
+        let depositor = Address::generate(&env);
+        let landlord = Address::generate(&env);
+        let deal_id = String::from_str(&env, "chall-window-1");
+        let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+        token_sac.mint(&depositor, &100i128);
+        env.mock_auths(&[MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (depositor.clone(), deal_id.clone(), 100i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (depositor.clone(), contract_id.clone(), 100i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&depositor, &deal_id, &100i128)
+            .unwrap()
+            .unwrap();
+        env.mock_all_auths();
+        // Configure a 5-second challenge window.
+        client
+            .try_configure_dispute_windows(&admin, &5u64, &100u64)
+            .unwrap()
+            .unwrap();
+        client
+            .try_request_rent_release(
+                &operator,
+                &deal_id,
+                &landlord,
+                &100i128,
+                &Symbol::new(&env, "rent"),
+                &String::from_str(&env, "inv-cw1"),
+            )
+            .unwrap()
+            .unwrap();
+        // Advance past the challenge window.
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 10);
+        let err = client
+            .try_challenge_rent_release(
+                &depositor,
+                &deal_id,
+                &String::from_str(&env, "evidence"),
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::DisputeNotAllowed);
+    }
+
+    #[test]
+    fn settle_release_timeout_before_window_expires_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, client, admin, operator, token, token_admin, _) = setup(&env);
+        let depositor = Address::generate(&env);
+        let landlord = Address::generate(&env);
+        let deal_id = String::from_str(&env, "settle-early-1");
+        let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+        token_sac.mint(&depositor, &100i128);
+        env.mock_auths(&[MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (depositor.clone(), deal_id.clone(), 100i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (depositor.clone(), contract_id.clone(), 100i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&depositor, &deal_id, &100i128)
+            .unwrap()
+            .unwrap();
+        env.mock_all_auths();
+        // Window = 10 seconds.
+        client
+            .try_configure_dispute_windows(&admin, &10u64, &100u64)
+            .unwrap()
+            .unwrap();
+        client
+            .try_request_rent_release(
+                &operator,
+                &deal_id,
+                &landlord,
+                &100i128,
+                &Symbol::new(&env, "rent"),
+                &String::from_str(&env, "inv-se1"),
+            )
+            .unwrap()
+            .unwrap();
+        // Advance only 5 seconds (window = 10).
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 5);
+        let err = client
+            .try_settle_rent_release_timeout(&deal_id)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidReleaseWindow);
+    }
+
+    #[test]
+    fn settle_dispute_timeout_before_expiry_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, client, admin, operator, token, token_admin, _) = setup(&env);
+        let depositor = Address::generate(&env);
+        let landlord = Address::generate(&env);
+        let resolver = Address::generate(&env);
+        let deal_id = String::from_str(&env, "disp-timeout-early");
+        let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+        token_sac.mint(&depositor, &100i128);
+        env.mock_auths(&[MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (depositor.clone(), deal_id.clone(), 100i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (depositor.clone(), contract_id.clone(), 100i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&depositor, &deal_id, &100i128)
+            .unwrap()
+            .unwrap();
+        env.mock_all_auths();
+        client
+            .try_configure_dispute_windows(&admin, &5u64, &20u64)
+            .unwrap()
+            .unwrap();
+        client
+            .try_set_resolver(&admin, &resolver)
+            .unwrap()
+            .unwrap();
+        client
+            .try_request_rent_release(
+                &operator,
+                &deal_id,
+                &landlord,
+                &100i128,
+                &Symbol::new(&env, "rent"),
+                &String::from_str(&env, "inv-dt1"),
+            )
+            .unwrap()
+            .unwrap();
+        // Challenge within the 5s window (advance 2s).
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 2);
+        client
+            .try_challenge_rent_release(
+                &depositor,
+                &deal_id,
+                &String::from_str(&env, "evidence"),
+            )
+            .unwrap()
+            .unwrap();
+        // Advance 10 more seconds — dispute timeout is 20s, so still early.
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 10);
+        let err = client
+            .try_settle_dispute_timeout(&deal_id)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidReleaseWindow);
+    }
+
+    #[test]
+    fn settle_dispute_timeout_after_expiry_refunds_depositor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, client, admin, operator, token, token_admin, _) = setup(&env);
+        let depositor = Address::generate(&env);
+        let landlord = Address::generate(&env);
+        let deal_id = String::from_str(&env, "disp-timeout-ok");
+        let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+        let token_client = TokenClient::new(&env, &token);
+        token_sac.mint(&depositor, &100i128);
+        env.mock_auths(&[MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (depositor.clone(), deal_id.clone(), 100i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (depositor.clone(), contract_id.clone(), 100i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&depositor, &deal_id, &100i128)
+            .unwrap()
+            .unwrap();
+        env.mock_all_auths();
+        client
+            .try_configure_dispute_windows(&admin, &5u64, &20u64)
+            .unwrap()
+            .unwrap();
+        client
+            .try_request_rent_release(
+                &operator,
+                &deal_id,
+                &landlord,
+                &100i128,
+                &Symbol::new(&env, "rent"),
+                &String::from_str(&env, "inv-dt2"),
+            )
+            .unwrap()
+            .unwrap();
+        // Challenge within the 5s window.
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 2);
+        client
+            .try_challenge_rent_release(
+                &depositor,
+                &deal_id,
+                &String::from_str(&env, "evidence"),
+            )
+            .unwrap()
+            .unwrap();
+        // Advance well past dispute timeout (20s).
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 25);
+        // settle_dispute_timeout refunds depositor.
+        client.try_settle_dispute_timeout(&deal_id).unwrap().unwrap();
+        assert_eq!(token_client.balance(&depositor), 100i128);
+        // Cannot settle again.
+        let err = client
+            .try_settle_dispute_timeout(&deal_id)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::NoOpenDispute);
+    }
+
+    #[test]
+    fn freeze_blocks_release_but_not_deposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, client, admin, operator, token, token_admin, _) = setup(&env);
+        let depositor = Address::generate(&env);
+        let to = Address::generate(&env);
+        let platform = Address::generate(&env);
+        let reporter = Address::generate(&env);
+        let deal_id = String::from_str(&env, "freeze-rel");
+        let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+        token_sac.mint(&depositor, &100i128);
+        env.mock_auths(&[MockAuth {
+            address: &depositor,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (depositor.clone(), deal_id.clone(), 100i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (depositor.clone(), contract_id.clone(), 100i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&depositor, &deal_id, &100i128)
+            .unwrap()
+            .unwrap();
+        env.mock_all_auths();
+        // Freeze the contract.
+        client.try_freeze(&admin).unwrap().unwrap();
+        assert!(client.is_frozen());
+        assert_eq!(client.get_circuit_breaker_state(), 1u32); // Frozen = 1
+
+        // Release is blocked while frozen.
+        let err = client
+            .try_release(
+                &operator,
+                &deal_id,
+                &to,
+                &100i128,
+                &platform,
+                &0i128,
+                &reporter,
+                &0i128,
+                &Symbol::new(&env, "rent"),
+                &String::from_str(&env, "ref-freeze"),
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::Frozen);
+    }
+
+    #[test]
+    fn propose_drain_requires_frozen_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, client, admin, _, _, _, _) = setup(&env);
+        let drain_hash = BytesN::from_array(&env, &[2u8; 32]);
+        // propose_drain while unfrozen must fail.
+        let err = client
+            .try_propose_drain(&admin, &drain_hash)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidGovernanceDrain);
+    }
+
+    #[test]
+    fn execute_drain_before_recovery_delay_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, client, admin, _, _, _, _) = setup(&env);
+        let drain_hash = BytesN::from_array(&env, &[3u8; 32]);
+        client.try_set_recovery_delay(&admin, &100u64).unwrap().unwrap();
+        client.try_freeze(&admin).unwrap().unwrap();
+        client.try_propose_drain(&admin, &drain_hash).unwrap().unwrap();
+        // Advance only 50s — delay is 100s.
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 50);
+        let err = client
+            .try_execute_drain(&admin, &drain_hash)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::RecoveryDelayNotMet);
+    }
+
+    #[test]
+    fn execute_drain_after_delay_succeeds_and_unfreezes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, client, admin, _, _, _, _) = setup(&env);
+        let drain_hash = BytesN::from_array(&env, &[4u8; 32]);
+        client.try_set_recovery_delay(&admin, &100u64).unwrap().unwrap();
+        client.try_freeze(&admin).unwrap().unwrap();
+        assert_eq!(client.get_circuit_breaker_state(), 1u32); // Frozen
+        client.try_propose_drain(&admin, &drain_hash).unwrap().unwrap();
+        // Advance past the 100s delay.
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 101);
+        client.try_execute_drain(&admin, &drain_hash).unwrap().unwrap();
+        // Contract must be unfrozen after drain executes.
+        assert_eq!(client.get_circuit_breaker_state(), 0u32); // Unfrozen
+        assert!(!client.is_frozen());
+    }
+
+    #[test]
+    fn unauthorized_drain_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, client, admin, _, _, _, _) = setup(&env);
+        let stranger = Address::generate(&env);
+        let drain_hash = BytesN::from_array(&env, &[5u8; 32]);
+        client.try_freeze(&admin).unwrap().unwrap();
+        client.try_propose_drain(&admin, &drain_hash).unwrap().unwrap();
+        // Advance past default delay (24 hours).
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 86_401);
+        // Non-admin execute_drain must fail.
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "execute_drain",
+                args: (stranger.clone(), drain_hash.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_execute_drain(&stranger, &drain_hash)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
+    }
+
+    #[test]
+    fn circuit_breaker_state_transitions_unfrozen_frozen_unfrozen() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, client, admin, _, _, _, _) = setup(&env);
+
+        // Initially unfrozen (0).
+        assert_eq!(client.get_circuit_breaker_state(), 0u32);
+        assert!(!client.is_frozen());
+
+        // After freeze: Frozen (1).
+        client.try_freeze(&admin).unwrap().unwrap();
+        assert_eq!(client.get_circuit_breaker_state(), 1u32);
+        assert!(client.is_frozen());
+
+        // After drain executes: back to Unfrozen (0).
+        let drain_hash = BytesN::from_array(&env, &[6u8; 32]);
+        client.try_propose_drain(&admin, &drain_hash).unwrap().unwrap();
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 100_000);
+        client.try_execute_drain(&admin, &drain_hash).unwrap().unwrap();
+        assert_eq!(client.get_circuit_breaker_state(), 0u32);
+        assert!(!client.is_frozen());
+    }
 }
