@@ -2802,14 +2802,9 @@ mod test {
             .unwrap()
             .unwrap();
         // Advance past the challenge window.
-        env.ledger()
-            .set_timestamp(env.ledger().timestamp() + 10);
+        env.ledger().set_timestamp(env.ledger().timestamp() + 10);
         let err = client
-            .try_challenge_rent_release(
-                &depositor,
-                &deal_id,
-                &String::from_str(&env, "evidence"),
-            )
+            .try_challenge_rent_release(&depositor, &deal_id, &String::from_str(&env, "evidence"))
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ContractError::DisputeNotAllowed);
@@ -2861,8 +2856,7 @@ mod test {
             .unwrap()
             .unwrap();
         // Advance only 5 seconds (window = 10).
-        env.ledger()
-            .set_timestamp(env.ledger().timestamp() + 5);
+        env.ledger().set_timestamp(env.ledger().timestamp() + 5);
         let err = client
             .try_settle_rent_release_timeout(&deal_id)
             .unwrap_err()
@@ -2904,10 +2898,7 @@ mod test {
             .try_configure_dispute_windows(&admin, &5u64, &20u64)
             .unwrap()
             .unwrap();
-        client
-            .try_set_resolver(&admin, &resolver)
-            .unwrap()
-            .unwrap();
+        client.try_set_resolver(&admin, &resolver).unwrap().unwrap();
         client
             .try_request_rent_release(
                 &operator,
@@ -2920,19 +2911,13 @@ mod test {
             .unwrap()
             .unwrap();
         // Challenge within the 5s window (advance 2s).
-        env.ledger()
-            .set_timestamp(env.ledger().timestamp() + 2);
+        env.ledger().set_timestamp(env.ledger().timestamp() + 2);
         client
-            .try_challenge_rent_release(
-                &depositor,
-                &deal_id,
-                &String::from_str(&env, "evidence"),
-            )
+            .try_challenge_rent_release(&depositor, &deal_id, &String::from_str(&env, "evidence"))
             .unwrap()
             .unwrap();
         // Advance 10 more seconds — dispute timeout is 20s, so still early.
-        env.ledger()
-            .set_timestamp(env.ledger().timestamp() + 10);
+        env.ledger().set_timestamp(env.ledger().timestamp() + 10);
         let err = client
             .try_settle_dispute_timeout(&deal_id)
             .unwrap_err()
@@ -2986,21 +2971,18 @@ mod test {
             .unwrap()
             .unwrap();
         // Challenge within the 5s window.
-        env.ledger()
-            .set_timestamp(env.ledger().timestamp() + 2);
+        env.ledger().set_timestamp(env.ledger().timestamp() + 2);
         client
-            .try_challenge_rent_release(
-                &depositor,
-                &deal_id,
-                &String::from_str(&env, "evidence"),
-            )
+            .try_challenge_rent_release(&depositor, &deal_id, &String::from_str(&env, "evidence"))
             .unwrap()
             .unwrap();
         // Advance well past dispute timeout (20s).
-        env.ledger()
-            .set_timestamp(env.ledger().timestamp() + 25);
+        env.ledger().set_timestamp(env.ledger().timestamp() + 25);
         // settle_dispute_timeout refunds depositor.
-        client.try_settle_dispute_timeout(&deal_id).unwrap().unwrap();
+        client
+            .try_settle_dispute_timeout(&deal_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(token_client.balance(&depositor), 100i128);
         // Cannot settle again.
         let err = client
@@ -3085,12 +3067,17 @@ mod test {
         env.mock_all_auths();
         let (_, client, admin, _, _, _, _) = setup(&env);
         let drain_hash = BytesN::from_array(&env, &[3u8; 32]);
-        client.try_set_recovery_delay(&admin, &100u64).unwrap().unwrap();
+        client
+            .try_set_recovery_delay(&admin, &100u64)
+            .unwrap()
+            .unwrap();
         client.try_freeze(&admin).unwrap().unwrap();
-        client.try_propose_drain(&admin, &drain_hash).unwrap().unwrap();
+        client
+            .try_propose_drain(&admin, &drain_hash)
+            .unwrap()
+            .unwrap();
         // Advance only 50s — delay is 100s.
-        env.ledger()
-            .set_timestamp(env.ledger().timestamp() + 50);
+        env.ledger().set_timestamp(env.ledger().timestamp() + 50);
         let err = client
             .try_execute_drain(&admin, &drain_hash)
             .unwrap_err()
@@ -3104,14 +3091,22 @@ mod test {
         env.mock_all_auths();
         let (_, client, admin, _, _, _, _) = setup(&env);
         let drain_hash = BytesN::from_array(&env, &[4u8; 32]);
-        client.try_set_recovery_delay(&admin, &100u64).unwrap().unwrap();
+        client
+            .try_set_recovery_delay(&admin, &100u64)
+            .unwrap()
+            .unwrap();
         client.try_freeze(&admin).unwrap().unwrap();
         assert_eq!(client.get_circuit_breaker_state(), 1u32); // Frozen
-        client.try_propose_drain(&admin, &drain_hash).unwrap().unwrap();
+        client
+            .try_propose_drain(&admin, &drain_hash)
+            .unwrap()
+            .unwrap();
         // Advance past the 100s delay.
-        env.ledger()
-            .set_timestamp(env.ledger().timestamp() + 101);
-        client.try_execute_drain(&admin, &drain_hash).unwrap().unwrap();
+        env.ledger().set_timestamp(env.ledger().timestamp() + 101);
+        client
+            .try_execute_drain(&admin, &drain_hash)
+            .unwrap()
+            .unwrap();
         // Contract must be unfrozen after drain executes.
         assert_eq!(client.get_circuit_breaker_state(), 0u32); // Unfrozen
         assert!(!client.is_frozen());
@@ -3125,7 +3120,10 @@ mod test {
         let stranger = Address::generate(&env);
         let drain_hash = BytesN::from_array(&env, &[5u8; 32]);
         client.try_freeze(&admin).unwrap().unwrap();
-        client.try_propose_drain(&admin, &drain_hash).unwrap().unwrap();
+        client
+            .try_propose_drain(&admin, &drain_hash)
+            .unwrap()
+            .unwrap();
         // Advance past default delay (24 hours).
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 86_401);
@@ -3163,10 +3161,16 @@ mod test {
 
         // After drain executes: back to Unfrozen (0).
         let drain_hash = BytesN::from_array(&env, &[6u8; 32]);
-        client.try_propose_drain(&admin, &drain_hash).unwrap().unwrap();
+        client
+            .try_propose_drain(&admin, &drain_hash)
+            .unwrap()
+            .unwrap();
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + 100_000);
-        client.try_execute_drain(&admin, &drain_hash).unwrap().unwrap();
+        client
+            .try_execute_drain(&admin, &drain_hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(client.get_circuit_breaker_state(), 0u32);
         assert!(!client.is_frozen());
     }

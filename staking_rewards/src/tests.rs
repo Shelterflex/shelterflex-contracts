@@ -342,7 +342,10 @@ fn unstake_settles_outstanding_rewards_before_reducing_stake() {
 
     // Outstanding rewards on the full 1000 must be claimable after partial unstake.
     let claimable = client.get_claimable(&user);
-    assert_eq!(claimable, 1000, "rewards on pre-unstake stake must be preserved");
+    assert_eq!(
+        claimable, 1000,
+        "rewards on pre-unstake stake must be preserved"
+    );
 
     // Claim settles everything.
     let claimed = client.claim(&user);

@@ -479,7 +479,10 @@ fn cliff_at_exactly_cliff_time_claimable_matches_vested() {
     let expected = (CLIFF - START) as i128 * TOTAL / (END - START) as i128;
     assert_eq!(calculate_vested_amount(&schedule, CLIFF), expected);
     assert_eq!(calculate_claimable_amount(&schedule, CLIFF), expected);
-    assert_eq!(ctx.contract.get_claimable_amount(&ctx.beneficiary), expected);
+    assert_eq!(
+        ctx.contract.get_claimable_amount(&ctx.beneficiary),
+        expected
+    );
     // Claim at the exact cliff instant must succeed and return the vested amount.
     let claimed = ctx.contract.claim(&ctx.beneficiary);
     assert_eq!(claimed, expected);
@@ -495,7 +498,10 @@ fn cliff_just_after_increases_proportionally() {
     // Vested amount at cliff+1 is ≥ at cliff.
     assert!(at_cliff_plus_one >= at_cliff);
     assert_eq!(calculate_vested_amount(&schedule, CLIFF), at_cliff);
-    assert_eq!(calculate_vested_amount(&schedule, CLIFF + 1), at_cliff_plus_one);
+    assert_eq!(
+        calculate_vested_amount(&schedule, CLIFF + 1),
+        at_cliff_plus_one
+    );
     assert_eq!(
         calculate_claimable_amount(&schedule, CLIFF + 1),
         at_cliff_plus_one
@@ -521,7 +527,7 @@ fn vesting_progression_at_start_mid_and_end() {
     assert_eq!(calculate_vested_amount(&schedule, 9_000), 9_000);
     assert_eq!(calculate_vested_amount(&schedule, 12_000), 12_000);
     assert_eq!(calculate_vested_amount(&schedule, 20_000), 12_000); // capped at total
-    // Claimable mirrors vested when cliff=start and nothing yet claimed.
+                                                                    // Claimable mirrors vested when cliff=start and nothing yet claimed.
     assert_eq!(calculate_claimable_amount(&schedule, 6_000), 6_000);
     assert_eq!(calculate_claimable_amount(&schedule, 12_000), 12_000);
 }
