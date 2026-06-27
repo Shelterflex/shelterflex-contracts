@@ -211,7 +211,7 @@ impl UpgradeableProxy {
                 Symbol::new(&env, "upgradeable_proxy"),
                 Symbol::new(&env, "upgraded"),
             ),
-            (approver, new_wasm_hash, new_version, 1u32),
+            (approver, new_wasm_hash, new_version, new_version),
             //                                     ^^^^ schema_version
         );
 
@@ -560,15 +560,8 @@ mod test {
     // ── state preservation ────────────────────────────────────────────────────
 
     #[test]
+    #[should_panic(expected = "not registered")]
     fn state_is_preserved_after_version_counter_increments() {
-        // We cannot swap real WASM in unit tests (no filesystem), but we can
-        // verify that all mutable state (key/value store, version counter,
-        // admin) survives the storage writes that happen during confirm_upgrade
-        // up to the deployer call. We test this by mocking all auths and
-        // confirming the version increments while stored values remain intact.
-        //
-        // In a real deployment the WASM swap preserves storage by design —
-        // Soroban keys storage by contract address, not WASM hash.
         let env = Env::default();
         env.mock_all_auths();
 
@@ -596,20 +589,92 @@ mod test {
         assert!(client.has_pending_upgrade());
 
         // Confirm upgrade — this will panic at the deployer call in the test
-        // environment (no real WASM to load), so we only verify the pre-swap
-        // state writes by checking the pending flag and stored value are intact
-        // right up to that point.
-        //
-        // The key invariant: storage keys are independent of WASM hash.
+        // environment because dummy_hash is not registered as a contract.
+        // We verify the state is preserved right before it panics.
         assert_eq!(
             client.get_value(&String::from_str(&env, "tenant")),
             Some(String::from_str(&env, "ngozi")),
             "stored value must survive up to the WASM swap"
         );
-        assert!(
-            client.has_pending_upgrade(),
-            "pending flag must be set before confirm"
-        );
+
+        client.confirm_upgrade(&approver, &hash);
+    }
+
+    #[test]
+    fn confirm_upgrade_fails_after_cancel_upgrade() {
+        let env = Env::default();
+        let (contract_id, client, admin, approver) = setup(&env);
+        let hash = dummy_hash(&env, 0x0A);
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "cancel_upgrade",
+                args: (admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_cancel_upgrade(&admin).unwrap().unwrap();
+
+        env.mock_auths(&[MockAuth {
+            address: &approver,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "confirm_upgrade",
+                args: (approver.clone(), hash.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_confirm_upgrade(&approver, &hash)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ProxyError::NoPendingUpgrade);
+    }
+
+    #[test]
+    fn has_pending_upgrade_reflects_state() {
+        let env = Env::default();
+        let (contract_id, client, admin, _approver) = setup(&env);
+        let hash = dummy_hash(&env, 0x0B);
+
+        assert!(!client.has_pending_upgrade());
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_upgrade",
+                args: (admin.clone(), hash.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_propose_upgrade(&admin, &hash).unwrap().unwrap();
+        assert!(client.has_pending_upgrade());
+
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "cancel_upgrade",
+                args: (admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.try_cancel_upgrade(&admin).unwrap().unwrap();
+        assert!(!client.has_pending_upgrade());
     }
 
     #[test]

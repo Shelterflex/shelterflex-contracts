@@ -23,10 +23,17 @@ pub mod validation;
 pub mod formal_properties;
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Deposit {
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     ContractVersion,
-    /// State schema version used to validate upgrade compatibility (#382)
+    /// State schema version to validate upgrade compatibility (#382)
     StateSchemaVersion,
     Admin,
     Operator,
@@ -36,8 +43,10 @@ pub enum DataKey {
     TotalStaked,
     Paused,
     LockPeriod,
-    /// Per-user stake timestamp in persistent storage (#386 gas optimisation)
-    StakeTimestamp(Address),
+    /// Per-user deposit count in persistent storage
+    DepositCount(Address),
+    /// Individual stake deposits to track lock periods independently
+    Deposit(Address, u32),
     /// Reentrancy lock for cross-contract call protection (#390)
     Reentrancy,
     // ── Upgrade governance (#392) ─────────────────────────────────────────
@@ -194,23 +203,35 @@ fn put_lock_period(env: &Env, period: u64) {
     env.storage().instance().set(&DataKey::LockPeriod, &period);
 }
 
-/// Per-user stake timestamp from persistent storage (#386)
-fn get_stake_timestamp(env: &Env, user: &Address) -> Option<u64> {
+fn get_deposit_count(env: &Env, user: &Address) -> u32 {
     env.storage()
         .persistent()
-        .get::<_, u64>(&DataKey::StakeTimestamp(user.clone()))
+        .get::<_, u32>(&DataKey::DepositCount(user.clone()))
+        .unwrap_or(0)
 }
 
-fn set_stake_timestamp(env: &Env, user: &Address, ts: u64) {
+fn put_deposit_count(env: &Env, user: &Address, count: u32) {
     env.storage()
         .persistent()
-        .set(&DataKey::StakeTimestamp(user.clone()), &ts);
+        .set(&DataKey::DepositCount(user.clone()), &count);
 }
 
-fn remove_stake_timestamp(env: &Env, user: &Address) {
+fn get_deposit(env: &Env, user: &Address, index: u32) -> Option<Deposit> {
     env.storage()
         .persistent()
-        .remove(&DataKey::StakeTimestamp(user.clone()));
+        .get::<_, Deposit>(&DataKey::Deposit(user.clone(), index))
+}
+
+fn put_deposit(env: &Env, user: &Address, index: u32, deposit: Deposit) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Deposit(user.clone(), index), &deposit);
+}
+
+fn remove_deposit(env: &Env, user: &Address, index: u32) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Deposit(user.clone(), index));
 }
 
 /// Reentrancy guard helpers (#390)
@@ -429,36 +450,37 @@ impl StakingPool {
 
     pub fn stake(env: Env, from: Address, amount: i128) -> Result<(), ContractError> {
         require_not_paused(&env)?;
-        // In tests, the invoker (caller) is determined by the first MockAuth entry.
-        // Since we're calling stake(&user, ...), the invoker should be user when no operator is set.
-        // We pass &from as the caller parameter, which should match the invoker in the test setup.
-        // require_user_or_operator already calls user.require_auth() or op.require_auth(), so we don't need from.require_auth() here.
         let _spender = require_user_or_operator(&env, &from, &from)?;
         validation::require_valid_amount(amount)?;
 
-        // #390: reentrancy guard before external token call
         enter_nonreentrant(&env)?;
 
         let token_address = get_token(&env);
         let token_client = token::Client::new(&env, &token_address);
 
-        // Transfer tokens from user to contract
         token_client.transfer(&from, &env.current_contract_address(), &amount);
 
         exit_nonreentrant(&env);
 
-        // #386: per-key persistent storage instead of Map
         let current_balance = get_staked_balance(&env, &from);
         put_staked_balance(&env, &from, current_balance + amount);
 
-        // Update total staked
         let total = get_total_staked(&env);
         put_total_staked(&env, total + amount);
 
-        // Update stake timestamp (new stakes reset the lock timer)
-        set_stake_timestamp(&env, &from, env.ledger().timestamp());
+        // Track this as a separate deposit for independent lock period tracking
+        let count = get_deposit_count(&env, &from);
+        put_deposit(
+            &env,
+            &from,
+            count,
+            Deposit {
+                amount,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        put_deposit_count(&env, &from, count + 1);
 
-        // Emit event
         let new_user_balance = current_balance + amount;
         let new_total = total + amount;
         env.events().publish(
@@ -475,55 +497,72 @@ impl StakingPool {
 
     pub fn unstake(env: Env, to: Address, amount: i128) -> Result<(), ContractError> {
         require_not_paused(&env)?;
-        // In tests, the invoker (caller) is determined by the first MockAuth entry.
-        // Since we're calling unstake(&user, ...), the invoker should be user when no operator is set.
-        // We pass &to as the caller parameter, which should match the invoker in the test setup.
-        // require_user_or_operator already calls user.require_auth() or op.require_auth(), so we don't need to.require_auth() here.
         let _spender = require_user_or_operator(&env, &to, &to)?;
         validation::require_valid_amount(amount)?;
 
-        // #386: per-key persistent storage instead of Map
         let current_balance = get_staked_balance(&env, &to);
         if current_balance < amount {
             return Err(ContractError::InsufficientBalance);
         }
 
-        // Check lock period
         let lock_period = get_lock_period(&env);
-        if lock_period > 0 {
-            if let Some(stake_time) = get_stake_timestamp(&env, &to) {
-                let current_time = env.ledger().timestamp();
-                if current_time < stake_time + lock_period {
-                    return Err(ContractError::TokensLocked);
+        let current_time = env.ledger().timestamp();
+        let count = get_deposit_count(&env, &to);
+
+        let mut unlocked_balance = 0i128;
+        for i in 0..count {
+            if let Some(deposit) = get_deposit(&env, &to, i) {
+                if lock_period == 0 || current_time >= deposit.timestamp + lock_period {
+                    unlocked_balance += deposit.amount;
                 }
-            } else {
-                return Err(ContractError::NoStakeTimestamp);
             }
         }
 
-        // Update staked balance
+        if unlocked_balance < amount {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "staking_pool"),
+                    Symbol::new(&env, "unstake_blocked"),
+                    to.clone(),
+                ),
+                (amount, unlocked_balance),
+            );
+            return Err(ContractError::TokensLocked);
+        }
+
+        let mut remaining_to_unstake = amount;
+        for i in 0..count {
+            if remaining_to_unstake == 0 {
+                break;
+            }
+
+            if let Some(mut deposit) = get_deposit(&env, &to, i) {
+                if lock_period == 0 || current_time >= deposit.timestamp + lock_period {
+                    if deposit.amount <= remaining_to_unstake {
+                        remaining_to_unstake -= deposit.amount;
+                        remove_deposit(&env, &to, i);
+                    } else {
+                        deposit.amount -= remaining_to_unstake;
+                        remaining_to_unstake = 0;
+                        put_deposit(&env, &to, i, deposit);
+                    }
+                }
+            }
+        }
+
         let new_balance = current_balance - amount;
         put_staked_balance(&env, &to, new_balance);
 
-        // Clean up stake timestamp if fully unstaked
-        if new_balance == 0 {
-            remove_stake_timestamp(&env, &to);
-        }
-
-        // Update total staked
         let total = get_total_staked(&env);
         put_total_staked(&env, total - amount);
 
         let token_address = get_token(&env);
         let token_client = token::Client::new(&env, &token_address);
 
-        // #390: reentrancy guard before external token call
         enter_nonreentrant(&env)?;
-        // Transfer tokens from contract to user
         token_client.transfer(&env.current_contract_address(), &to, &amount);
         exit_nonreentrant(&env);
 
-        // Emit event
         let new_total = total - amount;
         env.events().publish(
             (

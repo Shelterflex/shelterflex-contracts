@@ -45,6 +45,7 @@ pub enum ContractError {
     PatternNotAllowed = 7,
     GuardNotActive = 8,
     InvalidMaxDepth = 9,
+    InvalidExit = 10,
 }
 
 impl From<access_control::AccessControlError> for ContractError {
@@ -349,9 +350,10 @@ impl ReentrancyGuard {
         }
 
         let depth = get_call_depth(&env, &contract, &entry_point);
-        if depth > 0 {
-            set_call_depth(&env, &contract, &entry_point, depth - 1);
+        if depth == 0 {
+            return Err(ContractError::InvalidExit);
         }
+        set_call_depth(&env, &contract, &entry_point, depth - 1);
 
         if depth <= 1 {
             set_locked(&env, &contract, false);
@@ -402,7 +404,6 @@ mod test {
 
         let admin = Address::generate(env);
 
-        // Initialize with mock_all_auths
         env.mock_all_auths();
 
         client.try_init(&admin).unwrap().unwrap();
@@ -440,6 +441,152 @@ mod test {
             .unwrap();
 
         assert!(client.is_guard_active(&guarded_contract));
+    }
+
+    #[test]
+    fn deactivate_guard_succeeds() {
+        let env = Env::default();
+        let (client, admin) = setup_contract(&env);
+
+        let guarded_contract = Address::generate(&env);
+
+        client
+            .try_activate_guard(&admin, &guarded_contract)
+            .unwrap()
+            .unwrap();
+        assert!(client.is_guard_active(&guarded_contract));
+
+        client
+            .try_deactivate_guard(&admin, &guarded_contract)
+            .unwrap()
+            .unwrap();
+        assert!(!client.is_guard_active(&guarded_contract));
+    }
+
+    #[test]
+    fn admin_only_guard_control() {
+        let env = Env::default();
+        let (client, _admin) = setup_contract(&env);
+        let non_admin = Address::generate(&env);
+        let guarded_contract = Address::generate(&env);
+
+        env.mock_all_auths();
+
+        let err = client
+            .try_activate_guard(&non_admin, &guarded_contract)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::NotAuthorized);
+    }
+
+    #[test]
+    fn enter_exit_balance_and_depth() {
+        let env = Env::default();
+        let (client, admin) = setup_contract(&env);
+        let guarded_contract = Address::generate(&env);
+        let entry_point = create_entry_point(&env, "test_func");
+
+        client
+            .try_activate_guard(&admin, &guarded_contract)
+            .unwrap()
+            .unwrap();
+
+        // Test multiple enters and exits
+        for i in 1..=3 {
+            client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
+            assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), i as u32);
+        }
+
+        for i in (0..3).rev() {
+            client.try_exit(&guarded_contract, &entry_point).unwrap().unwrap();
+            assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), i as u32);
+        }
+
+        // Exit without enter should fail
+        let err = client
+            .try_exit(&guarded_contract, &entry_point)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::InvalidExit);
+    }
+
+    #[test]
+    fn max_call_depth_enforcement() {
+        let env = Env::default();
+        let (client, admin) = setup_contract(&env);
+        let guarded_contract = Address::generate(&env);
+        let entry_point = create_entry_point(&env, "test_func");
+
+        client
+            .try_activate_guard(&admin, &guarded_contract)
+            .unwrap()
+            .unwrap();
+
+        let max_depth = 3u32;
+        client.try_set_max_call_depth(&admin, &max_depth).unwrap().unwrap();
+
+        // Enter up to max_depth
+        for _ in 0..max_depth {
+            client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
+        }
+
+        // The next enter should fail
+        let err = client
+            .try_enter(&guarded_contract, &entry_point)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::MaxDepthExceeded);
+
+        // Exit and try again
+        client.try_exit(&guarded_contract, &entry_point).unwrap().unwrap();
+        client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
+    }
+
+    #[test]
+    fn pattern_allowlist_tests() {
+        let env = Env::default();
+        let (client, admin) = setup_contract(&env);
+        let guarded_contract = Address::generate(&env);
+        let entry_point = create_entry_point(&env, "allowed_func");
+
+        client
+            .try_activate_guard(&admin, &guarded_contract)
+            .unwrap()
+            .unwrap();
+
+        // By default, it should follow reentrancy rules
+        client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
+        
+        // Re-entering same entry point should fail due to lock (since it's not allowed yet)
+        let err = client
+            .try_enter(&guarded_contract, &entry_point)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::ReentrancyDetected);
+
+        client.try_exit(&guarded_contract, &entry_point).unwrap().unwrap();
+
+        // Allow pattern
+        client.try_allow_pattern(&admin, &entry_point).unwrap().unwrap();
+
+        // Now it should bypass guard
+        client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
+        // Should be able to enter again because it's allowed and bypasses lock/depth
+        client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
+        
+        assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 0u32);
+        assert!(!client.check_reentrancy(&guarded_contract));
+
+        // Disallow pattern
+        client.try_disallow_pattern(&admin, &entry_point).unwrap().unwrap();
+        
+        // Now it should follow rules again
+        client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
+        let err = client
+            .try_enter(&guarded_contract, &entry_point)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::ReentrancyDetected);
     }
 
     #[test]
