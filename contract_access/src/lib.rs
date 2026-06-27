@@ -429,7 +429,7 @@ impl AccessControl {
         permission: Permission,
     ) -> Result<(), AccessError> {
         delegator.require_auth();
-        if !Self::has_permission(env, delegator, permission) {
+        if !Self::has_permission(env.clone(), delegator.clone(), permission) {
             return Err(AccessError::Unauthorized);
         }
 
