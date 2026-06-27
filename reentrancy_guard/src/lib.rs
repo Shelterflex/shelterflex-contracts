@@ -602,10 +602,16 @@ mod test {
             .unwrap();
 
         // Now it should bypass guard
-        client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
+        client
+            .try_enter(&guarded_contract, &entry_point)
+            .unwrap()
+            .unwrap();
         // Should be able to enter again because it's allowed and bypasses lock/depth
-        client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
-        
+        client
+            .try_enter(&guarded_contract, &entry_point)
+            .unwrap()
+            .unwrap();
+
         assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 0u32);
         assert!(!client.check_reentrancy(&guarded_contract));
 
@@ -614,9 +620,12 @@ mod test {
             .try_disallow_pattern(&admin, &entry_point)
             .unwrap()
             .unwrap();
-        
+
         // Now it should follow rules again
-        client.try_enter(&guarded_contract, &entry_point).unwrap().unwrap();
+        client
+            .try_enter(&guarded_contract, &entry_point)
+            .unwrap()
+            .unwrap();
         let err = client
             .try_enter(&guarded_contract, &entry_point)
             .unwrap_err()
