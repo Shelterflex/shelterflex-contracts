@@ -21,7 +21,6 @@ pub enum DataKey {
     MaxCallDepth,
     AllowedPattern(BytesN<32>),
     ContractVersion,
-    Locked(Address),
 }
 
 #[contracttype]
@@ -38,7 +37,6 @@ pub struct CallDepthInfo {
 pub enum ContractError {
     AlreadyInitialized = 1,
     NotAuthorized = 2,
-    ReentrancyDetected = 3,
     MaxDepthExceeded = 4,
     InvalidEntryPoint = 5,
     PatternAlreadyAllowed = 6,
@@ -104,19 +102,6 @@ fn set_call_depth(env: &Env, contract: &Address, entry_point: &BytesN<32>, depth
         &DataKey::CallDepth(contract.clone(), entry_point.clone()),
         &depth,
     );
-}
-
-fn is_locked(env: &Env, contract: &Address) -> bool {
-    env.storage()
-        .instance()
-        .get(&DataKey::Locked(contract.clone()))
-        .unwrap_or(false)
-}
-
-fn set_locked(env: &Env, contract: &Address, locked: bool) {
-    env.storage()
-        .instance()
-        .set(&DataKey::Locked(contract.clone()), &locked);
 }
 
 #[contractimpl]
@@ -302,10 +287,6 @@ impl ReentrancyGuard {
             return Err(ContractError::GuardNotActive);
         }
 
-        if is_locked(&env, &contract) {
-            return Err(ContractError::ReentrancyDetected);
-        }
-
         if is_pattern_allowed(&env, &entry_point) {
             return Ok(());
         }
@@ -325,7 +306,6 @@ impl ReentrancyGuard {
             return Err(ContractError::MaxDepthExceeded);
         }
 
-        set_locked(&env, &contract, true);
         set_call_depth(&env, &contract, &entry_point, depth + 1);
 
         env.events().publish(
@@ -355,10 +335,6 @@ impl ReentrancyGuard {
         }
         set_call_depth(&env, &contract, &entry_point, depth - 1);
 
-        if depth <= 1 {
-            set_locked(&env, &contract, false);
-        }
-
         env.events().publish(
             (
                 Symbol::new(&env, "reentrancy_guard"),
@@ -369,10 +345,6 @@ impl ReentrancyGuard {
         );
 
         Ok(())
-    }
-
-    pub fn check_reentrancy(env: Env, contract: Address) -> bool {
-        is_locked(&env, &contract)
     }
 
     pub fn get_call_depth(env: Env, contract: Address, entry_point: BytesN<32>) -> u32 {
@@ -578,20 +550,30 @@ mod test {
             .unwrap()
             .unwrap();
 
-        // By default, it should follow reentrancy rules
+        // By default, re-entering follows max_depth rules (set to 1 for strict prevention)
+        client
+            .try_set_max_call_depth(&admin, &1u32)
+            .unwrap()
+            .unwrap();
         client
             .try_enter(&guarded_contract, &entry_point)
             .unwrap()
             .unwrap();
-        // Re-entering same entry point should fail due to lock (since it's not allowed yet)
+        // Re-entering same entry point should fail due to max depth (depth 1 >= max_depth 1)
         let err = client
             .try_enter(&guarded_contract, &entry_point)
             .unwrap_err()
             .unwrap();
-        assert_eq!(err, ContractError::ReentrancyDetected);
+        assert_eq!(err, ContractError::MaxDepthExceeded);
 
         client
             .try_exit(&guarded_contract, &entry_point)
+            .unwrap()
+            .unwrap();
+
+        // Reset max_depth for pattern tests
+        client
+            .try_set_max_call_depth(&admin, &5u32)
             .unwrap()
             .unwrap();
 
@@ -613,11 +595,16 @@ mod test {
             .unwrap();
 
         assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 0u32);
-        assert!(!client.check_reentrancy(&guarded_contract));
 
         // Disallow pattern
         client
             .try_disallow_pattern(&admin, &entry_point)
+            .unwrap()
+            .unwrap();
+
+        // Set max_depth=1 to enforce strict reentrancy prevention again
+        client
+            .try_set_max_call_depth(&admin, &1u32)
             .unwrap()
             .unwrap();
 
@@ -630,7 +617,7 @@ mod test {
             .try_enter(&guarded_contract, &entry_point)
             .unwrap_err()
             .unwrap();
-        assert_eq!(err, ContractError::ReentrancyDetected);
+        assert_eq!(err, ContractError::MaxDepthExceeded);
     }
 
     #[test]

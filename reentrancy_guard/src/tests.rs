@@ -28,7 +28,7 @@ fn create_entry_point(env: &Env, name: &str) -> BytesN<32> {
 }
 
 #[test]
-fn lock_acquisition_succeeds() {
+fn enter_sets_call_depth() {
     let env = Env::default();
     let (client, admin) = setup_contract(&env);
 
@@ -41,18 +41,18 @@ fn lock_acquisition_succeeds() {
         .unwrap()
         .unwrap();
 
-    // Acquire lock
+    // Enter should set depth
     client
         .try_enter(&guarded_contract, &entry_point)
         .unwrap()
         .unwrap();
 
-    // Check that lock is held
-    assert!(client.check_reentrancy(&guarded_contract));
+    // Check that call depth is 1
+    assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 1);
 }
 
 #[test]
-fn lock_release_succeeds() {
+fn exit_resets_call_depth() {
     let env = Env::default();
     let (client, admin) = setup_contract(&env);
 
@@ -65,20 +65,20 @@ fn lock_release_succeeds() {
         .unwrap()
         .unwrap();
 
-    // Acquire lock
+    // Enter
     client
         .try_enter(&guarded_contract, &entry_point)
         .unwrap()
         .unwrap();
 
-    // Release lock
+    // Exit
     client
         .try_exit(&guarded_contract, &entry_point)
         .unwrap()
         .unwrap();
 
-    // Check that lock is released
-    assert!(!client.check_reentrancy(&guarded_contract));
+    // Check that call depth is back to 0
+    assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 0);
 }
 
 #[test]
@@ -95,22 +95,25 @@ fn reentrancy_prevention_returns_error() {
         .unwrap()
         .unwrap();
 
-    // Acquire lock first time
+    // Set max_depth to 1 for strict reentrancy prevention
+    client.try_set_max_call_depth(&admin, &1).unwrap().unwrap();
+
+    // First enter succeeds (depth 0 < max_depth 1)
     client
         .try_enter(&guarded_contract, &entry_point)
         .unwrap()
         .unwrap();
 
-    // Try to acquire lock again while held - should fail
+    // Second enter fails — depth 1 >= max_depth 1
     let err = client
         .try_enter(&guarded_contract, &entry_point)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, ContractError::ReentrancyDetected);
+    assert_eq!(err, ContractError::MaxDepthExceeded);
 }
 
 #[test]
-fn lock_released_on_error() {
+fn exit_restores_depth_on_cleanup() {
     let env = Env::default();
     let (client, admin) = setup_contract(&env);
 
@@ -123,21 +126,21 @@ fn lock_released_on_error() {
         .unwrap()
         .unwrap();
 
-    // Acquire lock
+    // Enter (simulates guarded call)
     client
         .try_enter(&guarded_contract, &entry_point)
         .unwrap()
         .unwrap();
 
-    // Simulate panic by calling exit (in real scenario, this would be automatic on panic)
-    // For this test, we manually release to simulate cleanup
+    // In real scenario, exit would be called automatically on panic cleanup
+    // Here we manually release to simulate cleanup
     client
         .try_exit(&guarded_contract, &entry_point)
         .unwrap()
         .unwrap();
 
-    // Verify lock is released
-    assert!(!client.check_reentrancy(&guarded_contract));
+    // Verify depth is restored to 0
+    assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 0);
 }
 
 #[test]
@@ -159,27 +162,27 @@ fn concurrent_guard_independent_state() {
         .unwrap()
         .unwrap();
 
-    // Acquire lock for contract A
+    // Enter contract A
     client
         .try_enter(&contract_a, &entry_point)
         .unwrap()
         .unwrap();
 
-    // Contract A should be locked
-    assert!(client.check_reentrancy(&contract_a));
+    // Contract A should have depth 1
+    assert_eq!(client.get_call_depth(&contract_a, &entry_point), 1);
 
-    // Contract B should not be locked
-    assert!(!client.check_reentrancy(&contract_b));
+    // Contract B should still have depth 0
+    assert_eq!(client.get_call_depth(&contract_b, &entry_point), 0);
 
-    // Should be able to acquire lock for contract B
+    // Should be able to enter contract B independently
     client
         .try_enter(&contract_b, &entry_point)
         .unwrap()
         .unwrap();
 
-    // Both should be locked now
-    assert!(client.check_reentrancy(&contract_a));
-    assert!(client.check_reentrancy(&contract_b));
+    // Both should have depth 1 now
+    assert_eq!(client.get_call_depth(&contract_a, &entry_point), 1);
+    assert_eq!(client.get_call_depth(&contract_b, &entry_point), 1);
 }
 
 #[test]
@@ -203,8 +206,8 @@ fn guard_wrapping_pattern() {
         .unwrap()
         .unwrap();
 
-    // Execute guarded logic (in this case, just check lock state)
-    assert!(client.check_reentrancy(&guarded_contract));
+    // Execute guarded logic (in this case, just check depth)
+    assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 1);
 
     // Exit
     client
@@ -212,12 +215,12 @@ fn guard_wrapping_pattern() {
         .unwrap()
         .unwrap();
 
-    // Verify lock is released
-    assert!(!client.check_reentrancy(&guarded_contract));
+    // Verify depth is back to 0
+    assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 0);
 }
 
 #[test]
-fn is_locked_returns_correct_state() {
+fn call_depth_reflects_enter_exit_state() {
     let env = Env::default();
     let (client, admin) = setup_contract(&env);
 
@@ -230,22 +233,22 @@ fn is_locked_returns_correct_state() {
         .unwrap()
         .unwrap();
 
-    // Initially not locked
-    assert!(!client.check_reentrancy(&guarded_contract));
+    // Initially depth is 0
+    assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 0);
 
-    // After enter, should be locked
+    // After enter, depth should be 1
     client
         .try_enter(&guarded_contract, &entry_point)
         .unwrap()
         .unwrap();
-    assert!(client.check_reentrancy(&guarded_contract));
+    assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 1);
 
-    // After exit, should not be locked
+    // After exit, depth should be 0
     client
         .try_exit(&guarded_contract, &entry_point)
         .unwrap()
         .unwrap();
-    assert!(!client.check_reentrancy(&guarded_contract));
+    assert_eq!(client.get_call_depth(&guarded_contract, &entry_point), 0);
 }
 
 #[test]
@@ -297,17 +300,16 @@ fn max_depth_exceeded_returns_error() {
         .unwrap()
         .unwrap();
 
-    // First enter should succeed
+    // First enter should succeed (depth 0 < max_depth 1)
     client
         .try_enter(&guarded_contract, &entry_point)
         .unwrap()
         .unwrap();
 
-    // Second enter should fail with ReentrancyDetected (lock is held)
-    // Note: Max depth check happens after lock check, so reentrancy is caught first
+    // Second enter should fail with MaxDepthExceeded (depth 1 >= max_depth 1)
     let err = client
         .try_enter(&guarded_contract, &entry_point)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, ContractError::ReentrancyDetected);
+    assert_eq!(err, ContractError::MaxDepthExceeded);
 }
