@@ -830,7 +830,10 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_assign_role(&admin, &subject, &Role::Operator).unwrap().unwrap();
+        client
+            .try_propose_assign_role(&admin, &subject, &Role::Operator)
+            .unwrap()
+            .unwrap();
 
         // Should NOT have permission yet
         assert!(!client.has_permission(&subject, &Permission::CreditFunds));
@@ -845,7 +848,10 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        client.try_confirm_assign_role(&approver, &subject).unwrap().unwrap();
+        client
+            .try_confirm_assign_role(&approver, &subject)
+            .unwrap()
+            .unwrap();
 
         // Should NOW have permission
         assert!(client.has_permission(&subject, &Permission::CreditFunds));
@@ -860,7 +866,10 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_revoke_role(&admin, &subject).unwrap().unwrap();
+        client
+            .try_propose_revoke_role(&admin, &subject)
+            .unwrap()
+            .unwrap();
 
         // Should STILL have permission
         assert!(client.has_permission(&subject, &Permission::CreditFunds));
@@ -875,7 +884,10 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        client.try_confirm_revoke_role(&approver, &subject).unwrap().unwrap();
+        client
+            .try_confirm_revoke_role(&approver, &subject)
+            .unwrap()
+            .unwrap();
 
         // Should NO LONGER have permission
         assert!(!client.has_permission(&subject, &Permission::CreditFunds));
@@ -1004,7 +1016,10 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_assign_role(&admin, &subject, &Role::Operator).unwrap().unwrap();
+        client
+            .try_propose_assign_role(&admin, &subject, &Role::Operator)
+            .unwrap()
+            .unwrap();
         env.mock_auths(&[MockAuth {
             address: &approver,
             invoke: &MockAuthInvoke {
@@ -1014,7 +1029,10 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        client.try_confirm_assign_role(&approver, &subject).unwrap().unwrap();
+        client
+            .try_confirm_assign_role(&approver, &subject)
+            .unwrap()
+            .unwrap();
 
         // Verify require_permission works
         env.mock_auths(&[MockAuth {
@@ -1041,7 +1059,10 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        client.try_propose_revoke_role(&admin, &subject).unwrap().unwrap();
+        client
+            .try_propose_revoke_role(&admin, &subject)
+            .unwrap()
+            .unwrap();
         env.mock_auths(&[MockAuth {
             address: &approver,
             invoke: &MockAuthInvoke {
@@ -1051,7 +1072,10 @@ mod tests {
                 sub_invokes: &[],
             },
         }]);
-        client.try_confirm_revoke_role(&approver, &subject).unwrap().unwrap();
+        client
+            .try_confirm_revoke_role(&approver, &subject)
+            .unwrap()
+            .unwrap();
 
         // Verify require_permission fails
         env.mock_auths(&[MockAuth {

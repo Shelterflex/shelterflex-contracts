@@ -583,7 +583,6 @@ mod test {
             .try_enter(&guarded_contract, &entry_point)
             .unwrap()
             .unwrap();
-+
         // Re-entering same entry point should fail due to lock (since it's not allowed yet)
         let err = client
             .try_enter(&guarded_contract, &entry_point)
