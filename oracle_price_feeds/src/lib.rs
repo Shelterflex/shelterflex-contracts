@@ -22,6 +22,17 @@ pub struct PriceFeed {
     pub sequence: u64,
 }
 
+/// A timestamped price snapshot recorded on each `update_price` call.
+/// Used to compute manipulation-resistant TWAP views (issue #1196).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PriceObservation {
+    /// Aggregated price at the time of recording (same decimals as PriceFeed).
+    pub price: i128,
+    /// Ledger timestamp when this observation was written.
+    pub timestamp: u64,
+}
+
 /// Per-source price record stored for aggregation.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +57,8 @@ pub enum DataKey {
     SourceData(Symbol, Address),
     /// Minimum number of fresh sources required to compute a valid price
     Quorum(Symbol),
+    /// Accumulated TWAP observations ring-buffer for a feed
+    TwapObservations(Symbol),
 }
 
 #[contracterror]
@@ -549,6 +562,50 @@ impl OraclePriceFeeds {
             .instance()
             .set(&DataKey::MaxDeviationBps, &max_deviation_bps);
         Ok(())
+    }
+
+    /// Return a time-weighted average price (TWAP) for `pair` over the stored
+    /// observations window (issue #1196).
+    ///
+    /// Reads the `PriceObservation` ring-buffer accumulated by `update_price`
+    /// and computes a simple time-weighted mean:
+    ///
+    ///   TWAP = Σ(price_i × Δt_i) / Σ(Δt_i)
+    ///
+    /// Reverts with `UnknownPair` when no observations exist yet.
+    /// Returns the latest spot price when only one observation is available
+    /// (zero elapsed time — no manipulation possible yet).
+    pub fn get_twap(env: Env, pair: Symbol) -> i128 {
+        let observations: Vec<PriceObservation> = env
+            .storage()
+            .instance()
+            .get(&DataKey::TwapObservations(pair.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnknownPair));
+
+        let n = observations.len();
+        if n == 0 {
+            panic_with_error!(&env, ContractError::UnknownPair);
+        }
+        if n == 1 {
+            return observations.get(0).unwrap().price;
+        }
+
+        let mut weighted_sum: i128 = 0;
+        let mut total_time: u64 = 0;
+
+        for i in 1..n {
+            let prev = observations.get(i - 1).unwrap();
+            let curr = observations.get(i).unwrap();
+            let dt = curr.timestamp.saturating_sub(prev.timestamp);
+            weighted_sum = weighted_sum.saturating_add(prev.price.saturating_mul(dt as i128));
+            total_time = total_time.saturating_add(dt);
+        }
+
+        if total_time == 0 {
+            return observations.get(n - 1).unwrap().price;
+        }
+
+        weighted_sum / total_time as i128
     }
 }
 
