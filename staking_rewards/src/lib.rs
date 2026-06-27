@@ -43,10 +43,16 @@ pub enum ContractError {
 pub struct UserStake {
     pub amount: i128,
     pub user_index: i128,
+    /// Rewards settled on partial-unstake or re-stake, awaiting the next claim.
+    pub pending_amount: i128,
 }
 
 const REWARD_INDEX: &str = "REWARD_IDX";
 const TOTAL_STAKED: &str = "TOTAL_STK";
+/// Remainder tokens that could not increment the index; carried into the next distribution.
+const PENDING_DUST: &str = "DUST";
+/// Monotonically increasing total of all tokens ever passed to fund_rewards/distribute_rewards.
+const TOTAL_FUNDED: &str = "FUNDED";
 const SCALE: i128 = 1_000_000_000;
 
 pub mod formal_properties;
@@ -211,6 +217,9 @@ impl StakingRewards {
         let mut user_stake = Self::get_user_stake(&env, &user);
         let reward_index = Self::get_reward_index(&env);
 
+        // Settle any rewards earned so far at the current stake before the index resets.
+        let earned = Self::calc_pending(&user_stake, reward_index);
+        user_stake.pending_amount += earned;
         user_stake.amount += amount;
         user_stake.user_index = reward_index;
 
@@ -246,6 +255,11 @@ impl StakingRewards {
             panic!("Insufficient staked amount");
         }
 
+        // Settle rewards earned on the full stake before the amount changes.
+        let reward_index = Self::get_reward_index(&env);
+        let earned = Self::calc_pending(&user_stake, reward_index);
+        user_stake.pending_amount += earned;
+        user_stake.user_index = reward_index;
         user_stake.amount -= amount;
 
         env.storage().persistent().set(&user, &user_stake);
@@ -274,14 +288,29 @@ impl StakingRewards {
             return Err(ContractError::InvalidAmount);
         }
 
+        // Track cumulative funded for the conservation invariant.
+        let total_funded = Self::get_total_funded_inner(&env);
+        env.storage()
+            .persistent()
+            .set(&TOTAL_FUNDED, &(total_funded + amount));
+
         let total = Self::get_total_staked(&env);
         if total == 0 {
             return Ok(());
         }
 
         let reward_index = Self::get_reward_index(&env);
-        let new_index = reward_index + (amount * SCALE / total);
-        env.storage().persistent().set(&REWARD_INDEX, &new_index);
+        // Carry forward any remainder from the previous distribution so dust
+        // is not permanently lost when amount * SCALE is not divisible by total.
+        let dust = Self::get_pending_dust_inner(&env);
+        let total_to_dist = amount + dust;
+        let index_increment = total_to_dist * SCALE / total;
+        let committed = index_increment * total / SCALE;
+        let new_dust = total_to_dist - committed;
+        env.storage()
+            .persistent()
+            .set(&REWARD_INDEX, &(reward_index + index_increment));
+        env.storage().persistent().set(&PENDING_DUST, &new_dust);
 
         env.events().publish(
             (
@@ -302,14 +331,27 @@ impl StakingRewards {
             return Err(ContractError::InvalidAmount);
         }
 
+        // Track cumulative funded for the conservation invariant.
+        let total_funded = Self::get_total_funded_inner(&env);
+        env.storage()
+            .persistent()
+            .set(&TOTAL_FUNDED, &(total_funded + amount));
+
         let total = Self::get_total_staked(&env);
         if total == 0 {
             return Ok(());
         }
 
         let reward_index = Self::get_reward_index(&env);
-        let new_index = reward_index + (amount * SCALE / total);
-        env.storage().persistent().set(&REWARD_INDEX, &new_index);
+        let dust = Self::get_pending_dust_inner(&env);
+        let total_to_dist = amount + dust;
+        let index_increment = total_to_dist * SCALE / total;
+        let committed = index_increment * total / SCALE;
+        let new_dust = total_to_dist - committed;
+        env.storage()
+            .persistent()
+            .set(&REWARD_INDEX, &(reward_index + index_increment));
+        env.storage().persistent().set(&PENDING_DUST, &new_dust);
 
         env.events().publish(
             (
@@ -329,8 +371,9 @@ impl StakingRewards {
         let mut user_stake = Self::get_user_stake(&env, &user);
         let reward_index = Self::get_reward_index(&env);
 
-        let claimable = Self::calc_pending(&user_stake, reward_index);
+        let claimable = Self::calc_pending(&user_stake, reward_index) + user_stake.pending_amount;
         user_stake.user_index = reward_index;
+        user_stake.pending_amount = 0;
 
         env.storage().persistent().set(&user, &user_stake);
 
@@ -348,7 +391,15 @@ impl StakingRewards {
     pub fn get_claimable(env: Env, user: Address) -> i128 {
         let user_stake = Self::get_user_stake(&env, &user);
         let reward_index = Self::get_reward_index(&env);
-        Self::calc_pending(&user_stake, reward_index)
+        Self::calc_pending(&user_stake, reward_index) + user_stake.pending_amount
+    }
+
+    pub fn get_total_funded(env: Env) -> i128 {
+        Self::get_total_funded_inner(&env)
+    }
+
+    pub fn get_pending_dust(env: Env) -> i128 {
+        Self::get_pending_dust_inner(&env)
     }
 
     fn calc_pending(user_stake: &UserStake, reward_index: i128) -> i128 {
@@ -359,6 +410,7 @@ impl StakingRewards {
         env.storage().persistent().get(user).unwrap_or(UserStake {
             amount: 0,
             user_index: 0,
+            pending_amount: 0,
         })
     }
 
@@ -368,6 +420,14 @@ impl StakingRewards {
 
     fn get_total_staked(env: &Env) -> i128 {
         env.storage().persistent().get(&TOTAL_STAKED).unwrap_or(0)
+    }
+
+    fn get_pending_dust_inner(env: &Env) -> i128 {
+        env.storage().persistent().get(&PENDING_DUST).unwrap_or(0)
+    }
+
+    fn get_total_funded_inner(env: &Env) -> i128 {
+        env.storage().persistent().get(&TOTAL_FUNDED).unwrap_or(0)
     }
 
     // ── Upgrade governance (#392) ──────────────────────────────────────────────

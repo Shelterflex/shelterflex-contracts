@@ -230,3 +230,167 @@ fn claim_rewards_when_paused() {
         _ => panic!("Expected ContractError::Paused"),
     }
 }
+
+// ── #1189 Rounding-safe distribution and conservation invariants ─────────────
+
+#[test]
+fn sum_claimable_never_exceeds_total_funded() {
+    let env = Env::default();
+    let (_contract_id, client) = setup(&env);
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    let user3 = Address::generate(&env);
+    let user4 = Address::generate(&env);
+    let user5 = Address::generate(&env);
+
+    // Uneven stake split to stress rounding
+    client.stake(&user1, &100);
+    client.stake(&user2, &333);
+    client.stake(&user3, &500);
+    client.stake(&user4, &1);
+    client.stake(&user5, &66);
+
+    client.distribute_rewards(&1000);
+    client.distribute_rewards(&777);
+    client.distribute_rewards(&13);
+
+    let total_funded: i128 = 1000 + 777 + 13;
+    let total_claimable = client.get_claimable(&user1)
+        + client.get_claimable(&user2)
+        + client.get_claimable(&user3)
+        + client.get_claimable(&user4)
+        + client.get_claimable(&user5);
+
+    assert!(
+        total_claimable <= total_funded,
+        "total claimable {} must not exceed total funded {}",
+        total_claimable,
+        total_funded
+    );
+}
+
+#[test]
+fn dust_carried_forward_not_silently_dropped() {
+    let env = Env::default();
+    let (_contract_id, client) = setup(&env);
+
+    let user = Address::generate(&env);
+    // Stake more than SCALE so a 1-token distribution has zero index increment.
+    let big_stake: i128 = 1_000_000_001; // > SCALE
+    client.stake(&user, &big_stake);
+
+    // Distributing 1 token: index_incr = 1 * SCALE / big_stake = 0.
+    // Without carry-forward this token is permanently lost.
+    client.distribute_rewards(&1);
+    // Pending dust should now be 1.
+    assert_eq!(client.get_pending_dust(), 1);
+
+    // Distributing big_stake - 1 more: total_to_dist = big_stake (exact).
+    // With carry-forward, index_incr = big_stake * SCALE / big_stake = SCALE.
+    client.distribute_rewards(&(big_stake - 1));
+
+    let claimable = client.get_claimable(&user);
+    let total_funded: i128 = 1 + (big_stake - 1);
+    // Dust was carried forward; claimable should equal total funded exactly.
+    assert_eq!(
+        claimable, total_funded,
+        "carry-forward dust must reach the user: claimable={} funded={}",
+        claimable, total_funded
+    );
+    assert_eq!(client.get_pending_dust(), 0);
+    // total_funded tracker must be correct.
+    assert_eq!(client.get_total_funded(), total_funded);
+}
+
+#[test]
+fn claim_idempotency_second_claim_is_zero() {
+    let env = Env::default();
+    let (_contract_id, client) = setup(&env);
+
+    let user = Address::generate(&env);
+    client.stake(&user, &1000);
+    client.distribute_rewards(&500);
+
+    let first = client.claim(&user);
+    assert_eq!(first, 500);
+
+    // Immediate second claim must return 0, not 500 again.
+    let second = client.claim(&user);
+    assert_eq!(second, 0);
+
+    // Fresh distribution then claim works correctly.
+    client.distribute_rewards(&200);
+    let third = client.claim(&user);
+    assert_eq!(third, 200);
+
+    let fourth = client.claim(&user);
+    assert_eq!(fourth, 0);
+}
+
+#[test]
+fn unstake_settles_outstanding_rewards_before_reducing_stake() {
+    let env = Env::default();
+    let (_contract_id, client) = setup(&env);
+
+    let user = Address::generate(&env);
+    client.stake(&user, &1000);
+    client.distribute_rewards(&1000); // user earned 1000
+
+    // Unstake half WITHOUT claiming first.
+    client.unstake(&user, &500);
+
+    // Outstanding rewards on the full 1000 must be claimable after partial unstake.
+    let claimable = client.get_claimable(&user);
+    assert_eq!(
+        claimable, 1000,
+        "rewards on pre-unstake stake must be preserved"
+    );
+
+    // Claim settles everything.
+    let claimed = client.claim(&user);
+    assert_eq!(claimed, 1000);
+    assert_eq!(client.get_claimable(&user), 0);
+
+    // Further rewards accrue only on the remaining 500 stake;
+    // user is the sole staker so they get the full 500.
+    client.distribute_rewards(&500);
+    assert_eq!(client.get_claimable(&user), 500);
+}
+
+#[test]
+fn stake_unstake_between_distributions_correct_per_staker_rewards() {
+    let env = Env::default();
+    let (_contract_id, client) = setup(&env);
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    // Epoch 1: only user1 staked.
+    client.stake(&user1, &1000);
+    client.distribute_rewards(&1000);
+    // user1 earned 1000.
+
+    // Epoch 2: user2 joins.
+    client.stake(&user2, &1000);
+    client.distribute_rewards(&2000);
+    // Each earns 1000 more.
+
+    assert_eq!(client.get_claimable(&user1), 1000 + 1000);
+    assert_eq!(client.get_claimable(&user2), 1000);
+
+    // Epoch 3: user1 partially unstakes (settles at current reward).
+    client.unstake(&user1, &500); // user1 now has 500 staked
+    client.distribute_rewards(&1500);
+    // user1 (500) + user2 (1000) = 1500 total; user1 gets 500, user2 gets 1000.
+
+    let c1 = client.get_claimable(&user1);
+    let c2 = client.get_claimable(&user2);
+    // user1: 2000 (settled) + 500 new = 2500
+    assert_eq!(c1, 2500);
+    // user2: 1000 (settled) + 1000 new = 2000
+    assert_eq!(c2, 2000);
+
+    // Conservation: total claimable <= total funded.
+    assert!(c1 + c2 <= 1000 + 2000 + 1500);
+}
