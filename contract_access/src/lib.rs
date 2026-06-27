@@ -769,7 +769,7 @@ mod tests {
     }
 
     // ── revocation ────────────────────────────────────────────────────────────
-    
+
     #[test]
     fn two_step_assign_and_revoke() {
         let env = Env::default();
