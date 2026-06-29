@@ -118,7 +118,10 @@ mod tests {
         let (_admin, client) = setup(&env);
 
         let result = client.try_guarded_operation();
-        assert!(result.is_ok(), "guarded operation should succeed when unpaused");
+        assert!(
+            result.is_ok(),
+            "guarded operation should succeed when unpaused"
+        );
     }
 
     #[test]

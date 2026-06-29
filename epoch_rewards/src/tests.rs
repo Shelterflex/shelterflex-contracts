@@ -550,7 +550,10 @@ fn unstake_during_active_epoch_conservation_holds() {
     assert!(claimable_a > 0, "unstaker should have earned rewards");
 
     // B should also have earned something (continued staking after A left)
-    assert!(claimable_b > 0, "remaining staker should have earned rewards");
+    assert!(
+        claimable_b > 0,
+        "remaining staker should have earned rewards"
+    );
 }
 
 #[test]

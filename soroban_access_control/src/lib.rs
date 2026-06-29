@@ -88,14 +88,26 @@ impl TestAccessControlContract {
 
     pub fn set_operator(env: Env, caller: Address, operator: Address) -> Result<(), TestError> {
         let admin = Self::get_admin(&env);
-        require_admin_permission(&env, &admin, &caller, "set_operator", TestError::NotAuthorized)?;
+        require_admin_permission(
+            &env,
+            &admin,
+            &caller,
+            "set_operator",
+            TestError::NotAuthorized,
+        )?;
         env.storage().instance().set(&DataKey::Operator, &operator);
         Ok(())
     }
 
     pub fn admin_only_operation(env: Env, caller: Address) -> Result<(), TestError> {
         let admin = Self::get_admin(&env);
-        require_admin_permission(&env, &admin, &caller, "admin_only_operation", TestError::NotAuthorized)?;
+        require_admin_permission(
+            &env,
+            &admin,
+            &caller,
+            "admin_only_operation",
+            TestError::NotAuthorized,
+        )?;
         Ok(())
     }
 
@@ -237,7 +249,10 @@ mod tests {
         }]);
 
         let result = client.try_admin_or_operator_operation(&admin);
-        assert!(result.is_ok(), "admin should pass admin_or_operator permission check");
+        assert!(
+            result.is_ok(),
+            "admin should pass admin_or_operator permission check"
+        );
     }
 
     #[test]
@@ -269,7 +284,10 @@ mod tests {
         }]);
 
         let result = client.try_admin_or_operator_operation(&operator);
-        assert!(result.is_ok(), "operator should pass admin_or_operator permission check");
+        assert!(
+            result.is_ok(),
+            "operator should pass admin_or_operator permission check"
+        );
     }
 
     #[test]
