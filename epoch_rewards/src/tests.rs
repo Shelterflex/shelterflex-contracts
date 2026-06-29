@@ -470,3 +470,249 @@ fn full_claim_conservation_multi_epoch() {
         total_funded
     );
 }
+
+// ── 15. Unstake during active epoch: reward accounting policy ───────────────
+//
+// Policy: When a staker unstakes during an active (unsealed) epoch, they earn
+// rewards proportional to their stake duration up to the unstake timestamp.
+// Their pending rewards are settled and banked at unstake time. The remaining
+// rewards for the epoch are distributed only to stakers who remain staked.
+// This ensures conservation: Σ claimable ≤ funded, with no stranded or
+// double-counted rewards.
+
+#[test]
+fn unstake_during_active_epoch_settles_pending_rewards() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    let user = Address::generate(&env);
+    client.stake(&user, &1_000);
+
+    // Fund rewards for the epoch
+    let funded: i128 = 500;
+    client.fund_epoch_rewards(&admin, &funded);
+
+    // User unstakes during active epoch (before seal)
+    client.unstake(&user, &1_000);
+
+    // User should have claimable rewards from their time staked
+    let claimable = client.get_claimable(&user);
+    assert!(claimable > 0, "unstaker should have earned rewards");
+
+    // Seal the epoch
+    env.ledger().with_mut(|li| li.timestamp = duration + 1);
+    client.seal_epoch(&admin, &1, &100);
+
+    // User can claim their rewards
+    let claimed = client.claim(&user);
+    assert_eq!(claimed, claimable);
+}
+
+#[test]
+fn unstake_during_active_epoch_conservation_holds() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    // Both stake initially
+    client.stake(&a, &600);
+    client.stake(&b, &400);
+
+    // Fund rewards
+    let funded: i128 = 1_000;
+    client.fund_epoch_rewards(&admin, &funded);
+
+    // A unstakes during active epoch
+    client.unstake(&a, &600);
+
+    // Seal the epoch
+    env.ledger().with_mut(|li| li.timestamp = duration + 1);
+    client.seal_epoch(&admin, &1, &100);
+
+    // Check claimable amounts
+    let claimable_a = client.get_claimable(&a);
+    let claimable_b = client.get_claimable(&b);
+
+    // Conservation: total claimable must not exceed funded
+    assert!(
+        claimable_a + claimable_b <= funded,
+        "conservation violated: {} + {} > {}",
+        claimable_a,
+        claimable_b,
+        funded
+    );
+
+    // A should have earned something (proportional to time staked)
+    assert!(claimable_a > 0, "unstaker should have earned rewards");
+
+    // B should also have earned something (continued staking after A left)
+    assert!(
+        claimable_b > 0,
+        "remaining staker should have earned rewards"
+    );
+}
+
+#[test]
+fn unstake_then_restake_within_same_epoch() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    let user = Address::generate(&env);
+    client.stake(&user, &1_000);
+
+    // Fund rewards
+    client.fund_epoch_rewards(&admin, &500);
+
+    // Unstake
+    client.unstake(&user, &1_000);
+
+    // Re-stake in same epoch
+    client.stake(&user, &1_000);
+
+    // Fund more rewards
+    client.fund_epoch_rewards(&admin, &500);
+
+    // Seal the epoch
+    env.ledger().with_mut(|li| li.timestamp = duration + 1);
+    client.seal_epoch(&admin, &1, &100);
+
+    // User should have claimable from both periods
+    let claimable = client.get_claimable(&user);
+    assert!(claimable > 0, "user should have earned rewards");
+
+    // Conservation should still hold
+    let epoch = client.get_epoch(&1).unwrap();
+    assert!(
+        epoch.total_claimable_at_seal <= 1_000,
+        "total claimable should not exceed funded"
+    );
+}
+
+#[test]
+fn unstake_full_balance_during_active_epoch() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    let user = Address::generate(&env);
+    client.stake(&user, &1_000);
+
+    client.fund_epoch_rewards(&admin, &500);
+
+    // Unstake full balance
+    client.unstake(&user, &1_000);
+
+    // User should have claimable rewards
+    let claimable = client.get_claimable(&user);
+    assert!(claimable > 0);
+
+    // Seal epoch
+    env.ledger().with_mut(|li| li.timestamp = duration + 1);
+    client.seal_epoch(&admin, &1, &100);
+
+    // User can claim
+    let claimed = client.claim(&user);
+    assert_eq!(claimed, claimable);
+
+    // User's stake should be 0
+    assert_eq!(client.total_staked(), 0);
+}
+
+#[test]
+fn unstake_by_only_staker_during_active_epoch() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    let sole_staker = Address::generate(&env);
+    client.stake(&sole_staker, &1_000);
+
+    client.fund_epoch_rewards(&admin, &500);
+
+    // Sole staker unstakes
+    client.unstake(&sole_staker, &1_000);
+
+    // Seal epoch
+    env.ledger().with_mut(|li| li.timestamp = duration + 1);
+    client.seal_epoch(&admin, &1, &100);
+
+    // Sole staker should get all rewards (minus dust)
+    let claimable = client.get_claimable(&sole_staker);
+    assert!(claimable > 0);
+
+    // Conservation: claimable should be close to funded (minus dust)
+    let epoch = client.get_epoch(&1).unwrap();
+    assert_eq!(
+        epoch.total_claimable_at_seal + epoch.dust,
+        500,
+        "claimable + dust should equal funded"
+    );
+}
+
+#[test]
+fn unstake_after_seal_does_not_affect_sealed_epoch() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    let user = Address::generate(&env);
+    client.stake(&user, &1_000);
+
+    client.fund_epoch_rewards(&admin, &500);
+
+    // Seal epoch 1
+    env.ledger().with_mut(|li| li.timestamp = duration + 1);
+    client.seal_epoch(&admin, &1, &100);
+
+    // Get claimable before unstake
+    let claimable_before = client.get_claimable(&user);
+
+    // Unstake after seal
+    client.unstake(&user, &1_000);
+
+    // Claimable should not change (sealed epoch rewards are fixed)
+    let claimable_after = client.get_claimable(&user);
+    assert_eq!(
+        claimable_before, claimable_after,
+        "unstake after seal should not affect claimable"
+    );
+
+    // User can still claim the same amount
+    let claimed = client.claim(&user);
+    assert_eq!(claimed, claimable_before);
+}
+
+#[test]
+fn unstake_partial_during_active_epoch() {
+    let env = Env::default();
+    let duration = 100u64;
+    let (admin, client) = setup(&env, duration);
+
+    let user = Address::generate(&env);
+    client.stake(&user, &1_000);
+
+    client.fund_epoch_rewards(&admin, &500);
+
+    // Unstake partial amount
+    client.unstake(&user, &400);
+
+    // User should have claimable rewards
+    let claimable = client.get_claimable(&user);
+    assert!(claimable > 0);
+
+    // Remaining stake should be 600
+    assert_eq!(client.total_staked(), 600);
+
+    // Seal epoch
+    env.ledger().with_mut(|li| li.timestamp = duration + 1);
+    client.seal_epoch(&admin, &1, &100);
+
+    // User can claim
+    let claimed = client.claim(&user);
+    assert_eq!(claimed, claimable);
+}
