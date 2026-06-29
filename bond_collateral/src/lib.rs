@@ -611,7 +611,12 @@ impl BondCollateral {
                 Symbol::new(&env, "collateral_withdrawn"),
                 owner.clone(),
             ),
-            (position_id.clone(), amount, position.collateral_amount, ratio),
+            (
+                position_id.clone(),
+                amount,
+                position.collateral_amount,
+                ratio,
+            ),
         );
 
         Ok(())
