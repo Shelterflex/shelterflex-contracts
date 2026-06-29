@@ -2333,10 +2333,16 @@ mod test {
             metadata: None,
         };
 
-        let hash1 = client.try_compute_metadata_hash(&input.clone()).unwrap().unwrap();
+        let hash1 = client
+            .try_compute_metadata_hash(&input.clone())
+            .unwrap()
+            .unwrap();
         let hash2 = client.try_compute_metadata_hash(&input).unwrap().unwrap();
 
-        assert_eq!(hash1, hash2, "hash should be deterministic for identical input");
+        assert_eq!(
+            hash1, hash2,
+            "hash should be deterministic for identical input"
+        );
     }
 
     #[test]
@@ -2445,7 +2451,10 @@ mod test {
         let hash1 = client.try_compute_metadata_hash(&input1).unwrap().unwrap();
         let hash2 = client.try_compute_metadata_hash(&input2).unwrap().unwrap();
 
-        assert_ne!(hash1, hash2, "hash should change when token address changes");
+        assert_ne!(
+            hash1, hash2,
+            "hash should change when token address changes"
+        );
     }
 
     #[test]
@@ -2632,7 +2641,10 @@ mod test {
         let hash1 = client.try_compute_metadata_hash(&input1).unwrap().unwrap();
         let hash2 = client.try_compute_metadata_hash(&input2).unwrap().unwrap();
 
-        assert_ne!(hash1, hash2, "hash should change when metadata content changes");
+        assert_ne!(
+            hash1, hash2,
+            "hash should change when metadata content changes"
+        );
     }
 
     #[test]
@@ -2653,8 +2665,14 @@ mod test {
             metadata: None,
         };
 
-        let hash = client.try_compute_metadata_hash(&input.clone()).unwrap().unwrap();
-        let verified = client.try_verify_metadata_hash(&input, &hash).unwrap().unwrap();
+        let hash = client
+            .try_compute_metadata_hash(&input.clone())
+            .unwrap()
+            .unwrap();
+        let verified = client
+            .try_verify_metadata_hash(&input, &hash)
+            .unwrap()
+            .unwrap();
 
         assert!(verified, "verify should return true for correct hash");
     }
@@ -2678,7 +2696,10 @@ mod test {
         };
 
         let wrong_hash = BytesN::from_array(&env, &[0u8; 32]);
-        let verified = client.try_verify_metadata_hash(&input, &wrong_hash).unwrap().unwrap();
+        let verified = client
+            .try_verify_metadata_hash(&input, &wrong_hash)
+            .unwrap()
+            .unwrap();
 
         assert!(!verified, "verify should return false for incorrect hash");
     }
@@ -2713,7 +2734,10 @@ mod test {
         };
 
         let hash1 = client.try_compute_metadata_hash(&input1).unwrap().unwrap();
-        let verified = client.try_verify_metadata_hash(&input2, &hash1).unwrap().unwrap();
+        let verified = client
+            .try_verify_metadata_hash(&input2, &hash1)
+            .unwrap()
+            .unwrap();
 
         assert!(!verified, "verify should reject hash from different input");
     }
@@ -2748,8 +2772,14 @@ mod test {
             metadata: None,
         };
 
-        let hash_before = client.try_compute_metadata_hash(&input_before).unwrap().unwrap();
-        let hash_after = client.try_compute_metadata_hash(&input_after).unwrap().unwrap();
+        let hash_before = client
+            .try_compute_metadata_hash(&input_before)
+            .unwrap()
+            .unwrap();
+        let hash_after = client
+            .try_compute_metadata_hash(&input_after)
+            .unwrap()
+            .unwrap();
 
         assert_ne!(hash_before, hash_after, "hash should detect config change");
     }
