@@ -565,7 +565,13 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, { i as i128 * 1000i128 }, payer.clone(), reference.clone()).into_val(&env),
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -592,7 +598,13 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, { i as i128 * 1000i128 }, payer.clone(), reference.clone()).into_val(&env),
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -634,7 +646,13 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, { i as i128 * 1000i128 }, payer.clone(), reference.clone()).into_val(&env),
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -683,7 +701,13 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, { i as i128 * 1000i128 }, payer.clone(), reference.clone()).into_val(&env),
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -770,7 +794,13 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, { i as i128 * 1000i128 }, payer.clone(), reference.clone()).into_val(&env),
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -1122,7 +1152,13 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (1u64, { i as i128 * 1000i128 }, payer.clone(), reference.clone()).into_val(&env),
+                    args: (
+                        1u64,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -1137,7 +1173,13 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (2u64, { i as i128 * 2000i128 }, payer.clone(), reference.clone()).into_val(&env),
+                    args: (
+                        2u64,
+                        { i as i128 * 2000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
@@ -1338,7 +1380,12 @@ mod test {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, { i as i128 * 1000i128 }, payer.clone(), reference.clone())
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
                         .into_val(&env),
                     sub_invokes: &[],
                 },
