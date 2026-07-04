@@ -10,8 +10,17 @@ use rent_payments::{RentPayments, RentPaymentsClient};
 use rent_wallet::{RentWallet, RentWalletClient};
 use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{Address, Env, IntoVal, String, Symbol};
+use soroban_sdk::{Address, BytesN, Env, IntoVal, String, Symbol};
 use std::format;
+
+fn generate_reference(env: &Env, seed: u64) -> BytesN<32> {
+    let mut bytes = [0u8; 32];
+    let seed_bytes = seed.to_be_bytes();
+    for i in 0..8 {
+        bytes[i] = seed_bytes[i];
+    }
+    BytesN::from_array(env, &bytes)
+}
 
 /// Deployed contracts and role addresses for cross-contract payment flows.
 struct TestContracts<'a> {
@@ -173,6 +182,7 @@ fn release_escrow_and_record_receipt(
     platform_amount: i128,
     reporter_amount: i128,
     receipt_amount: i128,
+    reference: BytesN<32>,
 ) {
     let deal_str = deal_id_str(env, deal_id);
     let token_client = EscrowTokenClient::new(env, &stack.token);
@@ -240,13 +250,19 @@ fn release_escrow_and_record_receipt(
         invoke: &MockAuthInvoke {
             contract: &stack.rent_payments_id,
             fn_name: "create_receipt",
-            args: (deal_id, receipt_amount, stack.tenant.clone()).into_val(env),
+            args: (
+                deal_id,
+                receipt_amount,
+                stack.tenant.clone(),
+                reference.clone(),
+            )
+                .into_val(env),
             sub_invokes: &[],
         },
     }]);
     let receipt = stack
         .rent_payments
-        .try_create_receipt(&deal_id, &receipt_amount, &stack.tenant)
+        .try_create_receipt(&deal_id, &receipt_amount, &stack.tenant, &reference)
         .unwrap()
         .unwrap();
     assert_eq!(receipt.deal_id, deal_id);
@@ -265,6 +281,7 @@ fn scenario_1_full_deal_payment_flow() {
     let reporter_fee = 50i128;
 
     wallet_credit_and_escrow_deposit(&env, &stack, deal_id, amount);
+    let reference = generate_reference(&env, deal_id);
     release_escrow_and_record_receipt(
         &env,
         &stack,
@@ -273,6 +290,7 @@ fn scenario_1_full_deal_payment_flow() {
         platform_fee,
         reporter_fee,
         amount,
+        reference,
     );
 
     assert_eq!(stack.rent_payments.receipt_count(&deal_id), 1);
@@ -295,8 +313,9 @@ fn scenario_2_partial_instalment_flow_three_payments() {
     let reporter_fee = 50i128;
     let mut cumulative = 0i128;
 
-    for _ in 0..3 {
+    for i in 0..3 {
         wallet_credit_and_escrow_deposit(&env, &stack, deal_id, instalment);
+        let reference = generate_reference(&env, deal_id * 1000 + i as u64);
         release_escrow_and_record_receipt(
             &env,
             &stack,
@@ -305,6 +324,7 @@ fn scenario_2_partial_instalment_flow_three_payments() {
             platform_fee,
             reporter_fee,
             instalment,
+            reference,
         );
         cumulative += instalment;
     }
@@ -484,6 +504,7 @@ fn cross_contract_value_conservation() {
     let escrow_before_release = stack.deal_escrow.balance(&deal_id_str(&env, deal_id));
 
     // Execute release
+    let reference = generate_reference(&env, deal_id);
     release_escrow_and_record_receipt(
         &env,
         &stack,
@@ -492,6 +513,7 @@ fn cross_contract_value_conservation() {
         platform_fee,
         reporter_fee,
         initial_deposit,
+        reference,
     );
 
     // Verify post-release balances
@@ -605,6 +627,7 @@ fn multiple_sequential_deals_maintain_invariants() {
         let reporter_fee = (amount * 5) / 100;
 
         wallet_credit_and_escrow_deposit(&env, &stack, deal_id, amount);
+        let reference = generate_reference(&env, deal_id);
         release_escrow_and_record_receipt(
             &env,
             &stack,
@@ -613,6 +636,7 @@ fn multiple_sequential_deals_maintain_invariants() {
             platform_fee,
             reporter_fee,
             amount,
+            reference,
         );
 
         // Verify escrow is clean after each deal

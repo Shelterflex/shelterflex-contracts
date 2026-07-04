@@ -36,6 +36,7 @@ pub struct Receipt {
     pub timestamp: Timestamp,
     pub tx_id: TxId,
     pub payer: Address,
+    pub reference: BytesN<32>, // Unique payment reference for idempotency
 }
 
 /// Paginated result for list_receipts_by_deal
@@ -56,6 +57,7 @@ pub enum DataKey {
     Deals,
     Receipts(DealId),
     ReceiptCount(DealId),
+    UsedReference(DealId, BytesN<32>), // Track used references per deal for idempotency
 }
 
 #[contracterror]
@@ -66,6 +68,7 @@ pub enum ContractError {
     InvalidAmount = 2,
     InvalidLimit = 3,
     Paused = 4,
+    DuplicateReference = 5,
 }
 
 #[contract]
@@ -125,6 +128,18 @@ fn increment_receipt_count(env: &Env, deal_id: DealId) -> ReceiptId {
         .persistent()
         .set(&DataKey::ReceiptCount(deal_id), &new_count);
     new_count
+}
+
+fn is_reference_used(env: &Env, deal_id: DealId, reference: &BytesN<32>) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::UsedReference(deal_id, reference.clone()))
+}
+
+fn mark_reference_used(env: &Env, deal_id: DealId, reference: &BytesN<32>) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::UsedReference(deal_id, reference.clone()), &true);
 }
 
 fn get_tx_id(env: &Env) -> TxId {
@@ -201,11 +216,20 @@ impl RentPayments {
 
     /// Create a new receipt for a deal
     /// This function records a monthly payment receipt
+    ///
+    /// # Arguments
+    /// * `deal_id` - The deal ID to create a receipt for
+    /// * `amount` - The payment amount (must be > 0)
+    /// * `payer` - The address of the payer
+    /// * `reference` - A unique 32-byte reference for idempotency. If this reference
+    ///                 has already been used for this deal, the function returns
+    ///                 DuplicateReference error.
     pub fn create_receipt(
         env: Env,
         deal_id: DealId,
         amount: i128,
         payer: Address,
+        reference: BytesN<32>,
     ) -> Result<Receipt, ContractError> {
         require_admin(&env)?;
         require_not_paused(&env)?;
@@ -214,10 +238,16 @@ impl RentPayments {
             return Err(ContractError::InvalidAmount);
         }
 
+        // Check for duplicate reference
+        if is_reference_used(&env, deal_id, &reference) {
+            return Err(ContractError::DuplicateReference);
+        }
+
         let receipt_id = increment_receipt_count(&env, deal_id);
         let timestamp = env.ledger().timestamp();
         let tx_id = get_tx_id(&env);
         let payer_clone = payer.clone();
+        let reference_clone = reference.clone();
 
         let receipt = Receipt {
             id: receipt_id,
@@ -226,15 +256,19 @@ impl RentPayments {
             timestamp,
             tx_id: tx_id.clone(),
             payer: payer_clone.clone(),
+            reference: reference_clone.clone(),
         };
 
         let mut receipts = get_receipts(&env, deal_id);
         receipts.push_back(receipt.clone());
         put_receipts(&env, deal_id, receipts);
 
+        // Mark reference as used after successful receipt creation
+        mark_reference_used(&env, deal_id, &reference);
+
         env.events().publish(
             (Symbol::new(&env, "receipt_created"), deal_id),
-            (receipt_id, amount, payer_clone, 1u32),
+            (receipt_id, amount, payer_clone, reference_clone, 1u32),
         );
 
         Ok(receipt)
@@ -464,6 +498,15 @@ mod test {
         (admin, client, contract_id)
     }
 
+    fn generate_reference(env: &Env, seed: u64) -> BytesN<32> {
+        let mut bytes = [0u8; 32];
+        let seed_bytes = seed.to_be_bytes();
+        for i in 0..8 {
+            bytes[i] = seed_bytes[i];
+        }
+        BytesN::from_array(env, &bytes)
+    }
+
     #[test]
     fn init_sets_version_to_one() {
         let env = Env::default();
@@ -516,16 +559,23 @@ mod test {
 
         // Create 5 receipts
         for i in 1..=5 {
+            let reference = generate_reference(&env, i);
             env.mock_auths(&[MockAuth {
                 address: &admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, { i * 1000 }, payer.clone()).into_val(&env),
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
-            client.create_receipt(&deal_id, &(i * 1000), &payer);
+            client.create_receipt(&deal_id, &(i as i128 * 1000i128), &payer, &reference);
         }
 
         let page = client.list_receipts_by_deal(&deal_id, &10u32, &None);
@@ -542,16 +592,23 @@ mod test {
 
         // Create 15 receipts
         for i in 1..=15 {
+            let reference = generate_reference(&env, i);
             env.mock_auths(&[MockAuth {
                 address: &admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, { i * 1000 }, payer.clone()).into_val(&env),
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
-            client.create_receipt(&deal_id, &(i * 1000), &payer);
+            client.create_receipt(&deal_id, &(i as i128 * 1000i128), &payer, &reference);
         }
 
         // First page: 10 receipts
@@ -583,16 +640,23 @@ mod test {
 
         // Create 25 receipts
         for i in 1..=25 {
+            let reference = generate_reference(&env, i);
             env.mock_auths(&[MockAuth {
                 address: &admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, { i * 1000 }, payer.clone()).into_val(&env),
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
-            client.create_receipt(&deal_id, &(i * 1000), &payer);
+            client.create_receipt(&deal_id, &(i as i128 * 1000i128), &payer, &reference);
         }
 
         // Collect all receipts across pages
@@ -631,16 +695,23 @@ mod test {
 
         // Create multiple receipts
         for i in 1..=10 {
+            let reference = generate_reference(&env, i);
             env.mock_auths(&[MockAuth {
                 address: &admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, { i * 1000 }, payer.clone()).into_val(&env),
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
-            client.create_receipt(&deal_id, &(i * 1000), &payer);
+            client.create_receipt(&deal_id, &(i as i128 * 1000i128), &payer, &reference);
         }
 
         // Get all receipts in one call
@@ -717,16 +788,23 @@ mod test {
 
         // Create multiple receipts with the same timestamp
         for i in 1..=5 {
+            let reference = generate_reference(&env, i);
             env.mock_auths(&[MockAuth {
                 address: &admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, { i * 1000 }, payer.clone()).into_val(&env),
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
-            client.create_receipt(&deal_id, &(i * 1000), &payer);
+            client.create_receipt(&deal_id, &(i as i128 * 1000i128), &payer, &reference);
         }
 
         // Get all receipts and verify they are ordered by tx_id when timestamps are equal
@@ -827,18 +905,19 @@ mod test {
         let deal_id = 1u64;
         let payer = Address::generate(&env);
 
+        let reference = generate_reference(&env, 1);
         env.mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "create_receipt",
-                args: (deal_id, 0i128, payer.clone()).into_val(&env),
+                args: (deal_id, 0i128, payer.clone(), reference.clone()).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
         let err = client
-            .try_create_receipt(&deal_id, &0i128, &payer)
+            .try_create_receipt(&deal_id, &0i128, &payer, &reference)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ContractError::InvalidAmount);
@@ -851,18 +930,19 @@ mod test {
         let deal_id = 1u64;
         let payer = Address::generate(&env);
 
+        let reference = generate_reference(&env, 1);
         env.mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "create_receipt",
-                args: (deal_id, -100i128, payer.clone()).into_val(&env),
+                args: (deal_id, -100i128, payer.clone(), reference.clone()).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
         let err = client
-            .try_create_receipt(&deal_id, &-100i128, &payer)
+            .try_create_receipt(&deal_id, &-100i128, &payer, &reference)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ContractError::InvalidAmount);
@@ -877,17 +957,18 @@ mod test {
         let payer = Address::generate(&env);
         let non_admin = Address::generate(&env);
 
+        let reference = generate_reference(&env, 1);
         env.mock_auths(&[MockAuth {
             address: &non_admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "create_receipt",
-                args: (deal_id, 1000i128, payer.clone()).into_val(&env),
+                args: (deal_id, 1000i128, payer.clone(), reference.clone()).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        client.create_receipt(&deal_id, &1000i128, &payer);
+        client.create_receipt(&deal_id, &1000i128, &payer, &reference);
     }
 
     #[test]
@@ -901,18 +982,19 @@ mod test {
         let initial_count = client.receipt_count(&deal_id);
         assert_eq!(initial_count, 0u64);
 
+        let reference = generate_reference(&env, 1);
         env.mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "create_receipt",
-                args: (deal_id, 1000i128, payer.clone()).into_val(&env),
+                args: (deal_id, 1000i128, payer.clone(), reference.clone()).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
         // Create receipt - this should update state before any external calls
-        let receipt = client.create_receipt(&deal_id, &1000i128, &payer);
+        let receipt = client.create_receipt(&deal_id, &1000i128, &payer, &reference);
 
         // Verify state was updated correctly
         assert_eq!(client.receipt_count(&deal_id), 1u64);
@@ -935,18 +1017,19 @@ mod test {
 
         let max_amount = i128::MAX;
 
+        let reference = generate_reference(&env, 1);
         env.mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "create_receipt",
-                args: (deal_id, max_amount, payer.clone()).into_val(&env),
+                args: (deal_id, max_amount, payer.clone(), reference.clone()).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
         // Should succeed with maximum i128 value
-        let receipt = client.create_receipt(&deal_id, &max_amount, &payer);
+        let receipt = client.create_receipt(&deal_id, &max_amount, &payer, &reference);
         assert_eq!(receipt.amount, max_amount);
         assert_eq!(client.receipt_count(&deal_id), 1u64);
     }
@@ -963,17 +1046,18 @@ mod test {
         let mut receipt_ids = std::vec::Vec::new();
 
         for (i, amount) in amounts.iter().enumerate() {
+            let reference = generate_reference(&env, i as u64 + 1);
             env.mock_auths(&[MockAuth {
                 address: &admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (deal_id, amount, payer.clone()).into_val(&env),
+                    args: (deal_id, amount, payer.clone(), reference.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
 
-            let receipt = client.create_receipt(&deal_id, amount, &payer);
+            let receipt = client.create_receipt(&deal_id, amount, &payer, &reference);
             receipt_ids.push(receipt.id);
 
             // Verify state after each creation
@@ -1016,28 +1100,30 @@ mod test {
         let payer = Address::generate(&env);
 
         // Create receipts for deal 1
+        let reference1 = generate_reference(&env, 1);
         env.mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "create_receipt",
-                args: (deal_id_1, 1000i128, payer.clone()).into_val(&env),
+                args: (deal_id_1, 1000i128, payer.clone(), reference1.clone()).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.create_receipt(&deal_id_1, &1000i128, &payer);
+        client.create_receipt(&deal_id_1, &1000i128, &payer, &reference1);
 
         // Create receipts for deal 2
+        let reference2 = generate_reference(&env, 2);
         env.mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "create_receipt",
-                args: (deal_id_2, 2000i128, payer.clone()).into_val(&env),
+                args: (deal_id_2, 2000i128, payer.clone(), reference2.clone()).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.create_receipt(&deal_id_2, &2000i128, &payer);
+        client.create_receipt(&deal_id_2, &2000i128, &payer, &reference2);
 
         // Verify isolation
         assert_eq!(client.receipt_count(&deal_id_1), 1u64);
@@ -1060,30 +1146,44 @@ mod test {
 
         // Create receipts for deal 1
         for i in 1..=5 {
+            let reference = generate_reference(&env, i);
             env.mock_auths(&[MockAuth {
                 address: &admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (1u64, { i * 1000 }, payer.clone()).into_val(&env),
+                    args: (
+                        1u64,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
-            client.create_receipt(&1u64, &(i * 1000), &payer);
+            client.create_receipt(&1u64, &(i as i128 * 1000i128), &payer, &reference);
         }
 
         // Create receipts for deal 2
         for i in 1..=3 {
+            let reference = generate_reference(&env, i + 10);
             env.mock_auths(&[MockAuth {
                 address: &admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "create_receipt",
-                    args: (2u64, { i * 2000 }, payer.clone()).into_val(&env),
+                    args: (
+                        2u64,
+                        { i as i128 * 2000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }]);
-            client.create_receipt(&2u64, &(i * 2000), &payer);
+            client.create_receipt(&2u64, &(i as i128 * 2000i128), &payer, &reference);
         }
 
         // Verify deal 1 has 5 receipts
@@ -1116,18 +1216,19 @@ mod test {
         assert!(client.is_paused());
 
         // Try to create a receipt while paused (should return explicit paused error)
+        let reference = generate_reference(&env, 1);
         env.mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "create_receipt",
-                args: (1u64, 1000i128, payer.clone()).into_val(&env),
+                args: (1u64, 1000i128, payer.clone(), reference.clone()).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
         let err = client
-            .try_create_receipt(&1u64, &1000i128, &payer)
+            .try_create_receipt(&1u64, &1000i128, &payer, &reference)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ContractError::Paused);
@@ -1147,27 +1248,222 @@ mod test {
         let payer = Address::generate(&env);
         let deal_id = 1u64;
 
+        let reference = generate_reference(&env, 1);
         env.mock_auths(&[MockAuth {
             address: &admin,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "create_receipt",
-                args: (deal_id, 5000i128, payer.clone()).into_val(&env),
+                args: (deal_id, 5000i128, payer.clone(), reference.clone()).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        client.create_receipt(&deal_id, &5000i128, &payer);
+        client.create_receipt(&deal_id, &5000i128, &payer, &reference);
 
         let events = env.events().all();
         // The last event is receipt_created (init emits one event before)
         let last = events.last().unwrap();
 
-        // data is (receipt_id: u64, amount: i128, payer: Address, schema_version: u32)
+        // data is (receipt_id: u64, amount: i128, payer: Address, reference: BytesN<32>, schema_version: u32)
         let data: soroban_sdk::Vec<soroban_sdk::Val> = last.2.clone().try_into_val(&env).unwrap();
-        let schema_version: u32 = data.get(3).unwrap().try_into_val(&env).unwrap();
+        let schema_version: u32 = data.get(4).unwrap().try_into_val(&env).unwrap();
         assert_eq!(
             schema_version, 1u32,
             "receipt_created event must carry schema_version = 1"
+        );
+    }
+
+    // ============================================================================
+    // Idempotency Tests
+    // ============================================================================
+
+    #[test]
+    fn create_receipt_rejects_duplicate_reference() {
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let deal_id = 1u64;
+        let payer = Address::generate(&env);
+
+        let reference = generate_reference(&env, 1);
+
+        // First receipt creation should succeed
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id, 1000i128, payer.clone(), reference.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let receipt1 = client.create_receipt(&deal_id, &1000i128, &payer, &reference);
+        assert_eq!(client.receipt_count(&deal_id), 1u64);
+
+        // Second receipt creation with same reference should fail
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id, 2000i128, payer.clone(), reference.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_create_receipt(&deal_id, &2000i128, &payer, &reference)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::DuplicateReference);
+
+        // Receipt count should still be 1 (no duplicate was created)
+        assert_eq!(client.receipt_count(&deal_id), 1u64);
+
+        // Verify only one receipt exists
+        let page = client.list_receipts_by_deal(&deal_id, &10u32, &None);
+        assert_eq!(page.receipts.len(), 1);
+        assert_eq!(page.receipts.get(0).unwrap().id, receipt1.id);
+        assert_eq!(page.receipts.get(0).unwrap().amount, 1000i128);
+    }
+
+    #[test]
+    fn create_receipt_different_deals_same_reference() {
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let deal_id_1 = 1u64;
+        let deal_id_2 = 2u64;
+        let payer = Address::generate(&env);
+
+        let reference = generate_reference(&env, 1);
+
+        // Create receipt for deal 1 with reference
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id_1, 1000i128, payer.clone(), reference.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.create_receipt(&deal_id_1, &1000i128, &payer, &reference);
+
+        // Create receipt for deal 2 with same reference should succeed
+        // (references are scoped per deal)
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id_2, 2000i128, payer.clone(), reference.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.create_receipt(&deal_id_2, &2000i128, &payer, &reference);
+
+        // Both deals should have 1 receipt each
+        assert_eq!(client.receipt_count(&deal_id_1), 1u64);
+        assert_eq!(client.receipt_count(&deal_id_2), 1u64);
+    }
+
+    #[test]
+    fn create_receipt_duplicate_keeps_count_correct() {
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let deal_id = 1u64;
+        let payer = Address::generate(&env);
+
+        // Create 3 receipts with unique references
+        for i in 1..=3 {
+            let reference = generate_reference(&env, i);
+            env.mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_receipt",
+                    args: (
+                        deal_id,
+                        { i as i128 * 1000i128 },
+                        payer.clone(),
+                        reference.clone(),
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }]);
+            client.create_receipt(&deal_id, &(i as i128 * 1000i128), &payer, &reference);
+        }
+
+        assert_eq!(client.receipt_count(&deal_id), 3u64);
+
+        // Try to create a duplicate with reference 1
+        let reference = generate_reference(&env, 1);
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id, 9999i128, payer.clone(), reference.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let err = client
+            .try_create_receipt(&deal_id, &9999i128, &payer, &reference)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::DuplicateReference);
+
+        // Count should still be 3
+        assert_eq!(client.receipt_count(&deal_id), 3u64);
+
+        // Create a new receipt with a new reference
+        let reference = generate_reference(&env, 4);
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id, 4000i128, payer.clone(), reference.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.create_receipt(&deal_id, &4000i128, &payer, &reference);
+
+        // Count should now be 4
+        assert_eq!(client.receipt_count(&deal_id), 4u64);
+    }
+
+    #[test]
+    fn receipt_created_event_includes_reference() {
+        use soroban_sdk::testutils::Events;
+        use soroban_sdk::{IntoVal, TryIntoVal};
+
+        let env = Env::default();
+        let (admin, client, contract_id) = setup(&env);
+        let payer = Address::generate(&env);
+        let deal_id = 1u64;
+
+        let reference = generate_reference(&env, 42);
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_receipt",
+                args: (deal_id, 5000i128, payer.clone(), reference.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.create_receipt(&deal_id, &5000i128, &payer, &reference);
+
+        let events = env.events().all();
+        // The last event is receipt_created (init emits one event before)
+        let last = events.last().unwrap();
+
+        // data is (receipt_id: u64, amount: i128, payer: Address, reference: BytesN<32>, schema_version: u32)
+        let data: soroban_sdk::Vec<soroban_sdk::Val> = last.2.clone().try_into_val(&env).unwrap();
+        let event_reference: BytesN<32> = data.get(3).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(
+            event_reference, reference,
+            "receipt_created event must include the reference"
         );
     }
 }
