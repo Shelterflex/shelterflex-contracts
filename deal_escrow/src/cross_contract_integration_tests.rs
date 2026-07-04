@@ -10,7 +10,7 @@ use rent_payments::{RentPayments, RentPaymentsClient};
 use rent_wallet::{RentWallet, RentWalletClient};
 use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{Address, Env, IntoVal, String, Symbol};
+use soroban_sdk::{Address, BytesN, Env, IntoVal, String, Symbol};
 use std::format;
 
 /// Deployed contracts and role addresses for cross-contract payment flows.
