@@ -13,6 +13,15 @@ use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{Address, BytesN, Env, IntoVal, String, Symbol};
 use std::format;
 
+fn generate_reference(env: &Env, seed: u64) -> BytesN<32> {
+    let mut bytes = [0u8; 32];
+    let seed_bytes = seed.to_be_bytes();
+    for i in 0..8 {
+        bytes[i] = seed_bytes[i];
+    }
+    BytesN::from_array(env, &bytes)
+}
+
 /// Deployed contracts and role addresses for cross-contract payment flows.
 struct TestContracts<'a> {
     rent_wallet_id: Address,
@@ -235,18 +244,25 @@ fn release_escrow_and_record_receipt(
         reporter_before + reporter_amount
     );
 
+    let reference = generate_reference(env, deal_id);
     env.mock_auths(&[MockAuth {
         address: &stack.admin,
         invoke: &MockAuthInvoke {
             contract: &stack.rent_payments_id,
             fn_name: "create_receipt",
-            args: (deal_id, receipt_amount, stack.tenant.clone()).into_val(env),
+            args: (
+                deal_id,
+                receipt_amount,
+                stack.tenant.clone(),
+                reference.clone(),
+            )
+                .into_val(env),
             sub_invokes: &[],
         },
     }]);
     let receipt = stack
         .rent_payments
-        .try_create_receipt(&deal_id, &receipt_amount, &stack.tenant)
+        .try_create_receipt(&deal_id, &receipt_amount, &stack.tenant, &reference)
         .unwrap()
         .unwrap();
     assert_eq!(receipt.deal_id, deal_id);
