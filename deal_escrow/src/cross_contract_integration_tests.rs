@@ -182,6 +182,7 @@ fn release_escrow_and_record_receipt(
     platform_amount: i128,
     reporter_amount: i128,
     receipt_amount: i128,
+    reference: BytesN<32>,
 ) {
     let deal_str = deal_id_str(env, deal_id);
     let token_client = EscrowTokenClient::new(env, &stack.token);
@@ -244,7 +245,6 @@ fn release_escrow_and_record_receipt(
         reporter_before + reporter_amount
     );
 
-    let reference = generate_reference(env, deal_id);
     env.mock_auths(&[MockAuth {
         address: &stack.admin,
         invoke: &MockAuthInvoke {
@@ -281,6 +281,7 @@ fn scenario_1_full_deal_payment_flow() {
     let reporter_fee = 50i128;
 
     wallet_credit_and_escrow_deposit(&env, &stack, deal_id, amount);
+    let reference = generate_reference(&env, deal_id);
     release_escrow_and_record_receipt(
         &env,
         &stack,
@@ -289,6 +290,7 @@ fn scenario_1_full_deal_payment_flow() {
         platform_fee,
         reporter_fee,
         amount,
+        reference,
     );
 
     assert_eq!(stack.rent_payments.receipt_count(&deal_id), 1);
@@ -311,8 +313,9 @@ fn scenario_2_partial_instalment_flow_three_payments() {
     let reporter_fee = 50i128;
     let mut cumulative = 0i128;
 
-    for _ in 0..3 {
+    for i in 0..3 {
         wallet_credit_and_escrow_deposit(&env, &stack, deal_id, instalment);
+        let reference = generate_reference(&env, deal_id * 1000 + i as u64);
         release_escrow_and_record_receipt(
             &env,
             &stack,
@@ -321,6 +324,7 @@ fn scenario_2_partial_instalment_flow_three_payments() {
             platform_fee,
             reporter_fee,
             instalment,
+            reference,
         );
         cumulative += instalment;
     }
@@ -500,6 +504,7 @@ fn cross_contract_value_conservation() {
     let escrow_before_release = stack.deal_escrow.balance(&deal_id_str(&env, deal_id));
 
     // Execute release
+    let reference = generate_reference(&env, deal_id);
     release_escrow_and_record_receipt(
         &env,
         &stack,
@@ -508,6 +513,7 @@ fn cross_contract_value_conservation() {
         platform_fee,
         reporter_fee,
         initial_deposit,
+        reference,
     );
 
     // Verify post-release balances
@@ -621,6 +627,7 @@ fn multiple_sequential_deals_maintain_invariants() {
         let reporter_fee = (amount * 5) / 100;
 
         wallet_credit_and_escrow_deposit(&env, &stack, deal_id, amount);
+        let reference = generate_reference(&env, deal_id);
         release_escrow_and_record_receipt(
             &env,
             &stack,
@@ -629,6 +636,7 @@ fn multiple_sequential_deals_maintain_invariants() {
             platform_fee,
             reporter_fee,
             amount,
+            reference,
         );
 
         // Verify escrow is clean after each deal
