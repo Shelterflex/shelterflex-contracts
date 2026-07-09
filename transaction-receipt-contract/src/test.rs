@@ -835,7 +835,7 @@ fn test_golden_vectors() {
         StdString::from_utf8(out.to_vec()).expect("valid utf8")
     }
 
-    let raw = include_str!("../../../test-vectors.json");
+    let raw = include_str!("../../test-vectors.json");
     let parsed: GoldenVectorsFile = serde_json::from_str(raw).expect("valid test-vectors.json");
 
     for (i, v) in parsed.golden_test_vectors.iter().enumerate() {
