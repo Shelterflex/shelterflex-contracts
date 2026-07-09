@@ -1,0 +1,22 @@
+# shelterflex-contracts  ->  .github/workflows/security-scan.yml
+# Thin caller: delegates to the reusable workflow hosted in shelterflex-platform.
+# setup-rust: true so cargo-audit runs against the Cargo workspace.
+name: Security Scan
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  security-events: write
+
+jobs:
+  scan:
+    uses: Shelterflex/shelterflex-platform/.github/workflows/security-scan-reusable.yml@main
+    with:
+      node-version: "22"
+      setup-rust: true

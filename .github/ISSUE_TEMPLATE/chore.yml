@@ -1,0 +1,35 @@
+name: Chore / Refactor
+description: Maintenance work, cleanup, refactors
+labels: ["type:chore"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - frontend
+        - backend
+        - contracts
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What is being cleaned up / refactored?
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risk
+      description: Any breaking-change risk?
+    validations:
+      required: false
+  - type: textarea
+    id: definition_of_done
+    attributes:
+      label: Definition of Done
+      description: What should be true at the end?
+    validations:
+      required: true

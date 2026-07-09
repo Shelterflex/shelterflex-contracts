@@ -1,0 +1,38 @@
+# shelterflex-contracts  ->  .github/workflows/test-vectors-drift.yml
+# Fails if the vendored test-vectors.json drifts from the canonical copy in platform.
+# Adjust the path below if the vendored copy lives inside a specific crate
+# (e.g. transaction-receipt-contract/test-vectors.json).
+name: Test Vectors Drift
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  VECTORS_PATH: test-vectors.json
+
+jobs:
+  drift:
+    name: Check test-vectors.json against platform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch canonical vectors from platform
+        run: |
+          curl -sSL --fail \
+            "https://raw.githubusercontent.com/Shelterflex/shelterflex-platform/main/test-vectors.json" \
+            -o /tmp/canonical.json
+
+      - name: Diff against vendored copy
+        run: |
+          if ! diff -u /tmp/canonical.json "$VECTORS_PATH"; then
+            echo "::error::$VECTORS_PATH has drifted from the canonical copy in shelterflex-platform."
+            exit 1
+          fi
+          echo "$VECTORS_PATH is in sync with platform."

@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a bug in frontend, backend, or contracts
+labels: ["type:bug"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - frontend
+        - backend
+        - contracts
+    validations:
+      required: true
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+      description: Describe the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Step-by-step instructions to reproduce.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Paste logs or screenshots if relevant.
+    validations:
+      required: false
+  - type: textarea
+    id: definition_of_done
+    attributes:
+      label: Definition of Done
+      description: What should be true when this is fixed?
+    validations:
+      required: true
