@@ -1,0 +1,16 @@
+# CI, workflows and issue templates are maintainer-owned.
+#
+# Contributors should not modify anything under .github/. Issues are scoped so
+# that the deliverable is a script, test or config the pipeline can call — a
+# maintainer wires it into the pipeline separately.
+#
+# rust-toolchain.toml is also listed: the pinned compiler version is what keeps
+# CI results attributable to the commit under test, so bumping it is a
+# deliberate maintainer decision rather than a drive-by change.
+#
+# Enforcement requires branch protection on `main` with "Require review from
+# Code Owners" enabled; without that, this file only requests review
+# automatically rather than blocking the merge.
+
+/.github/           @pope-h
+/rust-toolchain.toml @pope-h

@@ -14,9 +14,13 @@ escrow, staking, rent payments, whistleblower rewards, oracles, and access contr
 - Keep PRs small and focused — 1 issue per PR.
 - Link the issue you're addressing (e.g. `Fixes #123`).
 - Every contract change needs tests (`cargo test --workspace`).
-- Security-sensitive: review `docs/security/CONTRACT_SECURITY_CHECKLIST.md` before submitting.
-- Keep `test-vectors.json` in sync with platform (a CI drift check enforces this).
+- Security-sensitive: review `docs/CONTRACT_SECURITY_CHECKLIST.md` before submitting.
+- Keep `test-vectors.json` in sync with platform (a scheduled drift check catches divergence).
 - Never commit secrets, keys, or seed phrases.
+- Do not modify anything under `.github/` — CI, workflows and issue templates are
+  maintainer-owned. The Rust toolchain is pinned in `rust-toolchain.toml`; if a version
+  bump is needed, open an issue rather than changing the pipeline. If an issue seems to
+  need a pipeline change, deliver the script or test it calls for and say so in the PR.
 
 ## Development setup
 
