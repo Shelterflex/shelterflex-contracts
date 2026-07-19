@@ -1,4 +1,9 @@
 # shelterflex-contracts  ->  .github/workflows/ci.yml
+#
+# The toolchain, components and target come from rust-toolchain.toml, which
+# rustup installs automatically on the first cargo invocation. There is no
+# separate setup step, and CI uses the same compiler as contributors do locally.
+
 name: CI
 
 on:
@@ -7,17 +12,16 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   contracts:
     name: Contracts (fmt, clippy, test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust (stable + fmt/clippy)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

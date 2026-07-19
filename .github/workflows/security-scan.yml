@@ -1,5 +1,9 @@
 # shelterflex-contracts  ->  .github/workflows/security-scan.yml
 # Thin caller: delegates to the reusable workflow hosted in shelterflex-platform.
+#
+# Pinned to the `v1` tag, not `@main`. Tracking another repository's default
+# branch meant a change there could turn this repo's PRs red with no change
+# here. Upgrades are now deliberate: bump the tag below when you want them.
 # setup-rust: true so cargo-audit runs against the Cargo workspace.
 name: Security Scan
 
@@ -16,7 +20,7 @@ permissions:
 
 jobs:
   scan:
-    uses: Shelterflex/shelterflex-platform/.github/workflows/security-scan-reusable.yml@main
+    uses: Shelterflex/shelterflex-platform/.github/workflows/security-scan-reusable.yml@v1
     with:
       node-version: "22"
       setup-rust: true

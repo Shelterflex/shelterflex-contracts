@@ -1,0 +1,20 @@
+# Pins the Rust toolchain for this workspace.
+#
+# CI previously tracked floating `stable`, which meant a new Rust release could
+# turn CI red with no change to this repository — exactly what happened when a
+# rustc update made `ethnum` 1.5.2 fail to compile. Pinning keeps CI results
+# attributable to the commit under test, and gives contributors the same
+# compiler as CI without extra setup.
+#
+# rustup reads this file automatically, installing the toolchain, components and
+# target on the first cargo invocation. No setup step is needed locally or in CI.
+#
+# To move to a newer Rust: bump `channel`, run the full CI locally
+# (cargo fmt --all -- --check && cargo clippy --workspace --all-targets
+# --all-features && cargo test --workspace), and commit the result.
+
+[toolchain]
+channel = "1.92.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
