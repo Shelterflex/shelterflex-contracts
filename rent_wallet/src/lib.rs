@@ -7,10 +7,14 @@ use soroban_sdk::{
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
 pub mod access_control;
+pub mod monthly_cap;
 pub mod validation;
 
 #[cfg(kani)]
 mod formal_properties;
+
+#[cfg(test)]
+mod monthly_cap_tests;
 
 #[contracttype]
 #[derive(Clone)]
@@ -28,6 +32,16 @@ pub enum DataKey {
     PendingUpgradeHash,
     PendingUpgradeAt,
     PendingUpgradeVersion,
+    // ── Monthly spending cap (#1) ──────────────────────────────────────────
+    /// Global default cap applied to any user without a per-user override.
+    /// Unset (or explicitly `0`) means "no cap" — all debits are allowed.
+    MonthlyCapDefault,
+    /// Per-user cap that takes precedence over `MonthlyCapDefault` when present.
+    /// Per-user data, so this lives in persistent storage (see `Balance(Address)`, #386).
+    MonthlyCapOverride(Address),
+    /// Cumulative amount debited by `user` during period `key` (see
+    /// `monthly_cap::current_month_key`). Persistent, keyed per user per period.
+    MonthlySpent(Address, u32),
 }
 
 fn get_state_schema_version(env: &Env) -> u32 {
@@ -89,6 +103,9 @@ pub enum ContractError {
     InvalidUpgradeVersion = 15,
     /// Stored state schema is incompatible with this contract version
     IncompatibleStateSchema = 16,
+    /// Debit would push the user's cumulative spend for the current period
+    /// past their effective monthly cap (#1)
+    MonthlyCapExceeded = 18,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -220,6 +237,13 @@ impl RentWallet {
         if cur < amount {
             return Err(ContractError::InsufficientBalance);
         }
+
+        // #1: enforce the monthly spending cap. Checked after balance
+        // sufficiency (so a debit that would fail anyway doesn't consume
+        // cap budget) and before the balance is mutated (so a rejected
+        // debit never touches the balance).
+        monthly_cap::check_and_record_debit(&env, &user, amount)?;
+
         let new_balance = cur - amount;
         put_balance(&env, &user, new_balance);
 
@@ -528,6 +552,80 @@ impl RentWallet {
             (admin, hash),
         );
         Ok(())
+    }
+}
+
+#[contractimpl]
+impl RentWallet {
+    // ── Monthly spending cap (#1) ─────────────────────────────────────────────
+
+    /// Set the global default monthly spending cap. Applies to every user
+    /// who doesn't have a per-user override (`set_user_monthly_cap`).
+    /// `0` means no cap — this is also the default before this is ever called.
+    pub fn set_default_monthly_cap(
+        env: Env,
+        admin: Address,
+        cap: i128,
+    ) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "set_default_monthly_cap",
+        )?;
+        if cap < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if cap > validation::MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MonthlyCapDefault, &cap);
+        monthly_cap::emit_monthly_cap_set(&env, None, cap);
+        Ok(())
+    }
+
+    /// Set a per-user monthly spending cap override, taking precedence over
+    /// the global default for this user only. `0` means no cap for this user.
+    pub fn set_user_monthly_cap(
+        env: Env,
+        admin: Address,
+        user: Address,
+        cap: i128,
+    ) -> Result<(), ContractError> {
+        let current_admin = get_admin(&env);
+        access_control::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "set_user_monthly_cap",
+        )?;
+        if cap < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if cap > validation::MAX_AMOUNT {
+            return Err(ContractError::AmountTooLarge);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::MonthlyCapOverride(user.clone()), &cap);
+        monthly_cap::emit_monthly_cap_set(&env, Some(user), cap);
+        Ok(())
+    }
+
+    /// The monthly cap currently in effect for `user` (their override if
+    /// set, otherwise the global default). `0` means no cap.
+    pub fn get_monthly_cap(env: Env, user: Address) -> i128 {
+        monthly_cap::effective_cap(&env, &user)
+    }
+
+    /// Amount `user` has debited during the current monthly period.
+    pub fn get_monthly_spent(env: Env, user: Address) -> i128 {
+        monthly_cap::get_monthly_spent(&env, &user)
     }
 }
 
