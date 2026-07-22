@@ -361,22 +361,17 @@ fn clear_dispute(env: &Env, deal_id: &String) {
         .remove(&DataKey::RentDispute(deal_id.clone()));
 }
 
-/// Reentrancy guard (#390)
+/// Reentrancy guard (#390).
+///
+/// Thin adapters binding the shared [`soroban_reentrancy_guard`] primitive to this
+/// contract's `DataKey::Reentrancy` and `ReentrancyDetected` — same storage key,
+/// same error code, same call shape as the local implementation they replace.
 fn enter_nonreentrant(env: &Env) -> Result<(), ContractError> {
-    if env
-        .storage()
-        .instance()
-        .get::<_, bool>(&DataKey::Reentrancy)
-        .unwrap_or(false)
-    {
-        return Err(ContractError::ReentrancyDetected);
-    }
-    env.storage().instance().set(&DataKey::Reentrancy, &true);
-    Ok(())
+    soroban_reentrancy_guard::enter(env, &DataKey::Reentrancy, ContractError::ReentrancyDetected)
 }
 
 fn exit_nonreentrant(env: &Env) {
-    env.storage().instance().set(&DataKey::Reentrancy, &false);
+    soroban_reentrancy_guard::exit(env, &DataKey::Reentrancy);
 }
 
 fn generate_tx_id(env: &Env, external_ref_source: &Symbol, external_ref: &String) -> BytesN<32> {
@@ -1262,13 +1257,6 @@ impl DealEscrow {
 
     pub fn get_circuit_breaker_state(env: Env) -> u32 {
         get_circuit_breaker_state(&env) as u32
-    }
-
-    fn is_paused(env: Env) -> bool {
-        env.storage()
-            .instance()
-            .get::<_, bool>(&DataKey::Paused)
-            .unwrap_or(false)
     }
 
     fn get_deal_lifecycle(env: &Env, deal_id: &String) -> DealLifecycleStatus {

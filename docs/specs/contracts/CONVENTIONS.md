@@ -83,3 +83,45 @@ Recommended signatures:
 - If present, store `Operator` in instance storage.
 - Store `Paused` in instance storage (default `false`).
 
+## Reentrancy
+
+### Canonical primitive
+
+Any entrypoint that performs an external call (e.g. a `TokenClient` transfer) must hold a
+reentrancy lock across that call. Do **not** hand-roll the lock. Use the shared
+`soroban_reentrancy_guard` crate — a lib-only crate (like `soroban_access_control` and
+`soroban_pausable`) that is generic over the caller's `DataKey` and `ContractError`, so it
+carries no `#[contractimpl]` entry points and links cleanly into contract wasm.
+
+- Store the lock flag in **instance** storage under a `DataKey::Reentrancy` variant.
+- Reserve a `ReentrancyDetected` error variant. As with all discriminants, never renumber or
+  reuse it once shipped.
+- Follow the canonical body order: all state writes complete **before** the external call, and
+  the external call is wrapped by the guard.
+
+### Two shapes
+
+- **Explicit** (`enter` / `exit`) — for straight-line flows. Bind thin adapters:
+
+  ```rust
+  fn enter_nonreentrant(env: &Env) -> Result<(), ContractError> {
+      soroban_reentrancy_guard::enter(env, &DataKey::Reentrancy, ContractError::ReentrancyDetected)
+  }
+  fn exit_nonreentrant(env: &Env) {
+      soroban_reentrancy_guard::exit(env, &DataKey::Reentrancy);
+  }
+  ```
+
+- **Scoped / RAII** (`Scoped`) — releases the lock on drop, so early returns can't leak it:
+
+  ```rust
+  fn reentrancy_scope(env: &Env) -> Result<Scoped<'_, DataKey>, ContractError> {
+      Scoped::new(env, DataKey::Reentrancy, ContractError::ReentrancyDetected)
+  }
+  // at the call site:
+  let _guard = reentrancy_scope(&env)?;
+  ```
+
+`deal_escrow` and `staking_pool` use the explicit shape; `vesting_schedule` and
+`inspector_bond` use the scoped shape. Pick whichever matches the surrounding code.
+

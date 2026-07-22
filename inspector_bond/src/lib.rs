@@ -1,5 +1,6 @@
 #![no_std]
 
+use soroban_reentrancy_guard::Scoped;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Symbol,
 };
@@ -139,40 +140,13 @@ fn require_admin(env: &Env, caller: &Address) -> Result<(), ContractError> {
     Ok(())
 }
 
-/// Reentrancy guard helpers
-fn enter_nonreentrant(env: &Env) -> Result<(), ContractError> {
-    if env
-        .storage()
-        .instance()
-        .get::<_, bool>(&DataKey::Reentrancy)
-        .unwrap_or(false)
-    {
-        return Err(ContractError::ReentrancyDetected);
-    }
-    env.storage().instance().set(&DataKey::Reentrancy, &true);
-    Ok(())
-}
-
-fn exit_nonreentrant(env: &Env) {
-    env.storage().instance().set(&DataKey::Reentrancy, &false);
-}
-
-/// Scope guard that ensures reentrancy lock is released on drop
-struct ReentrancyGuard<'a> {
-    env: &'a Env,
-}
-
-impl<'a> ReentrancyGuard<'a> {
-    fn new(env: &'a Env) -> Result<Self, ContractError> {
-        enter_nonreentrant(env)?;
-        Ok(ReentrancyGuard { env })
-    }
-}
-
-impl<'a> Drop for ReentrancyGuard<'a> {
-    fn drop(&mut self) {
-        exit_nonreentrant(self.env);
-    }
+/// Scope guard that ensures the reentrancy lock is released on drop.
+///
+/// Binds the shared [`soroban_reentrancy_guard`] primitive to this contract's
+/// `DataKey::Reentrancy` and `ReentrancyDetected` — same storage key, same error
+/// code as the local implementation it replaces.
+fn reentrancy_scope(env: &Env) -> Result<Scoped<'_, DataKey>, ContractError> {
+    Scoped::new(env, DataKey::Reentrancy, ContractError::ReentrancyDetected)
 }
 
 fn min_bond(env: &Env) -> i128 {
@@ -292,7 +266,7 @@ impl InspectorBondContract {
             .remove(&DataKey::Bond(inspector.clone()));
 
         // Reentrancy guard before external operations - uses scope guard for automatic release
-        let _guard = ReentrancyGuard::new(&env)?;
+        let _guard = reentrancy_scope(&env)?;
 
         env.events().publish(
             (

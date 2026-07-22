@@ -234,22 +234,17 @@ fn remove_deposit(env: &Env, user: &Address, index: u32) {
         .remove(&DataKey::Deposit(user.clone(), index));
 }
 
-/// Reentrancy guard helpers (#390)
+/// Reentrancy guard helpers (#390).
+///
+/// Thin adapters binding the shared [`soroban_reentrancy_guard`] primitive to this
+/// contract's `DataKey::Reentrancy` and `ReentrancyDetected` — same storage key,
+/// same error code, same call shape as the local implementation they replace.
 fn enter_nonreentrant(env: &Env) -> Result<(), ContractError> {
-    if env
-        .storage()
-        .instance()
-        .get::<_, bool>(&DataKey::Reentrancy)
-        .unwrap_or(false)
-    {
-        return Err(ContractError::ReentrancyDetected);
-    }
-    env.storage().instance().set(&DataKey::Reentrancy, &true);
-    Ok(())
+    soroban_reentrancy_guard::enter(env, &DataKey::Reentrancy, ContractError::ReentrancyDetected)
 }
 
 fn exit_nonreentrant(env: &Env) {
-    env.storage().instance().set(&DataKey::Reentrancy, &false);
+    soroban_reentrancy_guard::exit(env, &DataKey::Reentrancy);
 }
 
 fn is_paused(env: &Env) -> bool {
