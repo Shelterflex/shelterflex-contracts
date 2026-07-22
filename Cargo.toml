@@ -20,6 +20,7 @@ members = [
   "allowlist_registry",
   "bond_collateral",
   "reentrancy_guard",
+  "soroban_reentrancy_guard",
   "epoch_rewards",
   "slashing_module",
   "stake_delegation",
@@ -29,6 +30,7 @@ members = [
   "rent_to_own",
   "governance",
   "multisig_admin",
+  "module_tree_check",
 ]
 
 [profile.release]

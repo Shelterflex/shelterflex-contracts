@@ -1,0 +1,11 @@
+[package]
+name = "module_tree_check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A plain rlib guard crate: no `#[contract]`, so `stellar contract build` ignores
+# it and it produces no deployable WASM. Its only job is to host the module-tree
+# test that CI runs via `cargo test --workspace`.
+[lib]
+crate-type = ["rlib"]
