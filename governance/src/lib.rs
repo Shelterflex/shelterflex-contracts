@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -29,6 +29,10 @@ pub enum DataKey {
     Proposal(u64),
     /// Has voter voted on proposal
     Voted(u64, Address),
+    /// Stored stake balance for a voter outside of proposal vote receipts
+    StakeBalance(Address),
+    /// All known voters that should receive a creation-time snapshot
+    KnownVoters,
     /// Snapshot of a voter's stake at proposal creation time
     VoterSnapshot(u64, Address),
 }
@@ -109,20 +113,64 @@ fn get_total_staked(env: &Env) -> i128 {
 }
 
 fn get_stake_for(env: &Env, voter: &Address) -> i128 {
-    // In production this would cross-call staking_pool.staked_balance(voter).
-    // In tests we use a per-voter storage entry set by admin via set_stake_for.
+    if let Some(staking_pool) = env
+        .storage()
+        .instance()
+        .get::<_, Address>(&DataKey::StakingPool)
+    {
+        let args = soroban_sdk::vec![&env, voter.clone().to_val()];
+        return env.invoke_contract::<i128>(
+            &staking_pool,
+            &Symbol::new(env, "staked_balance"),
+            args,
+        );
+    }
+
     env.storage()
         .persistent()
-        .get::<_, i128>(&DataKey::Voted(0, voter.clone()))
+        .get::<_, i128>(&DataKey::StakeBalance(voter.clone()))
         .unwrap_or(0)
 }
 
+fn register_known_voter(env: &Env, voter: &Address) {
+    let mut known_voters = env
+        .storage()
+        .persistent()
+        .get::<_, Vec<Address>>(&DataKey::KnownVoters)
+        .unwrap_or(Vec::new(env));
+
+    let mut is_known = false;
+    for existing_voter in known_voters.iter() {
+        if existing_voter == voter.clone() {
+            is_known = true;
+            break;
+        }
+    }
+
+    if !is_known {
+        known_voters.push_back(voter.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::KnownVoters, &known_voters);
+    }
+}
+
+fn snapshot_known_voter_stakes_for_proposal(env: &Env, proposal_id: u64) {
+    let known_voters = env
+        .storage()
+        .persistent()
+        .get::<_, Vec<Address>>(&DataKey::KnownVoters)
+        .unwrap_or(Vec::new(env));
+
+    for voter in known_voters.iter() {
+        let stake = get_stake_for(env, &voter);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VoterSnapshot(proposal_id, voter.clone()), &stake);
+    }
+}
+
 fn get_snapshot_stake_for(env: &Env, proposal_id: u64, voter: &Address) -> i128 {
-    // Return the voter's stake snapshot at proposal creation time
-    // Note: Currently used for future proper snapshot implementation
-    // Current implementation snapshots at vote time
-    #[allow(dead_code)]
-    let _ = (proposal_id, voter);
     env.storage()
         .persistent()
         .get::<_, i128>(&DataKey::VoterSnapshot(proposal_id, voter.clone()))
@@ -150,6 +198,18 @@ impl Governance {
         Ok(())
     }
 
+    pub fn set_staking_pool(
+        env: Env,
+        admin: Address,
+        staking_pool: Address,
+    ) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::StakingPool, &staking_pool);
+        Ok(())
+    }
+
     /// Set a voter's stake weight (admin-only; in production this reads from staking_pool).
     pub fn set_voter_stake(
         env: Env,
@@ -158,10 +218,10 @@ impl Governance {
         stake: i128,
     ) -> Result<(), ContractError> {
         require_admin(&env, &admin)?;
-        // Reuse Voted(0, voter) as a stake-weight slot (proposal 0 is never created)
         env.storage()
             .persistent()
-            .set(&DataKey::Voted(0, voter), &stake);
+            .set(&DataKey::StakeBalance(voter.clone()), &stake);
+        register_known_voter(&env, &voter);
         Ok(())
     }
 
@@ -188,8 +248,13 @@ impl Governance {
         let id = count + 1;
 
         let now = env.ledger().timestamp();
-        // Capture snapshot of total staked at proposal creation time
+        // Capture snapshot of total staked at proposal creation time.
+        // For the simple on-chain implementation here we also snapshot all known voters so
+        // their vote weight is fixed from proposal creation. A production system should
+        // instead checkpoint stake in the staking pool itself to avoid per-proposal snapshots.
         let snapshotted_total = get_total_staked(&env);
+        register_known_voter(&env, &proposer);
+        snapshot_known_voter_stakes_for_proposal(&env, id);
 
         let proposal = Proposal {
             id,
@@ -253,15 +318,8 @@ impl Governance {
             return Err(ContractError::AlreadyVoted);
         }
 
-        // Get voter's current stake and store as snapshot (only on first vote per proposal)
-        let current_stake = get_stake_for(&env, &voter);
-        env.storage().persistent().set(
-            &DataKey::VoterSnapshot(proposal_id, voter.clone()),
-            &current_stake,
-        );
-
-        // Use the snapshotted weight for voting
-        let weight = current_stake;
+        // Use the creation-time snapshot captured for this voter when the proposal was created.
+        let weight = get_snapshot_stake_for(&env, proposal_id, &voter);
         if support {
             proposal.votes_for += weight;
         } else {
@@ -618,8 +676,6 @@ mod tests {
 
     #[test]
     fn flash_stake_voting_prevented() {
-        // Demonstrates snapshot mechanism: voter power is based on stake at proposal creation time.
-        // Flash voter has no stake when proposal created, so votes with zero weight.
         let env = Env::default();
         let (admin, client) = setup(&env, 1_000_000);
 
@@ -627,40 +683,26 @@ mod tests {
         give_stake(&env, &client, &admin, &proposer, 100_000);
 
         let voter_before = Address::generate(&env);
-        // Voter with stake at proposal creation time
         give_stake(&env, &client, &admin, &voter_before, 600_000);
 
         let flash_voter = Address::generate(&env);
-        // Flash voter has NO stake initially
         give_stake(&env, &client, &admin, &flash_voter, 0);
 
-        // Create proposal - total staked = 1_000_000, quorum = 100_000
         let pid = client.create_proposal(&proposer, &Symbol::new(&env, "param"), &1, &2);
 
-        // Flash voter acquires massive stake AFTER proposal creation
         give_stake(&env, &client, &admin, &flash_voter, 900_000);
 
-        // Voter who had stake before proposal still gets their votes
         client.vote(&voter_before, &pid, &true);
-
-        // Proposer votes
         client.vote(&proposer, &pid, &true);
-
-        // Flash voter votes but with 0 weight (they had no stake at proposal time)
         client.vote(&flash_voter, &pid, &true);
 
-        // Advance past voting period
         env.ledger()
             .with_mut(|li| li.timestamp = VOTING_PERIOD_SECS + 1);
 
         let proposal = client.get_proposal(&pid).unwrap();
-        // Total votes should be 700_000 (voter_before) + 100_000 (proposer) + 0 (flash_voter)
-        // In current implementation, voters vote with current stake, so flash_voter gets 900k
-        // This test demonstrates that proper snapshot requires staking pool integration
-        assert_eq!(proposal.votes_for, 1_600_000); // 600k + 100k + 900k (all current stakes)
+        assert_eq!(proposal.votes_for, 700_000);
 
         let status = client.finalize_proposal(&pid);
-        // Proposal passes: 1_600_000 >= 100_000 quorum and more for than against
         assert!(matches!(status, ProposalStatus::Passed));
     }
 
