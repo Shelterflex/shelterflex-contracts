@@ -77,6 +77,8 @@ pub enum ContractError {
     SlashingModuleNotSet = 17,
     /// Issue #1136: oracle price is stale (exceeds configured staleness limit).
     OracleStale = 18,
+    /// Issue #19: a monetary add/sub overflowed i128
+    AmountOverflow = 19,
 }
 
 /// Price scale: oracle price of 10_000_000 means 1 collateral unit = 1 bond unit.
@@ -419,7 +421,11 @@ impl BondCollateral {
             return Err(ContractError::NotAuthorized);
         }
 
-        position.collateral_amount += amount;
+        // #19: checked add so an overflow returns a typed error, not a trap
+        position.collateral_amount = position
+            .collateral_amount
+            .checked_add(amount)
+            .ok_or(ContractError::AmountOverflow)?;
         position.created_at = env.ledger().timestamp();
 
         put_position(&env, &position_id, &position);
@@ -481,12 +487,20 @@ impl BondCollateral {
             return Err(ContractError::NotAuthorized);
         }
 
-        position.bond_amount += bond_amount;
+        // #19: checked add so an overflow returns a typed error, not a trap
+        position.bond_amount = position
+            .bond_amount
+            .checked_add(bond_amount)
+            .ok_or(ContractError::AmountOverflow)?;
 
         let ratio = calculate_collateral_ratio(position.collateral_amount, position.bond_amount);
 
         if ratio < get_liquidation_threshold(&env) {
-            position.bond_amount -= bond_amount;
+            // Roll back the add above; guarded, so it cannot underflow.
+            position.bond_amount = position
+                .bond_amount
+                .checked_sub(bond_amount)
+                .ok_or(ContractError::AmountOverflow)?;
             return Err(ContractError::CollateralRatioTooLow);
         }
 
@@ -544,7 +558,11 @@ impl BondCollateral {
             return Err(ContractError::InsufficientCollateral);
         }
 
-        position.bond_amount -= bond_amount;
+        // #19: checked sub — underflow maps to the same typed error as the guard
+        position.bond_amount = position
+            .bond_amount
+            .checked_sub(bond_amount)
+            .ok_or(ContractError::InsufficientCollateral)?;
         put_position(&env, &position_id, &position);
 
         env.events().publish(

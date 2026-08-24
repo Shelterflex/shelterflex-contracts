@@ -75,6 +75,8 @@ pub enum ContractError {
     AllocationAlreadyRevoked = 14,
     AllocationNotFound = 15,
     HoldWindowElapsed = 16,
+    /// Issue #19: a monetary add/sub overflowed i128.
+    AmountOverflow = 17,
 }
 
 #[contract]
@@ -193,7 +195,11 @@ fn put_allocation(
 }
 
 /// Sum all claimable amounts: Pending allocations past the hold window.
-fn sum_claimable(env: &Env, whistleblower: &Address, listing_id: &String) -> i128 {
+fn sum_claimable(
+    env: &Env,
+    whistleblower: &Address,
+    listing_id: &String,
+) -> Result<i128, ContractError> {
     let hold_window = get_hold_window(env);
     let now = env.ledger().timestamp();
     let nonce = get_allocation_nonce(env, whistleblower, listing_id);
@@ -204,12 +210,19 @@ fn sum_claimable(env: &Env, whistleblower: &Address, listing_id: &String) -> i12
             if matches!(record.status, AllocationStatus::Pending)
                 && now >= record.timestamp + hold_window
             {
-                total += record.amount - record.claimed_amount;
+                // #19: checked sub/add so the summation cannot trap on overflow
+                let available = record
+                    .amount
+                    .checked_sub(record.claimed_amount)
+                    .ok_or(ContractError::AmountOverflow)?;
+                total = total
+                    .checked_add(available)
+                    .ok_or(ContractError::AmountOverflow)?;
             }
         }
         i += 1;
     }
-    total
+    Ok(total)
 }
 
 // ── Contract implementation ───────────────────────────────────────────────────
@@ -414,7 +427,7 @@ impl WhistleblowerRewards {
         require_non_empty_string(&listing_id)?;
         require_string_max_len(&listing_id)?;
 
-        let total_claimable = sum_claimable(&env, &to, &listing_id);
+        let total_claimable = sum_claimable(&env, &to, &listing_id)?;
         if total_claimable <= 0 {
             return Err(ContractError::NothingToClaim);
         }
@@ -443,15 +456,24 @@ impl WhistleblowerRewards {
                 if matches!(record.status, AllocationStatus::Pending)
                     && now >= record.timestamp + hold_window
                 {
-                    let available = record.amount - record.claimed_amount;
+                    // #19: checked money math — overflow returns a typed error
+                    let available = record
+                        .amount
+                        .checked_sub(record.claimed_amount)
+                        .ok_or(ContractError::AmountOverflow)?;
                     if available > 0 {
                         let take = remaining.min(available);
-                        record.claimed_amount += take;
+                        record.claimed_amount = record
+                            .claimed_amount
+                            .checked_add(take)
+                            .ok_or(ContractError::AmountOverflow)?;
                         if record.claimed_amount >= record.amount {
                             record.status = AllocationStatus::Claimed;
                         }
                         put_allocation(&env, &to, &listing_id, i, &record);
-                        remaining -= take;
+                        remaining = remaining
+                            .checked_sub(take)
+                            .ok_or(ContractError::AmountOverflow)?;
                     }
                 }
             }
@@ -462,7 +484,7 @@ impl WhistleblowerRewards {
         let token_client = token::Client::new(&env, &token_addr);
         token_client.transfer(&env.current_contract_address(), &to, &to_claim);
 
-        let new_claimable = sum_claimable(&env, &to, &listing_id);
+        let new_claimable = sum_claimable(&env, &to, &listing_id)?;
 
         env.events().publish(
             (
@@ -484,7 +506,8 @@ impl WhistleblowerRewards {
         if require_string_max_len(&listing_id).is_err() {
             return 0;
         }
-        sum_claimable(&env, &whistleblower, &listing_id)
+        // View: on the impossible overflow, report 0 rather than trap.
+        sum_claimable(&env, &whistleblower, &listing_id).unwrap_or(0)
     }
 
     pub fn set_operator(

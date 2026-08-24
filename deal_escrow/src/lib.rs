@@ -85,6 +85,8 @@ pub enum ContractError {
     MigrationInvariantViolation = 22,
     // Deal lifecycle (#974)
     InvalidDealTransition = 23,
+    // Arithmetic safety (#19): a monetary add/mul overflowed i128
+    AmountOverflow = 24,
 }
 
 #[contracttype]
@@ -451,10 +453,14 @@ impl DealEscrow {
 
         // #386: per-key persistent storage
         let cur = get_deal_balance(&env, &deal_id);
-        put_deal_balance(&env, &deal_id, cur + amount);
+        // #19: checked add so an overflow returns a typed error, not a host trap
+        let new_balance = cur
+            .checked_add(amount)
+            .ok_or(ContractError::AmountOverflow)?;
+        put_deal_balance(&env, &deal_id, new_balance);
         set_deal_depositor_if_missing(&env, &deal_id, &from);
         let mut state = get_deal_state(&env, &deal_id);
-        state.total_balance = cur + amount;
+        state.total_balance = new_balance;
         assert_deal_invariants(&state)?;
         set_deal_state(&env, &deal_id, &state);
 
@@ -501,7 +507,13 @@ impl DealEscrow {
             return Err(ContractError::InsufficientBalance);
         }
 
-        if principal_amount + platform_amount + reporter_amount != cur {
+        // #19: sum the split with checked adds so the invariant guard cannot
+        // itself trap on overflow before it gets to compare against `cur`.
+        let split_total = principal_amount
+            .checked_add(platform_amount)
+            .and_then(|s| s.checked_add(reporter_amount))
+            .ok_or(ContractError::AmountOverflow)?;
+        if split_total != cur {
             return Err(ContractError::InvalidSplit);
         }
 
@@ -863,7 +875,12 @@ impl DealEscrow {
         token_client.transfer(&env.current_contract_address(), &recipient, &pending.amount);
         exit_nonreentrant(env);
 
-        state.total_balance -= pending.amount;
+        // #19: checked sub — debiting more than the balance returns a typed
+        // InsufficientBalance rather than trapping on underflow.
+        state.total_balance = state
+            .total_balance
+            .checked_sub(pending.amount)
+            .ok_or(ContractError::InsufficientBalance)?;
         state.locked_amount = 0;
         state.pending_payout = 0;
         assert_deal_invariants(&state)?;
@@ -1421,6 +1438,43 @@ mod test {
             token_admin,
             receipt_contract,
         )
+    }
+
+    // #19: an overflow in the split summation must return a typed
+    // AmountOverflow, not abort the host call with an opaque trap.
+    #[test]
+    fn release_split_sum_overflow_returns_amount_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_contract_id, client, admin, _operator, token, _token_admin, _rcpt) = setup(&env);
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        let platform_addr = Address::generate(&env);
+        let reporter_addr = Address::generate(&env);
+        let token_sac = StellarAssetClient::new(&env, &token);
+        let deal_id = String::from_str(&env, "deal-overflow");
+        token_sac.mint(&from, &250i128);
+        client
+            .try_deposit(&from, &deal_id, &250i128)
+            .unwrap()
+            .unwrap();
+        // principal + platform overflows i128 before the split-vs-balance check
+        let err = client
+            .try_release(
+                &admin,
+                &deal_id,
+                &to,
+                &i128::MAX,
+                &platform_addr,
+                &i128::MAX,
+                &reporter_addr,
+                &0i128,
+                &Symbol::new(&env, "PAYSTACK"),
+                &String::from_str(&env, "ref-1"),
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::AmountOverflow);
     }
 
     #[test]

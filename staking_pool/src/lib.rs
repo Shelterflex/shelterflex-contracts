@@ -86,6 +86,8 @@ pub enum ContractError {
     InvalidUpgradeVersion = 12,
     /// Stored state schema is incompatible with this contract version
     IncompatibleStateSchema = 13,
+    /// Issue #19: a monetary add/sub overflowed i128
+    AmountOverflow = 15,
 }
 
 /// Input parameters for computing metadata hash
@@ -529,7 +531,10 @@ impl StakingPool {
         for i in 0..count {
             if let Some(deposit) = get_deposit(&env, &to, i) {
                 if lock_period == 0 || current_time >= deposit.timestamp + lock_period {
-                    unlocked_balance += deposit.amount;
+                    // #19: checked add so summing deposits cannot trap on overflow
+                    unlocked_balance = unlocked_balance
+                        .checked_add(deposit.amount)
+                        .ok_or(ContractError::AmountOverflow)?;
                 }
             }
         }
@@ -555,10 +560,16 @@ impl StakingPool {
             if let Some(mut deposit) = get_deposit(&env, &to, i) {
                 if lock_period == 0 || current_time >= deposit.timestamp + lock_period {
                     if deposit.amount <= remaining_to_unstake {
-                        remaining_to_unstake -= deposit.amount;
+                        // #19: checked sub (guarded, but defense-in-depth)
+                        remaining_to_unstake = remaining_to_unstake
+                            .checked_sub(deposit.amount)
+                            .ok_or(ContractError::AmountOverflow)?;
                         remove_deposit(&env, &to, i);
                     } else {
-                        deposit.amount -= remaining_to_unstake;
+                        deposit.amount = deposit
+                            .amount
+                            .checked_sub(remaining_to_unstake)
+                            .ok_or(ContractError::AmountOverflow)?;
                         remaining_to_unstake = 0;
                         put_deposit(&env, &to, i, deposit);
                     }
