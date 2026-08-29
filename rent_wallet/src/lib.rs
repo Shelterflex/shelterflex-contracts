@@ -270,7 +270,9 @@ impl RentWallet {
         // debit never touches the balance).
         monthly_cap::check_and_record_debit(&env, &user, amount)?;
 
-        let new_balance = cur - amount;
+        let new_balance = cur
+            .checked_sub(amount)
+            .ok_or(ContractError::InsufficientBalance)?;
         put_balance(&env, &user, new_balance);
 
         env.events().publish(

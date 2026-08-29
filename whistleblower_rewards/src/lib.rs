@@ -76,6 +76,8 @@ pub enum ContractError {
     AllocationAlreadyRevoked = 14,
     AllocationNotFound = 15,
     HoldWindowElapsed = 16,
+    // Arithmetic hardening (#19)
+    AmountOverflow = 17,
 }
 
 #[contract]
@@ -207,7 +209,9 @@ fn sum_claimable(env: &Env, whistleblower: &Address, listing_id: &String) -> i12
             if matches!(record.status, AllocationStatus::Pending)
                 && now >= record.timestamp + hold_window
             {
-                total += record.amount - record.claimed_amount;
+                if let Some(available) = record.amount.checked_sub(record.claimed_amount) {
+                    total = total.checked_add(available).unwrap_or(i128::MAX);
+                }
             }
         }
         i += 1;
@@ -328,9 +332,10 @@ impl WhistleblowerRewards {
             status: AllocationStatus::Pending,
         };
         put_allocation(&env, &whistleblower, &listing_id, nonce, &record);
+        let new_nonce = nonce.checked_add(1).ok_or(ContractError::AmountOverflow)?;
         env.set_persistent(
             &StorageKey::AllocationNonce(whistleblower.clone(), listing_id.clone()),
-            &(nonce + 1),
+            &new_nonce,
         );
 
         let hold_window = get_hold_window(&env);
@@ -460,15 +465,23 @@ impl WhistleblowerRewards {
                 if matches!(record.status, AllocationStatus::Pending)
                     && now >= record.timestamp + hold_window
                 {
-                    let available = record.amount - record.claimed_amount;
+                    let available = record
+                        .amount
+                        .checked_sub(record.claimed_amount)
+                        .ok_or(ContractError::AmountOverflow)?;
                     if available > 0 {
                         let take = remaining.min(available);
-                        record.claimed_amount += take;
+                        record.claimed_amount = record
+                            .claimed_amount
+                            .checked_add(take)
+                            .ok_or(ContractError::AmountOverflow)?;
                         if record.claimed_amount >= record.amount {
                             record.status = AllocationStatus::Claimed;
                         }
                         put_allocation(&env, &to, &listing_id, i, &record);
-                        remaining -= take;
+                        remaining = remaining
+                            .checked_sub(take)
+                            .ok_or(ContractError::AmountOverflow)?;
                     }
                 }
             }
@@ -734,6 +747,9 @@ mod access_control_tests;
 
 #[cfg(test)]
 mod ttl_tests;
+
+#[cfg(test)]
+mod arithmetic_tests;
 
 #[cfg(test)]
 mod test {

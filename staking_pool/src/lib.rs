@@ -92,6 +92,8 @@ pub enum ContractError {
     InvalidUpgradeVersion = 12,
     /// Stored state schema is incompatible with this contract version
     IncompatibleStateSchema = 13,
+    // Arithmetic hardening (#19)
+    AmountOverflow = 15,
 }
 
 /// Input parameters for computing metadata hash
@@ -501,10 +503,16 @@ impl StakingPool {
         exit_nonreentrant(&env);
 
         let current_balance = get_staked_balance(&env, &from);
-        put_staked_balance(&env, &from, current_balance + amount);
+        let new_user_balance = current_balance
+            .checked_add(amount)
+            .ok_or(ContractError::AmountOverflow)?;
+        put_staked_balance(&env, &from, new_user_balance);
 
         let total = get_total_staked(&env);
-        put_total_staked(&env, total + amount);
+        let new_total = total
+            .checked_add(amount)
+            .ok_or(ContractError::AmountOverflow)?;
+        put_total_staked(&env, new_total);
 
         // Track this as a separate deposit for independent lock period tracking
         let count = get_deposit_count(&env, &from);
@@ -517,10 +525,8 @@ impl StakingPool {
                 timestamp: env.ledger().timestamp(),
             },
         );
-        put_deposit_count(&env, &from, count + 1);
-
-        let new_user_balance = current_balance + amount;
-        let new_total = total + amount;
+        let new_count = count.checked_add(1).ok_or(ContractError::AmountOverflow)?;
+        put_deposit_count(&env, &from, new_count);
         env.events().publish(
             (
                 Symbol::new(&env, "staking_pool"),
@@ -590,11 +596,16 @@ impl StakingPool {
             }
         }
 
-        let new_balance = current_balance - amount;
+        let new_balance = current_balance
+            .checked_sub(amount)
+            .ok_or(ContractError::InsufficientBalance)?;
         put_staked_balance(&env, &to, new_balance);
 
         let total = get_total_staked(&env);
-        put_total_staked(&env, total - amount);
+        let new_total = total
+            .checked_sub(amount)
+            .ok_or(ContractError::InsufficientBalance)?;
+        put_total_staked(&env, new_total);
 
         let token_address = get_token(&env);
         let token_client = token::Client::new(&env, &token_address);
@@ -602,8 +613,6 @@ impl StakingPool {
         enter_nonreentrant(&env)?;
         token_client.transfer(&env.current_contract_address(), &to, &amount);
         exit_nonreentrant(&env);
-
-        let new_total = total - amount;
         env.events().publish(
             (
                 Symbol::new(&env, "staking_pool"),

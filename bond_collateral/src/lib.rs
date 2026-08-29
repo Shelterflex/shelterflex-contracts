@@ -78,6 +78,8 @@ pub enum ContractError {
     SlashingModuleNotSet = 17,
     /// Issue #1136: oracle price is stale (exceeds configured staleness limit).
     OracleStale = 18,
+    // Arithmetic hardening (#19)
+    AmountOverflow = 19,
 }
 
 /// Price scale: oracle price of 10_000_000 means 1 collateral unit = 1 bond unit.
@@ -439,12 +441,17 @@ impl BondCollateral {
             return Err(ContractError::NotAuthorized);
         }
 
-        position.collateral_amount += amount;
+        position.collateral_amount = position
+            .collateral_amount
+            .checked_add(amount)
+            .ok_or(ContractError::AmountOverflow)?;
         position.created_at = env.ledger().timestamp();
 
         put_position(&env, &position_id, &position);
 
-        let total = get_total_collateral(&env) + amount;
+        let total = get_total_collateral(&env)
+            .checked_add(amount)
+            .ok_or(ContractError::AmountOverflow)?;
         put_total_collateral(&env, total);
 
         let ratio = calculate_collateral_ratio(position.collateral_amount, position.bond_amount);
@@ -503,12 +510,18 @@ impl BondCollateral {
             return Err(ContractError::NotAuthorized);
         }
 
-        position.bond_amount += bond_amount;
+        position.bond_amount = position
+            .bond_amount
+            .checked_add(bond_amount)
+            .ok_or(ContractError::AmountOverflow)?;
 
         let ratio = calculate_collateral_ratio(position.collateral_amount, position.bond_amount);
 
         if ratio < get_liquidation_threshold(&env) {
-            position.bond_amount -= bond_amount;
+            position.bond_amount = position
+                .bond_amount
+                .checked_sub(bond_amount)
+                .ok_or(ContractError::InsufficientCollateral)?;
             return Err(ContractError::CollateralRatioTooLow);
         }
 
@@ -568,7 +581,10 @@ impl BondCollateral {
             return Err(ContractError::InsufficientCollateral);
         }
 
-        position.bond_amount -= bond_amount;
+        position.bond_amount = position
+            .bond_amount
+            .checked_sub(bond_amount)
+            .ok_or(ContractError::InsufficientCollateral)?;
         put_position(&env, &position_id, &position);
 
         env.events().publish(
@@ -610,7 +626,10 @@ impl BondCollateral {
         }
 
         // Compute post-withdrawal ratio before mutating state
-        let new_collateral = position.collateral_amount - amount;
+        let new_collateral = position
+            .collateral_amount
+            .checked_sub(amount)
+            .ok_or(ContractError::InsufficientCollateral)?;
         let ratio = calculate_collateral_ratio(new_collateral, position.bond_amount);
         let liquidation_threshold = get_liquidation_threshold(&env);
 
@@ -627,7 +646,9 @@ impl BondCollateral {
         let token_client = token::Client::new(&env, &token_address);
         token_client.transfer(&env.current_contract_address(), &owner, &amount);
 
-        let total = get_total_collateral(&env) - amount;
+        let total = get_total_collateral(&env)
+            .checked_sub(amount)
+            .ok_or(ContractError::InsufficientCollateral)?;
         put_total_collateral(&env, total);
 
         // Emit collateral_withdrawn with the resulting ratio
@@ -709,29 +730,40 @@ impl BondCollateral {
         let seize_amount = raw_seize.max(1).min(collateral);
 
         // Bond debt retired is proportional to the oracle value of seized collateral.
-        let bond_reduction = (seize_amount * effective_price / PRICE_SCALE).min(bond);
+        let bond_reduction = seize_amount
+            .checked_mul(effective_price)
+            .and_then(|product| product.checked_div(PRICE_SCALE))
+            .ok_or(ContractError::AmountOverflow)?
+            .min(bond);
 
         // Keeper reward bounded by reward cap bps of seized collateral.
         let reward_cap = get_keeper_reward_cap(&env);
         let keeper_reward = (seize_amount * reward_cap as i128 / 10_000).min(seize_amount);
 
         // Update position accounting.
-        let new_collateral = collateral - seize_amount;
-        let new_bond = bond - bond_reduction;
+        let new_collateral = collateral
+            .checked_sub(seize_amount)
+            .ok_or(ContractError::InsufficientCollateral)?;
+        let new_bond = bond
+            .checked_sub(bond_reduction)
+            .ok_or(ContractError::InsufficientCollateral)?;
         let resulting_ratio =
             calculate_collateral_ratio_oracle(new_collateral, new_bond, effective_price);
 
         if new_collateral == 0 || new_bond == 0 {
             remove_position(&env, &position_id);
-            put_total_collateral(&env, get_total_collateral(&env).saturating_sub(collateral));
+            let new_total = get_total_collateral(&env)
+                .checked_sub(collateral)
+                .ok_or(ContractError::InsufficientCollateral)?;
+            put_total_collateral(&env, new_total);
         } else {
             position.collateral_amount = new_collateral;
             position.bond_amount = new_bond;
             put_position(&env, &position_id, &position);
-            put_total_collateral(
-                &env,
-                get_total_collateral(&env).saturating_sub(seize_amount),
-            );
+            let new_total = get_total_collateral(&env)
+                .checked_sub(seize_amount)
+                .ok_or(ContractError::InsufficientCollateral)?;
+            put_total_collateral(&env, new_total);
         }
 
         if keeper_reward > 0 {
@@ -847,10 +879,10 @@ impl BondCollateral {
             return Err(ContractError::InvalidAmount);
         }
         let current = get_inspector_bond(&env, &inspector);
-        env.set_persistent(
-            &DataKey::InspectorBond(inspector.clone()),
-            &(current + amount),
-        );
+        let new_bond = current
+            .checked_add(amount)
+            .ok_or(ContractError::AmountOverflow)?;
+        env.set_persistent(&DataKey::InspectorBond(inspector.clone()), &new_bond);
         env.events().publish(
             (
                 symbol_short!("bond"),
@@ -879,10 +911,10 @@ impl BondCollateral {
         if amount > current {
             return Err(ContractError::InsufficientBond);
         }
-        env.set_persistent(
-            &DataKey::InspectorBond(inspector.clone()),
-            &(current - amount),
-        );
+        let new_bond = current
+            .checked_sub(amount)
+            .ok_or(ContractError::InsufficientBond)?;
+        env.set_persistent(&DataKey::InspectorBond(inspector.clone()), &new_bond);
         env.events().publish(
             (
                 symbol_short!("bond"),
@@ -1135,6 +1167,9 @@ mod access_control_tests;
 
 #[cfg(test)]
 mod ttl_tests;
+
+#[cfg(test)]
+mod arithmetic_tests;
 
 #[cfg(test)]
 mod test {

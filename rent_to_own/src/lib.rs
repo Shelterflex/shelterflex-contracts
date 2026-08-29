@@ -44,6 +44,8 @@ pub enum ContractError {
     InvalidTransfer = 12,
     /// State-mutating call attempted while the contract is paused.
     Paused = 13,
+    // Arithmetic hardening (#19)
+    AmountOverflow = 14,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -136,10 +138,15 @@ fn get_forfeiture_bps(env: &Env) -> u32 {
 }
 
 /// Compute `(refundable, forfeited)` from accumulated equity and the forfeiture rate.
-fn equity_split(equity: i128, forfeiture_bps: u32) -> (i128, i128) {
-    let forfeited = equity * forfeiture_bps as i128 / 10_000;
-    let refundable = equity - forfeited;
-    (refundable, forfeited)
+fn equity_split(equity: i128, forfeiture_bps: u32) -> Result<(i128, i128), ContractError> {
+    let forfeited = equity
+        .checked_mul(forfeiture_bps as i128)
+        .and_then(|product| product.checked_div(10_000))
+        .ok_or(ContractError::AmountOverflow)?;
+    let refundable = equity
+        .checked_sub(forfeited)
+        .ok_or(ContractError::AmountOverflow)?;
+    Ok((refundable, forfeited))
 }
 
 #[contractimpl]
@@ -231,7 +238,10 @@ impl RentToOwn {
             return Err(ContractError::DealNotActive);
         }
 
-        let new_equity = deal.equity_accumulated_usdc + equity_amount;
+        let new_equity = deal
+            .equity_accumulated_usdc
+            .checked_add(equity_amount)
+            .ok_or(ContractError::AmountOverflow)?;
         if new_equity > deal.property_value_usdc {
             return Err(ContractError::EquityOverflow);
         }
@@ -320,7 +330,7 @@ impl RentToOwn {
 
         let accumulated = deal.equity_accumulated_usdc;
         let forfeiture_bps = get_forfeiture_bps(&env);
-        let (refundable, forfeited) = equity_split(accumulated, forfeiture_bps);
+        let (refundable, forfeited) = equity_split(accumulated, forfeiture_bps)?;
 
         deal.status = DealStatus::Defaulted;
         env.set_persistent(&DataKey::Deal(deal_id.clone()), &deal);
@@ -470,7 +480,11 @@ impl RentToOwn {
         if deal.property_value_usdc == 0 {
             return 0;
         }
-        ((deal.equity_accumulated_usdc * 10_000) / deal.property_value_usdc) as u32
+        deal.equity_accumulated_usdc
+            .checked_mul(10_000)
+            .and_then(|product| product.checked_div(deal.property_value_usdc))
+            .map(|result| result as u32)
+            .unwrap_or(0)
     }
 }
 
@@ -985,3 +999,6 @@ mod tests {
         assert_eq!(err, ContractError::DealNotFound);
     }
 }
+
+#[cfg(test)]
+mod arithmetic_tests;
