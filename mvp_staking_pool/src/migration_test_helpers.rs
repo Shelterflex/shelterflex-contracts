@@ -56,9 +56,10 @@ pub fn create_test_contract(env: &Env, version: u32) -> TestContract<'_> {
 
     // Set the contract version for migration testing
     env.as_contract(&contract_id, || {
-        env.storage()
-            .instance()
-            .set(&super::DataKey::ContractVersion, &version);
+        env.storage().instance().set(
+            &soroban_upgrade_governance_core::UpgradeGovernanceKey::ContractVersion,
+            &version,
+        );
     });
 
     TestContract {

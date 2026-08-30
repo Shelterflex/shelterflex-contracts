@@ -12,6 +12,7 @@ members = [
   "soroban_pausable_core",
   "soroban_access_control",
   "soroban_access_control_core",
+  "soroban_upgrade_governance_core",
   "deal_escrow",
   "contract_access",
   "timelock",

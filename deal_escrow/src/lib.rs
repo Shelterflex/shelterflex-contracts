@@ -6,6 +6,11 @@ use soroban_sdk::{
     BytesN, Env, String, Symbol, Vec,
 };
 use soroban_storage_ttl::TtlStorage;
+use soroban_upgrade_governance_core::{
+    emergency_upgrade as ug_emergency_upgrade, execute_upgrade as ug_execute_upgrade,
+    propose_upgrade as ug_propose_upgrade, set_guardian as ug_set_guardian,
+    set_upgrade_delay as ug_set_upgrade_delay, UpgradeGovernanceError, UpgradeGovernanceKey,
+};
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
 pub mod validation;
@@ -13,9 +18,6 @@ pub mod validation;
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    ContractVersion,
-    StorageSchemaVersion,
-    Admin,
     Operator,
     Resolver,
     ChallengeWindowSeconds,
@@ -34,11 +36,6 @@ pub enum DataKey {
     LegacyPendingPayoutV2(String),
     /// Reentrancy lock (#390)
     Reentrancy,
-    // ── Upgrade governance (#392) ─────────────────────────────────────────
-    Guardian,
-    UpgradeDelay,
-    PendingUpgradeHash,
-    PendingUpgradeAt,
     // ── Circuit breaker (#393) ──────────────────────────────────────────
     CircuitBreakerState,
     PendingDrainHash,
@@ -162,14 +159,14 @@ pub struct DealEscrow;
 fn get_admin(env: &Env) -> Address {
     env.storage()
         .instance()
-        .get::<_, Address>(&DataKey::Admin)
+        .get::<_, Address>(&UpgradeGovernanceKey::Admin)
         .expect("admin not set")
 }
 
 fn get_storage_schema_version(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get::<_, u32>(&DataKey::StorageSchemaVersion)
+        .get::<_, u32>(&UpgradeGovernanceKey::StorageSchemaVersion)
         .unwrap_or(STORAGE_SCHEMA_V1)
 }
 
@@ -382,18 +379,21 @@ impl DealEscrow {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&UpgradeGovernanceKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&UpgradeGovernanceKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Operator, &operator);
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage()
             .instance()
-            .set(&DataKey::ContractVersion, &1u32);
-        env.storage()
-            .instance()
-            .set(&DataKey::StorageSchemaVersion, &STORAGE_SCHEMA_V3);
+            .set(&UpgradeGovernanceKey::ContractVersion, &1u32);
+        env.storage().instance().set(
+            &UpgradeGovernanceKey::StorageSchemaVersion,
+            &STORAGE_SCHEMA_V3,
+        );
         env.storage()
             .instance()
             .set(&DataKey::ReceiptContract, &receipt_contract);
@@ -411,7 +411,7 @@ impl DealEscrow {
 
         env.storage()
             .instance()
-            .get::<_, u32>(&DataKey::ContractVersion)
+            .get::<_, u32>(&UpgradeGovernanceKey::ContractVersion)
             .unwrap_or(0u32)
     }
 
@@ -682,9 +682,10 @@ impl DealEscrow {
             set_deal_state(&env, &deal_id, &state);
         }
 
-        env.storage()
-            .instance()
-            .set(&DataKey::StorageSchemaVersion, &STORAGE_SCHEMA_V3);
+        env.storage().instance().set(
+            &UpgradeGovernanceKey::StorageSchemaVersion,
+            &STORAGE_SCHEMA_V3,
+        );
         env.events().publish(
             (
                 Symbol::new(&env, "deal_escrow"),
@@ -918,7 +919,7 @@ impl Pausable for DealEscrow {
         let stored: Address = env
             .storage()
             .instance()
-            .get(&DataKey::Admin)
+            .get(&UpgradeGovernanceKey::Admin)
             .expect("admin not set");
         if soroban_access_control_core::require_admin_permission(
             &env,
@@ -943,7 +944,7 @@ impl Pausable for DealEscrow {
         let stored: Address = env
             .storage()
             .instance()
-            .get(&DataKey::Admin)
+            .get(&UpgradeGovernanceKey::Admin)
             .expect("admin not set");
         if soroban_access_control_core::require_admin_permission(
             &env,
@@ -978,23 +979,13 @@ impl DealEscrow {
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        let current_admin = get_admin(&env);
-        soroban_access_control_core::require_admin_permission(
+        ug_set_guardian(
             &env,
-            &current_admin,
             &admin,
-            "set_guardian",
-            ContractError::NotAuthorized,
-        )?;
-        env.storage().instance().set(&DataKey::Guardian, &guardian);
-        env.events().publish(
-            (
-                Symbol::new(&env, "deal_escrow"),
-                Symbol::new(&env, "set_guardian"),
-            ),
-            guardian,
-        );
-        Ok(())
+            Some(guardian),
+            Symbol::new(&env, "deal_escrow"),
+        )
+        .map_err(|_| ContractError::NotAuthorized)
     }
 
     pub fn set_upgrade_delay(
@@ -1004,25 +995,13 @@ impl DealEscrow {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        let current_admin = get_admin(&env);
-        soroban_access_control_core::require_admin_permission(
+        ug_set_upgrade_delay(
             &env,
-            &current_admin,
             &admin,
-            "set_upgrade_delay",
-            ContractError::NotAuthorized,
-        )?;
-        env.storage()
-            .instance()
-            .set(&DataKey::UpgradeDelay, &delay_seconds);
-        env.events().publish(
-            (
-                Symbol::new(&env, "deal_escrow"),
-                Symbol::new(&env, "set_upgrade_delay"),
-            ),
             delay_seconds,
-        );
-        Ok(())
+            Symbol::new(&env, "deal_escrow"),
+        )
+        .map_err(|_| ContractError::NotAuthorized)
     }
 
     pub fn propose_upgrade(
@@ -1032,32 +1011,20 @@ impl DealEscrow {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        let current_admin = get_admin(&env);
-        soroban_access_control_core::require_admin_permission(
+        // deal_escrow doesn't use versioning, so we use version 0
+        ug_propose_upgrade(
             &env,
-            &current_admin,
             &admin,
-            "propose_upgrade",
-            ContractError::NotAuthorized,
-        )?;
-        if env.storage().instance().has(&DataKey::PendingUpgradeHash) {
-            return Err(ContractError::UpgradeAlreadyPending);
-        }
-        let now = env.ledger().timestamp();
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingUpgradeHash, &new_wasm_hash);
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingUpgradeAt, &now);
-        env.events().publish(
-            (
-                Symbol::new(&env, "deal_escrow"),
-                Symbol::new(&env, "propose_upgrade"),
-            ),
-            (new_wasm_hash, now),
-        );
-        Ok(())
+            &new_wasm_hash,
+            0, // No versioning in deal_escrow
+            None,
+            Symbol::new(&env, "deal_escrow"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::UpgradeAlreadyPending => ContractError::UpgradeAlreadyPending,
+            _ => ContractError::NotAuthorized,
+        })
     }
 
     pub fn execute_upgrade(
@@ -1067,55 +1034,18 @@ impl DealEscrow {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        let current_admin = get_admin(&env);
-        soroban_access_control_core::require_admin_permission(
+        ug_execute_upgrade(
             &env,
-            &current_admin,
             &admin,
-            "execute_upgrade",
-            ContractError::NotAuthorized,
-        )?;
-        let pending: BytesN<32> = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingUpgradeHash)
-            .ok_or(ContractError::NoUpgradePending)?;
-        if pending != new_wasm_hash {
-            return Err(ContractError::NoUpgradePending);
-        }
-        let proposed_at: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingUpgradeAt)
-            .unwrap_or(0);
-        let delay: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::UpgradeDelay)
-            .unwrap_or(0);
-        if delay > 0 && env.ledger().timestamp() < proposed_at + delay {
-            return Err(ContractError::UpgradeDelayNotMet);
-        }
-        if let Some(guardian) = env
-            .storage()
-            .instance()
-            .get::<_, Address>(&DataKey::Guardian)
-        {
-            guardian.require_auth();
-        }
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingUpgradeHash);
-        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
-        env.events().publish(
-            (
-                Symbol::new(&env, "deal_escrow"),
-                Symbol::new(&env, "execute_upgrade"),
-            ),
-            new_wasm_hash.clone(),
-        );
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-        Ok(())
+            &new_wasm_hash,
+            Symbol::new(&env, "deal_escrow"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::NoPendingUpgrade => ContractError::NoUpgradePending,
+            UpgradeGovernanceError::UpgradeDelayNotElapsed => ContractError::UpgradeDelayNotMet,
+            _ => ContractError::NotAuthorized,
+        })
     }
 
     pub fn emergency_upgrade(
@@ -1125,34 +1055,22 @@ impl DealEscrow {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        let current_admin = get_admin(&env);
-        soroban_access_control_core::require_admin_permission(
+        // deal_escrow doesn't use versioning, so we use version 0
+        // Mandatory guardian for fund contracts (require_guardian = true)
+        ug_emergency_upgrade(
             &env,
-            &current_admin,
             &admin,
-            "emergency_upgrade",
-            ContractError::NotAuthorized,
-        )?;
-        if let Some(guardian) = env
-            .storage()
-            .instance()
-            .get::<_, Address>(&DataKey::Guardian)
-        {
-            guardian.require_auth();
-        }
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingUpgradeHash);
-        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
-        env.events().publish(
-            (
-                Symbol::new(&env, "deal_escrow"),
-                Symbol::new(&env, "emergency_upgrade"),
-            ),
-            (admin, new_wasm_hash.clone(), env.ledger().timestamp()),
-        );
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-        Ok(())
+            &new_wasm_hash,
+            0, // No versioning in deal_escrow
+            None,
+            Symbol::new(&env, "deal_escrow"),
+            true, // Mandatory guardian for fund contracts
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::GuardianNotConfigured => ContractError::NotAuthorized,
+            _ => ContractError::NotAuthorized,
+        })
     }
 
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
@@ -1169,12 +1087,14 @@ impl DealEscrow {
         let hash: BytesN<32> = env
             .storage()
             .instance()
-            .get(&DataKey::PendingUpgradeHash)
+            .get(&UpgradeGovernanceKey::PendingUpgradeHash)
             .ok_or(ContractError::NoUpgradePending)?;
         env.storage()
             .instance()
-            .remove(&DataKey::PendingUpgradeHash);
-        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+            .remove(&UpgradeGovernanceKey::PendingUpgradeHash);
+        env.storage()
+            .instance()
+            .remove(&UpgradeGovernanceKey::PendingUpgradeAt);
         env.events().publish(
             (
                 Symbol::new(&env, "deal_escrow"),
@@ -2361,9 +2281,10 @@ mod test {
             .unwrap();
 
         env.as_contract(&contract_id, || {
-            env.storage()
-                .instance()
-                .set(&DataKey::StorageSchemaVersion, &1u32);
+            env.storage().instance().set(
+                &soroban_upgrade_governance_core::UpgradeGovernanceKey::StorageSchemaVersion,
+                &1u32,
+            );
         });
 
         let deal_ids = soroban_sdk::Vec::from_array(&env, [deal_id.clone()]);
@@ -2395,9 +2316,10 @@ mod test {
         let (contract_id, client, admin, _operator, _token, _token_admin, _rcpt) = setup(&env);
         let deal_id = String::from_str(&env, "legacy-v2-bad");
         env.as_contract(&contract_id, || {
-            env.storage()
-                .instance()
-                .set(&DataKey::StorageSchemaVersion, &2u32);
+            env.storage().instance().set(
+                &soroban_upgrade_governance_core::UpgradeGovernanceKey::StorageSchemaVersion,
+                &2u32,
+            );
             env.storage()
                 .persistent()
                 .set(&DataKey::DealBalance(deal_id.clone()), &100i128);
@@ -2674,9 +2596,10 @@ mod test {
         let (contract_id, client, admin, _, _, _, _) = setup(&env);
         // Downgrade stored version to V2, then try to migrate from V1 → mismatch.
         env.as_contract(&contract_id, || {
-            env.storage()
-                .instance()
-                .set(&DataKey::StorageSchemaVersion, &2u32);
+            env.storage().instance().set(
+                &soroban_upgrade_governance_core::UpgradeGovernanceKey::StorageSchemaVersion,
+                &2u32,
+            );
         });
         let deal_ids = soroban_sdk::Vec::<String>::new(&env);
         env.mock_auths(&[MockAuth {
@@ -2701,7 +2624,7 @@ mod test {
     fn migrate_v2_to_v3_preserves_per_deal_balance() {
         let env = Env::default();
         env.mock_all_auths();
-        let (contract_id, client, admin, _, token, token_admin, _) = setup(&env);
+        let (contract_id, client, admin, _, token, _token_admin, _) = setup(&env);
         let depositor = Address::generate(&env);
         let deal_id = String::from_str(&env, "v2-balance-deal");
         let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
@@ -2728,9 +2651,10 @@ mod test {
 
         // Simulate V2 layout: set schema to V2 and write legacy fields (both 0).
         env.as_contract(&contract_id, || {
-            env.storage()
-                .instance()
-                .set(&DataKey::StorageSchemaVersion, &2u32);
+            env.storage().instance().set(
+                &soroban_upgrade_governance_core::UpgradeGovernanceKey::StorageSchemaVersion,
+                &2u32,
+            );
             env.storage()
                 .persistent()
                 .set(&DataKey::LegacyLockedAmountV2(deal_id.clone()), &0i128);
@@ -2759,9 +2683,10 @@ mod test {
         let (contract_id, client, _, _, _, _, _) = setup(&env);
         let stranger = Address::generate(&env);
         env.as_contract(&contract_id, || {
-            env.storage()
-                .instance()
-                .set(&DataKey::StorageSchemaVersion, &1u32);
+            env.storage().instance().set(
+                &soroban_upgrade_governance_core::UpgradeGovernanceKey::StorageSchemaVersion,
+                &1u32,
+            );
         });
         let deal_ids = soroban_sdk::Vec::<String>::new(&env);
         env.mock_auths(&[MockAuth {
@@ -2798,7 +2723,7 @@ mod test {
     fn migrate_v1_balance_conservation_across_multiple_deals() {
         let env = Env::default();
         env.mock_all_auths();
-        let (contract_id, client, admin, _, token, token_admin, _) = setup(&env);
+        let (contract_id, client, admin, _, token, _token_admin, _) = setup(&env);
         let depositor = Address::generate(&env);
         let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
         token_sac.mint(&depositor, &500i128);
@@ -2845,9 +2770,10 @@ mod test {
 
         // Rewind schema to V1.
         env.as_contract(&contract_id, || {
-            env.storage()
-                .instance()
-                .set(&DataKey::StorageSchemaVersion, &1u32);
+            env.storage().instance().set(
+                &soroban_upgrade_governance_core::UpgradeGovernanceKey::StorageSchemaVersion,
+                &1u32,
+            );
         });
 
         let deal_ids = soroban_sdk::Vec::from_array(&env, [deal_a.clone(), deal_b.clone()]);
@@ -2869,7 +2795,7 @@ mod test {
     fn challenge_after_window_is_rejected() {
         let env = Env::default();
         env.mock_all_auths();
-        let (contract_id, client, admin, operator, token, token_admin, _) = setup(&env);
+        let (contract_id, client, admin, operator, token, _token_admin, _) = setup(&env);
         let depositor = Address::generate(&env);
         let landlord = Address::generate(&env);
         let deal_id = String::from_str(&env, "chall-window-1");
@@ -2923,7 +2849,7 @@ mod test {
     fn settle_release_timeout_before_window_expires_rejected() {
         let env = Env::default();
         env.mock_all_auths();
-        let (contract_id, client, admin, operator, token, token_admin, _) = setup(&env);
+        let (contract_id, client, admin, operator, token, _token_admin, _) = setup(&env);
         let depositor = Address::generate(&env);
         let landlord = Address::generate(&env);
         let deal_id = String::from_str(&env, "settle-early-1");
@@ -2977,7 +2903,7 @@ mod test {
     fn settle_dispute_timeout_before_expiry_rejected() {
         let env = Env::default();
         env.mock_all_auths();
-        let (contract_id, client, admin, operator, token, token_admin, _) = setup(&env);
+        let (contract_id, client, admin, operator, token, _token_admin, _) = setup(&env);
         let depositor = Address::generate(&env);
         let landlord = Address::generate(&env);
         let resolver = Address::generate(&env);
@@ -3038,7 +2964,7 @@ mod test {
     fn settle_dispute_timeout_after_expiry_refunds_depositor() {
         let env = Env::default();
         env.mock_all_auths();
-        let (contract_id, client, admin, operator, token, token_admin, _) = setup(&env);
+        let (contract_id, client, admin, operator, token, _token_admin, _) = setup(&env);
         let depositor = Address::generate(&env);
         let landlord = Address::generate(&env);
         let deal_id = String::from_str(&env, "disp-timeout-ok");
@@ -3105,7 +3031,7 @@ mod test {
     fn freeze_blocks_release_but_not_deposit() {
         let env = Env::default();
         env.mock_all_auths();
-        let (contract_id, client, admin, operator, token, token_admin, _) = setup(&env);
+        let (contract_id, client, admin, operator, token, _token_admin, _) = setup(&env);
         let depositor = Address::generate(&env);
         let to = Address::generate(&env);
         let platform = Address::generate(&env);

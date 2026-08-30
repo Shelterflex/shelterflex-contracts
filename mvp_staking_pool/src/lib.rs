@@ -6,14 +6,17 @@ use soroban_sdk::{
     BytesN, Env, Symbol,
 };
 use soroban_storage_ttl::TtlStorage;
+use soroban_upgrade_governance_core::{
+    emergency_upgrade as ug_emergency_upgrade, execute_upgrade as ug_execute_upgrade,
+    propose_upgrade as ug_propose_upgrade, set_guardian as ug_set_guardian,
+    set_upgrade_delay as ug_set_upgrade_delay, UpgradeGovernanceError, UpgradeGovernanceKey,
+};
 
 const REWARD_INDEX_SCALE: i128 = 1_000_000_000_000;
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    ContractVersion,
-    Admin,
     Token,
     TotalStaked,
     Paused,
@@ -25,11 +28,6 @@ pub enum DataKey {
     UsedStake(Address),
     UserRewardIndex(Address),
     ClaimableReward(Address),
-    // Upgrade governance (#392)
-    Guardian,
-    UpgradeDelay,
-    PendingUpgradeHash,
-    PendingUpgradeAt,
     /// Reentrancy lock for cross-contract (token) call protection.
     Reentrancy,
 }
@@ -57,7 +55,7 @@ pub struct StakingPool;
 fn get_admin(env: &Env) -> Address {
     env.storage()
         .instance()
-        .get(&DataKey::Admin)
+        .get(&UpgradeGovernanceKey::Admin)
         .expect("admin not set")
 }
 
@@ -200,15 +198,17 @@ impl StakingPool {
     pub fn init(env: Env, admin: Address, token: Address) {
         env.extend_instance_ttl();
 
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&UpgradeGovernanceKey::Admin) {
             panic!("already initialized");
         }
 
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&UpgradeGovernanceKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage()
             .instance()
-            .set(&DataKey::ContractVersion, &2u32);
+            .set(&UpgradeGovernanceKey::ContractVersion, &2u32);
         env.storage().instance().set(&DataKey::TotalStaked, &0i128);
         env.storage()
             .instance()
@@ -228,7 +228,7 @@ impl StakingPool {
 
         env.storage()
             .instance()
-            .get::<_, u32>(&DataKey::ContractVersion)
+            .get::<_, u32>(&UpgradeGovernanceKey::ContractVersion)
             .unwrap_or(0u32)
     }
 
@@ -466,43 +466,20 @@ impl StakingPool {
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        soroban_access_control_core::require_admin_permission(
+        ug_set_guardian(
             &env,
-            &get_admin(&env),
             &admin,
-            "set_guardian",
-            ContractError::NotAuthorized,
-        )?;
-        env.storage().instance().set(&DataKey::Guardian, &guardian);
-        env.events().publish(
-            (
-                Symbol::new(&env, "mvp_staking_pool"),
-                Symbol::new(&env, "set_guardian"),
-            ),
-            guardian,
-        );
-        Ok(())
+            Some(guardian),
+            Symbol::new(&env, "mvp_staking_pool"),
+        )
+        .map_err(|_| ContractError::NotAuthorized)
     }
 
     pub fn set_upgrade_delay(env: Env, admin: Address, delay: u64) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        soroban_access_control_core::require_admin_permission(
-            &env,
-            &get_admin(&env),
-            &admin,
-            "set_upgrade_delay",
-            ContractError::NotAuthorized,
-        )?;
-        env.storage().instance().set(&DataKey::UpgradeDelay, &delay);
-        env.events().publish(
-            (
-                Symbol::new(&env, "mvp_staking_pool"),
-                Symbol::new(&env, "set_upgrade_delay"),
-            ),
-            delay,
-        );
-        Ok(())
+        ug_set_upgrade_delay(&env, &admin, delay, Symbol::new(&env, "mvp_staking_pool"))
+            .map_err(|_| ContractError::NotAuthorized)
     }
 
     pub fn propose_upgrade(
@@ -512,74 +489,41 @@ impl StakingPool {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        soroban_access_control_core::require_admin_permission(
+        // mvp_staking_pool doesn't use versioning, so we use version 0
+        ug_propose_upgrade(
             &env,
-            &get_admin(&env),
             &admin,
-            "propose_upgrade",
-            ContractError::NotAuthorized,
-        )?;
-        if env.storage().instance().has(&DataKey::PendingUpgradeHash) {
-            return Err(ContractError::UpgradeAlreadyPending);
-        }
-        let delay: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::UpgradeDelay)
-            .unwrap_or(0);
-        let execute_at = env.ledger().timestamp() + delay;
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingUpgradeHash, &new_wasm_hash);
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingUpgradeAt, &execute_at);
-        env.events().publish(
-            (
-                Symbol::new(&env, "mvp_staking_pool"),
-                Symbol::new(&env, "propose_upgrade"),
-            ),
-            (new_wasm_hash, execute_at),
-        );
-        Ok(())
+            &new_wasm_hash,
+            0, // No versioning in mvp_staking_pool
+            None,
+            Symbol::new(&env, "mvp_staking_pool"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::UpgradeAlreadyPending => ContractError::UpgradeAlreadyPending,
+            _ => ContractError::NotAuthorized,
+        })
     }
 
-    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+    pub fn execute_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        soroban_access_control_core::require_admin_permission(
+        ug_execute_upgrade(
             &env,
-            &get_admin(&env),
             &admin,
-            "execute_upgrade",
-            ContractError::NotAuthorized,
-        )?;
-        let hash = env
-            .storage()
-            .instance()
-            .get::<_, BytesN<32>>(&DataKey::PendingUpgradeHash)
-            .ok_or(ContractError::NoUpgradePending)?;
-        let execute_at: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingUpgradeAt)
-            .ok_or(ContractError::NoUpgradePending)?;
-        if env.ledger().timestamp() < execute_at {
-            return Err(ContractError::UpgradeDelayNotMet);
-        }
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingUpgradeHash);
-        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
-        env.events().publish(
-            (
-                Symbol::new(&env, "mvp_staking_pool"),
-                Symbol::new(&env, "execute_upgrade"),
-            ),
-            hash.clone(),
-        );
-        env.deployer().update_current_contract_wasm(hash);
-        Ok(())
+            &new_wasm_hash,
+            Symbol::new(&env, "mvp_staking_pool"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::NoPendingUpgrade => ContractError::NoUpgradePending,
+            UpgradeGovernanceError::UpgradeDelayNotElapsed => ContractError::UpgradeDelayNotMet,
+            _ => ContractError::NotAuthorized,
+        })
     }
 
     pub fn emergency_upgrade(
@@ -589,33 +533,22 @@ impl StakingPool {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        soroban_access_control_core::require_admin_permission(
+        // mvp_staking_pool doesn't use versioning, so we use version 0
+        // Mandatory guardian for fund contracts (require_guardian = true)
+        ug_emergency_upgrade(
             &env,
-            &get_admin(&env),
             &admin,
-            "emergency_upgrade",
-            ContractError::NotAuthorized,
-        )?;
-        if let Some(guardian) = env
-            .storage()
-            .instance()
-            .get::<_, Address>(&DataKey::Guardian)
-        {
-            guardian.require_auth();
-        }
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingUpgradeHash);
-        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
-        env.events().publish(
-            (
-                Symbol::new(&env, "mvp_staking_pool"),
-                Symbol::new(&env, "emergency_upgrade"),
-            ),
-            (admin.clone(), new_wasm_hash.clone()),
-        );
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-        Ok(())
+            &new_wasm_hash,
+            0, // No versioning in mvp_staking_pool
+            None,
+            Symbol::new(&env, "mvp_staking_pool"),
+            true, // Mandatory guardian for fund contracts
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::GuardianNotConfigured => ContractError::NotAuthorized,
+            _ => ContractError::NotAuthorized,
+        })
     }
 
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
@@ -628,13 +561,19 @@ impl StakingPool {
             "cancel_upgrade",
             ContractError::NotAuthorized,
         )?;
-        if !env.storage().instance().has(&DataKey::PendingUpgradeHash) {
+        if !env
+            .storage()
+            .instance()
+            .has(&UpgradeGovernanceKey::PendingUpgradeHash)
+        {
             return Err(ContractError::NoUpgradePending);
         }
         env.storage()
             .instance()
-            .remove(&DataKey::PendingUpgradeHash);
-        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+            .remove(&UpgradeGovernanceKey::PendingUpgradeHash);
+        env.storage()
+            .instance()
+            .remove(&UpgradeGovernanceKey::PendingUpgradeAt);
         env.events().publish(
             (
                 Symbol::new(&env, "mvp_staking_pool"),

@@ -5,6 +5,11 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
 };
 use soroban_storage_ttl::TtlStorage;
+use soroban_upgrade_governance_core::{
+    emergency_upgrade as ug_emergency_upgrade, execute_upgrade as ug_execute_upgrade,
+    propose_upgrade as ug_propose_upgrade, set_guardian as ug_set_guardian,
+    set_upgrade_delay as ug_set_upgrade_delay, UpgradeGovernanceError, UpgradeGovernanceKey,
+};
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
 pub mod monthly_cap;
@@ -25,19 +30,9 @@ mod monthly_cap_tests;
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    ContractVersion,
-    /// State schema version used to validate upgrade compatibility (#382)
-    StateSchemaVersion,
-    Admin,
     /// Per-user balance stored in persistent storage (gas-optimised, #386)
     Balance(Address),
     Paused,
-    // ── Upgrade governance (#392) ─────────────────────────────────────────
-    Guardian,
-    UpgradeDelay,
-    PendingUpgradeHash,
-    PendingUpgradeAt,
-    PendingUpgradeVersion,
     // ── Monthly spending cap (#1) ──────────────────────────────────────────
     /// Global default cap applied to any user without a per-user override.
     /// Unset (or explicitly `0`) means "no cap" — all debits are allowed.
@@ -48,32 +43,6 @@ pub enum DataKey {
     /// Cumulative amount debited by `user` during period `key` (see
     /// `monthly_cap::current_month_key`). Persistent, keyed per user per period.
     MonthlySpent(Address, u32),
-}
-
-fn get_state_schema_version(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get::<_, u32>(&DataKey::StateSchemaVersion)
-        .unwrap_or(0u32)
-}
-
-fn validate_upgrade_safety(env: &Env, new_version: u32) -> Result<(), ContractError> {
-    let current_version = RentWallet::contract_version(env.clone());
-    let schema_version = get_state_schema_version(env);
-
-    // Ensure current on-chain state schema matches the currently running contract.
-    // This forces a migration step (in the new WASM) before further upgrades.
-    if schema_version != current_version {
-        return Err(ContractError::IncompatibleStateSchema);
-    }
-
-    // Enforce sequential upgrades by default to reduce migration complexity.
-    // Emergency upgrades can still jump versions if desired by adjusting this rule later.
-    if new_version != current_version.saturating_add(1) {
-        return Err(ContractError::InvalidUpgradeVersion);
-    }
-
-    Ok(())
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -124,7 +93,7 @@ pub struct RentWallet;
 fn get_admin(env: &Env) -> Address {
     env.storage()
         .instance()
-        .get::<_, Address>(&DataKey::Admin)
+        .get::<_, Address>(&UpgradeGovernanceKey::Admin)
         .expect("admin not set")
 }
 
@@ -159,17 +128,19 @@ impl RentWallet {
     pub fn init(env: Env, admin: Address) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&UpgradeGovernanceKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
 
-        env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
-            .set(&DataKey::ContractVersion, &1u32);
+            .set(&UpgradeGovernanceKey::Admin, &admin);
         env.storage()
             .instance()
-            .set(&DataKey::StateSchemaVersion, &1u32);
+            .set(&UpgradeGovernanceKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
+            .set(&UpgradeGovernanceKey::StorageSchemaVersion, &1u32);
         env.storage().instance().set(&DataKey::Paused, &false);
 
         // #389: include version in init event
@@ -186,7 +157,7 @@ impl RentWallet {
 
         env.storage()
             .instance()
-            .get::<_, u32>(&DataKey::ContractVersion)
+            .get::<_, u32>(&UpgradeGovernanceKey::ContractVersion)
             .unwrap_or(0u32)
     }
 
@@ -194,7 +165,10 @@ impl RentWallet {
     pub fn state_schema_version(env: Env) -> u32 {
         env.extend_instance_ttl();
 
-        get_state_schema_version(&env)
+        env.storage()
+            .instance()
+            .get::<_, u32>(&UpgradeGovernanceKey::StorageSchemaVersion)
+            .unwrap_or(1u32)
     }
 
     pub fn version(env: Env) -> u32 {
@@ -304,7 +278,9 @@ impl RentWallet {
         )?;
 
         let old_admin = get_admin(&env);
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&UpgradeGovernanceKey::Admin, &new_admin);
 
         // #389: include old_admin for full audit trail
         env.events().publish(
@@ -377,23 +353,13 @@ impl RentWallet {
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        let current_admin = get_admin(&env);
-        soroban_access_control_core::require_admin_permission(
+        ug_set_guardian(
             &env,
-            &current_admin,
             &admin,
-            "set_guardian",
-            ContractError::NotAuthorized,
-        )?;
-        env.storage().instance().set(&DataKey::Guardian, &guardian);
-        env.events().publish(
-            (
-                Symbol::new(&env, "rent_wallet"),
-                Symbol::new(&env, "set_guardian"),
-            ),
-            guardian,
-        );
-        Ok(())
+            Some(guardian),
+            Symbol::new(&env, "rent_wallet"),
+        )
+        .map_err(|_| ContractError::NotAuthorized)
     }
 
     pub fn set_upgrade_delay(
@@ -403,29 +369,16 @@ impl RentWallet {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        let current_admin = get_admin(&env);
-        soroban_access_control_core::require_admin_permission(
+        ug_set_upgrade_delay(
             &env,
-            &current_admin,
             &admin,
-            "set_upgrade_delay",
-            ContractError::NotAuthorized,
-        )?;
-        env.storage()
-            .instance()
-            .set(&DataKey::UpgradeDelay, &delay_seconds);
-        env.events().publish(
-            (
-                Symbol::new(&env, "rent_wallet"),
-                Symbol::new(&env, "set_upgrade_delay"),
-            ),
             delay_seconds,
-        );
-        Ok(())
+            Symbol::new(&env, "rent_wallet"),
+        )
+        .map_err(|_| ContractError::NotAuthorized)
     }
 
-    /// Propose a contract upgrade. Admin must call this first; after the
-    /// configured delay the upgrade can be executed with `execute_upgrade`.
+    /// Propose a normal upgrade. After the configured delay the upgrade can be executed with `execute_upgrade`.
     pub fn propose_upgrade(
         env: Env,
         admin: Address,
@@ -434,43 +387,40 @@ impl RentWallet {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        let current_admin = get_admin(&env);
-        soroban_access_control_core::require_admin_permission(
-            &env,
-            &current_admin,
-            &admin,
-            "propose_upgrade",
-            ContractError::NotAuthorized,
-        )?;
-        if env.storage().instance().has(&DataKey::PendingUpgradeHash) {
-            return Err(ContractError::UpgradeAlreadyPending);
+        // Custom schema validation for rent_wallet
+        let current_version = Self::contract_version(env.clone());
+        let schema_version = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&UpgradeGovernanceKey::StorageSchemaVersion)
+            .unwrap_or(0u32);
+
+        // Ensure current on-chain state schema matches the currently running contract.
+        if schema_version != current_version {
+            return Err(ContractError::IncompatibleStateSchema);
         }
 
-        validate_upgrade_safety(&env, new_version)?;
-
-        let now = env.ledger().timestamp();
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingUpgradeHash, &new_wasm_hash);
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingUpgradeAt, &now);
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingUpgradeVersion, &new_version);
-        // #389: upgrade announcement event
-        env.events().publish(
-            (
-                Symbol::new(&env, "rent_wallet"),
-                Symbol::new(&env, "propose_upgrade"),
-            ),
-            (new_wasm_hash, new_version, now),
-        );
-        Ok(())
+        // Use shared upgrade governance module
+        ug_propose_upgrade(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            new_version,
+            Some(schema_version),
+            Symbol::new(&env, "rent_wallet"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::UpgradeAlreadyPending => ContractError::UpgradeAlreadyPending,
+            UpgradeGovernanceError::InvalidUpgradeVersion => ContractError::InvalidUpgradeVersion,
+            UpgradeGovernanceError::IncompatibleSchemaVersion => {
+                ContractError::IncompatibleStateSchema
+            }
+            _ => ContractError::NotAuthorized,
+        })
     }
 
-    /// Execute a previously proposed upgrade. Enforces the timelock delay and,
-    /// if a guardian is configured, requires their authorization (multi-sig).
+    /// Execute a previously proposed upgrade. Enforces the timelock delay.
     pub fn execute_upgrade(
         env: Env,
         admin: Address,
@@ -478,77 +428,21 @@ impl RentWallet {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        let current_admin = get_admin(&env);
-        soroban_access_control_core::require_admin_permission(
+        ug_execute_upgrade(
             &env,
-            &current_admin,
             &admin,
-            "execute_upgrade",
-            ContractError::NotAuthorized,
-        )?;
-        let pending: BytesN<32> = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingUpgradeHash)
-            .ok_or(ContractError::NoUpgradePending)?;
-        if pending != new_wasm_hash {
-            return Err(ContractError::NoUpgradePending);
-        }
-        let proposed_at: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingUpgradeAt)
-            .unwrap_or(0);
-        let proposed_version: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingUpgradeVersion)
-            .unwrap_or(0);
-
-        validate_upgrade_safety(&env, proposed_version)?;
-
-        let delay: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::UpgradeDelay)
-            .unwrap_or(0);
-        if delay > 0 && env.ledger().timestamp() < proposed_at + delay {
-            return Err(ContractError::UpgradeDelayNotMet);
-        }
-        // Multi-sig: require guardian if configured
-        if let Some(guardian) = env
-            .storage()
-            .instance()
-            .get::<_, Address>(&DataKey::Guardian)
-        {
-            guardian.require_auth();
-        }
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingUpgradeHash);
-        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingUpgradeVersion);
-
-        // Update version before WASM is swapped
-        env.storage()
-            .instance()
-            .set(&DataKey::ContractVersion, &proposed_version);
-
-        env.events().publish(
-            (
-                Symbol::new(&env, "rent_wallet"),
-                Symbol::new(&env, "execute_upgrade"),
-            ),
-            (new_wasm_hash.clone(), proposed_version),
-        );
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-        Ok(())
+            &new_wasm_hash,
+            Symbol::new(&env, "rent_wallet"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::NoPendingUpgrade => ContractError::NoUpgradePending,
+            UpgradeGovernanceError::UpgradeDelayNotElapsed => ContractError::UpgradeDelayNotMet,
+            _ => ContractError::NotAuthorized,
+        })
     }
 
-    /// Emergency upgrade — bypasses the timelock delay.  Both admin and
-    /// guardian (if set) must authorize.  Emits an enhanced event for auditing.
+    /// Emergency upgrade — bypasses the timelock delay. Requires mandatory guardian authorization.
     pub fn emergency_upgrade(
         env: Env,
         admin: Address,
@@ -557,55 +451,38 @@ impl RentWallet {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        let current_admin = get_admin(&env);
-        soroban_access_control_core::require_admin_permission(
-            &env,
-            &current_admin,
-            &admin,
-            "emergency_upgrade",
-            ContractError::NotAuthorized,
-        )?;
-
-        // Emergency upgrades still require schema compatibility, but allow only sequential
-        // upgrades for now (same safety policy as normal upgrades).
-        validate_upgrade_safety(&env, new_version)?;
-
-        // Multi-sig: require guardian if configured
-        if let Some(guardian) = env
+        // Custom schema validation for rent_wallet
+        let current_version = Self::contract_version(env.clone());
+        let schema_version = env
             .storage()
             .instance()
-            .get::<_, Address>(&DataKey::Guardian)
-        {
-            guardian.require_auth();
+            .get::<_, u32>(&UpgradeGovernanceKey::StorageSchemaVersion)
+            .unwrap_or(0u32);
+
+        // Ensure current on-chain state schema matches the currently running contract.
+        if schema_version != current_version {
+            return Err(ContractError::IncompatibleStateSchema);
         }
-        // Clear any pending upgrade
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingUpgradeHash);
-        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingUpgradeVersion);
 
-        env.storage()
-            .instance()
-            .set(&DataKey::ContractVersion, &new_version);
-
-        // Enhanced logging for emergency path
-        env.events().publish(
-            (
-                Symbol::new(&env, "rent_wallet"),
-                Symbol::new(&env, "emergency_upgrade"),
-            ),
-            (
-                admin,
-                new_wasm_hash.clone(),
-                new_version,
-                env.ledger().timestamp(),
-            ),
-        );
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-        Ok(())
+        // Use shared upgrade governance module with mandatory guardian (require_guardian = true)
+        ug_emergency_upgrade(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            new_version,
+            Some(schema_version),
+            Symbol::new(&env, "rent_wallet"),
+            true, // Mandatory guardian for fund contracts
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::GuardianNotConfigured => ContractError::NotAuthorized,
+            UpgradeGovernanceError::InvalidUpgradeVersion => ContractError::InvalidUpgradeVersion,
+            UpgradeGovernanceError::IncompatibleSchemaVersion => {
+                ContractError::IncompatibleStateSchema
+            }
+            _ => ContractError::NotAuthorized,
+        })
     }
 
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
@@ -622,15 +499,17 @@ impl RentWallet {
         let hash: BytesN<32> = env
             .storage()
             .instance()
-            .get(&DataKey::PendingUpgradeHash)
+            .get(&UpgradeGovernanceKey::PendingUpgradeHash)
             .ok_or(ContractError::NoUpgradePending)?;
         env.storage()
             .instance()
-            .remove(&DataKey::PendingUpgradeHash);
-        env.storage().instance().remove(&DataKey::PendingUpgradeAt);
+            .remove(&UpgradeGovernanceKey::PendingUpgradeHash);
         env.storage()
             .instance()
-            .remove(&DataKey::PendingUpgradeVersion);
+            .remove(&UpgradeGovernanceKey::PendingUpgradeAt);
+        env.storage()
+            .instance()
+            .remove(&UpgradeGovernanceKey::PendingUpgradeVersion);
         env.events().publish(
             (
                 Symbol::new(&env, "rent_wallet"),
@@ -1557,9 +1436,10 @@ mod test {
 
         // Break schema compatibility to force execute_upgrade to fail.
         env.as_contract(&contract_id, || {
-            env.storage()
-                .instance()
-                .set(&super::DataKey::StateSchemaVersion, &0u32);
+            env.storage().instance().set(
+                &soroban_upgrade_governance_core::UpgradeGovernanceKey::StorageSchemaVersion,
+                &0u32,
+            );
         });
 
         env.mock_auths(&[MockAuth {

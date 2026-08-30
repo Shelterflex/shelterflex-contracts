@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::{token::StellarAssetClient, Address, Env, IntoVal};
@@ -224,11 +222,11 @@ fn stake_emits_event() {
     client.stake(&user, &100i128);
 
     let events = env.events().all();
-    assert!(events.len() > 0);
+    assert!(!events.is_empty());
 
     // Verify at least one event was emitted
     // The event structure in soroban SDK is complex, so we just check events exist
-    assert!(events.len() >= 1);
+    assert!(!events.is_empty());
 }
 
 #[test]
@@ -244,11 +242,11 @@ fn unstake_emits_event() {
     client.unstake(&user, &100i128);
 
     let events = env.events().all();
-    assert!(events.len() > 0);
+    assert!(!events.is_empty());
 
     // Verify at least one event was emitted
     // The event structure in soroban SDK is complex, so we just check events exist
-    assert!(events.len() >= 1);
+    assert!(!events.is_empty());
 }
 
 // ── Authorization boundary (Issue #18) ───────────────────────────────────────
@@ -302,7 +300,10 @@ fn non_admin_rejected_on_every_admin_gated_entry_point() {
     );
 
     assert_eq!(
-        client.try_execute_upgrade(&attacker).unwrap_err().unwrap(),
+        client
+            .try_execute_upgrade(&attacker, &hash)
+            .unwrap_err()
+            .unwrap(),
         ContractError::NotAuthorized,
         "execute_upgrade must reject a non-admin"
     );
@@ -376,7 +377,7 @@ fn rejected_admin_call_does_not_change_config() {
     let hash = soroban_sdk::BytesN::from_array(&env, &[9u8; 32]);
     client.propose_upgrade(&admin, &hash);
     assert!(
-        client.try_execute_upgrade(&admin).is_err(),
+        client.try_execute_upgrade(&admin, &hash).is_err(),
         "the attacker must not have been able to zero out the upgrade delay"
     );
 }

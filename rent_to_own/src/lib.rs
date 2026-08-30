@@ -5,13 +5,17 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
 };
 use soroban_storage_ttl::TtlStorage;
+use soroban_upgrade_governance_core::{
+    emergency_upgrade as ug_emergency_upgrade, execute_upgrade as ug_execute_upgrade,
+    propose_upgrade as ug_propose_upgrade, set_guardian as ug_set_guardian,
+    set_upgrade_delay as ug_set_upgrade_delay, UpgradeGovernanceError, UpgradeGovernanceKey,
+};
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    Admin,
     /// Emergency-brake flag; set by `pause`, cleared by `unpause`.
     Paused,
     Deal(BytesN<32>),
@@ -44,6 +48,10 @@ pub enum ContractError {
     InvalidTransfer = 12,
     /// State-mutating call attempted while the contract is paused.
     Paused = 13,
+    // ── Upgrade governance errors (#392) ─────────────────────────────────────────
+    UpgradeAlreadyPending = 14,
+    NoUpgradePending = 15,
+    UpgradeDelayNotMet = 16,
 }
 
 // ── Data Structures ───────────────────────────────────────────────────────────
@@ -100,7 +108,7 @@ pub struct RentToOwn;
 fn get_admin(env: &Env) -> Address {
     env.storage()
         .instance()
-        .get(&DataKey::Admin)
+        .get(&UpgradeGovernanceKey::Admin)
         .expect("not init")
 }
 
@@ -150,13 +158,18 @@ impl RentToOwn {
     pub fn init(env: Env, admin: Address, forfeiture_bps: u32) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&UpgradeGovernanceKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
         if forfeiture_bps > 10_000 {
             return Err(ContractError::InvalidAmount);
         }
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&UpgradeGovernanceKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&UpgradeGovernanceKey::ContractVersion, &1u32);
         env.storage()
             .instance()
             .set(&DataKey::ForfeitureBps, &forfeiture_bps);
@@ -471,6 +484,149 @@ impl RentToOwn {
             return 0;
         }
         ((deal.equity_accumulated_usdc * 10_000) / deal.property_value_usdc) as u32
+    }
+
+    // ── Upgrade governance (#392) ─────────────────────────────────────────────
+
+    pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        ug_set_guardian(
+            &env,
+            &admin,
+            Some(guardian),
+            Symbol::new(&env, "rent_to_own"),
+        )
+        .map_err(|_| ContractError::NotAuthorized)
+    }
+
+    pub fn set_upgrade_delay(
+        env: Env,
+        admin: Address,
+        delay_seconds: u64,
+    ) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        ug_set_upgrade_delay(
+            &env,
+            &admin,
+            delay_seconds,
+            Symbol::new(&env, "rent_to_own"),
+        )
+        .map_err(|_| ContractError::NotAuthorized)
+    }
+
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+        new_version: u32,
+    ) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        // rent_to_own doesn't use schema versioning
+        ug_propose_upgrade(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            new_version,
+            None,
+            Symbol::new(&env, "rent_to_own"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::UpgradeAlreadyPending => ContractError::UpgradeAlreadyPending,
+            UpgradeGovernanceError::InvalidUpgradeVersion => ContractError::NotAuthorized,
+            _ => ContractError::NotAuthorized,
+        })
+    }
+
+    pub fn execute_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        ug_execute_upgrade(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            Symbol::new(&env, "rent_to_own"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::NoPendingUpgrade => ContractError::NoUpgradePending,
+            UpgradeGovernanceError::UpgradeDelayNotElapsed => ContractError::UpgradeDelayNotMet,
+            _ => ContractError::NotAuthorized,
+        })
+    }
+
+    pub fn emergency_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+        new_version: u32,
+    ) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        // rent_to_own is not a fund contract, so guardian is optional (require_guardian = false)
+        ug_emergency_upgrade(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            new_version,
+            None,
+            Symbol::new(&env, "rent_to_own"),
+            false, // Optional guardian for non-fund contracts
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::GuardianNotConfigured => ContractError::NotAuthorized,
+            _ => ContractError::NotAuthorized,
+        })
+    }
+
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        require_not_paused(&env)?;
+        let current_admin = get_admin(&env);
+        soroban_access_control_core::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "cancel_upgrade",
+            ContractError::NotAuthorized,
+        )?;
+
+        if !env
+            .storage()
+            .instance()
+            .has(&UpgradeGovernanceKey::PendingUpgradeHash)
+        {
+            return Err(ContractError::NoUpgradePending);
+        }
+
+        env.storage()
+            .instance()
+            .remove(&UpgradeGovernanceKey::PendingUpgradeHash);
+        env.storage()
+            .instance()
+            .remove(&UpgradeGovernanceKey::PendingUpgradeAt);
+        env.storage()
+            .instance()
+            .remove(&UpgradeGovernanceKey::PendingUpgradeVersion);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "rent_to_own"),
+                Symbol::new(&env, "cancel_upgrade"),
+            ),
+            admin,
+        );
+
+        Ok(())
     }
 }
 

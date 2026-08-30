@@ -6,22 +6,20 @@ use soroban_sdk::{
     Symbol,
 };
 use soroban_storage_ttl::TtlStorage;
+use soroban_upgrade_governance_core::{
+    emergency_upgrade as ug_emergency_upgrade, execute_upgrade as ug_execute_upgrade,
+    propose_upgrade as ug_propose_upgrade, set_guardian as ug_set_guardian,
+    set_upgrade_delay as ug_set_upgrade_delay, UpgradeGovernanceError, UpgradeGovernanceKey,
+};
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
-    ContractVersion,
-    Admin,
     Operator,
     Token,
     Paused,
-    // ── Upgrade governance (#392) ─────────────────────────────────────────
-    Guardian,
-    UpgradeDelay,
-    PendingUpgradeHash,
-    PendingUpgradeAt,
     // ── Hold window & per-allocation tracking (Issue #1135) ───────────────
     /// Seconds after allocation before it becomes claimable
     HoldWindow,
@@ -86,7 +84,7 @@ pub struct WhistleblowerRewards;
 fn get_admin(env: &Env) -> Address {
     env.storage()
         .instance()
-        .get::<_, Address>(&StorageKey::Admin)
+        .get::<_, Address>(&UpgradeGovernanceKey::Admin)
         .expect("admin not set")
 }
 
@@ -231,17 +229,19 @@ impl WhistleblowerRewards {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        if env.storage().instance().has(&StorageKey::Admin) {
+        if env.storage().instance().has(&UpgradeGovernanceKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
-        env.storage().instance().set(&StorageKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&UpgradeGovernanceKey::Admin, &admin);
         env.storage()
             .instance()
             .set(&StorageKey::Operator, &operator);
         env.storage().instance().set(&StorageKey::Token, &token);
         env.storage()
             .instance()
-            .set(&StorageKey::ContractVersion, &1u32);
+            .set(&UpgradeGovernanceKey::ContractVersion, &1u32);
         env.storage().instance().set(&StorageKey::Paused, &false);
         env.storage()
             .instance()
@@ -262,7 +262,7 @@ impl WhistleblowerRewards {
 
         env.storage()
             .instance()
-            .get::<_, u32>(&StorageKey::ContractVersion)
+            .get::<_, u32>(&UpgradeGovernanceKey::ContractVersion)
             .unwrap_or(0u32)
     }
 
@@ -367,7 +367,7 @@ impl WhistleblowerRewards {
         let guardian_opt = env
             .storage()
             .instance()
-            .get::<_, Address>(&StorageKey::Guardian);
+            .get::<_, Address>(&UpgradeGovernanceKey::Guardian);
         let is_authorized = caller == op || guardian_opt.as_ref().map_or(false, |g| &caller == g);
         if !is_authorized {
             return Err(ContractError::NotAuthorized);
@@ -565,35 +565,25 @@ impl WhistleblowerRewards {
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        require_admin(&env, &admin)?;
-        env.storage()
-            .instance()
-            .set(&StorageKey::Guardian, &guardian);
-        env.events().publish(
-            (
-                Symbol::new(&env, "whistleblower_rewards"),
-                Symbol::new(&env, "set_guardian"),
-            ),
-            guardian,
-        );
-        Ok(())
+        ug_set_guardian(
+            &env,
+            &admin,
+            Some(guardian),
+            Symbol::new(&env, "whistleblower_rewards"),
+        )
+        .map_err(|_| ContractError::NotAuthorized)
     }
 
     pub fn set_upgrade_delay(env: Env, admin: Address, delay: u64) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        require_admin(&env, &admin)?;
-        env.storage()
-            .instance()
-            .set(&StorageKey::UpgradeDelay, &delay);
-        env.events().publish(
-            (
-                Symbol::new(&env, "whistleblower_rewards"),
-                Symbol::new(&env, "set_upgrade_delay"),
-            ),
+        ug_set_upgrade_delay(
+            &env,
+            &admin,
             delay,
-        );
-        Ok(())
+            Symbol::new(&env, "whistleblower_rewards"),
+        )
+        .map_err(|_| ContractError::NotAuthorized)
     }
 
     pub fn propose_upgrade(
@@ -603,68 +593,41 @@ impl WhistleblowerRewards {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        require_admin(&env, &admin)?;
-        if env
-            .storage()
-            .instance()
-            .has(&StorageKey::PendingUpgradeHash)
-        {
-            return Err(ContractError::UpgradeAlreadyPending);
-        }
-        let delay: u64 = env
-            .storage()
-            .instance()
-            .get(&StorageKey::UpgradeDelay)
-            .unwrap_or(0);
-        let execute_at = env.ledger().timestamp() + delay;
-        env.storage()
-            .instance()
-            .set(&StorageKey::PendingUpgradeHash, &new_wasm_hash);
-        env.storage()
-            .instance()
-            .set(&StorageKey::PendingUpgradeAt, &execute_at);
-        env.events().publish(
-            (
-                Symbol::new(&env, "whistleblower_rewards"),
-                Symbol::new(&env, "propose_upgrade"),
-            ),
-            (new_wasm_hash, execute_at),
-        );
-        Ok(())
+        // whistleblower_rewards doesn't use versioning, so we use version 0
+        ug_propose_upgrade(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            0, // No versioning in whistleblower_rewards
+            None,
+            Symbol::new(&env, "whistleblower_rewards"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::UpgradeAlreadyPending => ContractError::UpgradeAlreadyPending,
+            _ => ContractError::NotAuthorized,
+        })
     }
 
-    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+    pub fn execute_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        require_admin(&env, &admin)?;
-        let hash = env
-            .storage()
-            .instance()
-            .get::<_, BytesN<32>>(&StorageKey::PendingUpgradeHash)
-            .ok_or(ContractError::NoUpgradePending)?;
-        let execute_at: u64 = env
-            .storage()
-            .instance()
-            .get(&StorageKey::PendingUpgradeAt)
-            .ok_or(ContractError::NoUpgradePending)?;
-        if env.ledger().timestamp() < execute_at {
-            return Err(ContractError::UpgradeDelayNotMet);
-        }
-        env.storage()
-            .instance()
-            .remove(&StorageKey::PendingUpgradeHash);
-        env.storage()
-            .instance()
-            .remove(&StorageKey::PendingUpgradeAt);
-        env.events().publish(
-            (
-                Symbol::new(&env, "whistleblower_rewards"),
-                Symbol::new(&env, "execute_upgrade"),
-            ),
-            hash.clone(),
-        );
-        env.deployer().update_current_contract_wasm(hash);
-        Ok(())
+        ug_execute_upgrade(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            Symbol::new(&env, "whistleblower_rewards"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::NoPendingUpgrade => ContractError::NoUpgradePending,
+            UpgradeGovernanceError::UpgradeDelayNotElapsed => ContractError::UpgradeDelayNotMet,
+            _ => ContractError::NotAuthorized,
+        })
     }
 
     pub fn emergency_upgrade(
@@ -674,29 +637,22 @@ impl WhistleblowerRewards {
     ) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        require_admin(&env, &admin)?;
-        if let Some(guardian) = env
-            .storage()
-            .instance()
-            .get::<_, Address>(&StorageKey::Guardian)
-        {
-            guardian.require_auth();
-        }
-        env.storage()
-            .instance()
-            .remove(&StorageKey::PendingUpgradeHash);
-        env.storage()
-            .instance()
-            .remove(&StorageKey::PendingUpgradeAt);
-        env.events().publish(
-            (
-                Symbol::new(&env, "whistleblower_rewards"),
-                Symbol::new(&env, "emergency_upgrade"),
-            ),
-            (admin.clone(), new_wasm_hash.clone()),
-        );
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-        Ok(())
+        // whistleblower_rewards doesn't use versioning, so we use version 0
+        // Mandatory guardian for fund contracts (require_guardian = true)
+        ug_emergency_upgrade(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            0, // No versioning in whistleblower_rewards
+            None,
+            Symbol::new(&env, "whistleblower_rewards"),
+            true, // Mandatory guardian for fund contracts
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::GuardianNotConfigured => ContractError::NotAuthorized,
+            _ => ContractError::NotAuthorized,
+        })
     }
 
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
@@ -706,16 +662,16 @@ impl WhistleblowerRewards {
         if !env
             .storage()
             .instance()
-            .has(&StorageKey::PendingUpgradeHash)
+            .has(&UpgradeGovernanceKey::PendingUpgradeHash)
         {
             return Err(ContractError::NoUpgradePending);
         }
         env.storage()
             .instance()
-            .remove(&StorageKey::PendingUpgradeHash);
+            .remove(&UpgradeGovernanceKey::PendingUpgradeHash);
         env.storage()
             .instance()
-            .remove(&StorageKey::PendingUpgradeAt);
+            .remove(&UpgradeGovernanceKey::PendingUpgradeAt);
         env.events().publish(
             (
                 Symbol::new(&env, "whistleblower_rewards"),

@@ -6,13 +6,17 @@ use soroban_sdk::{
     IntoVal, String, Symbol, Vec,
 };
 use soroban_storage_ttl::TtlStorage;
+use soroban_upgrade_governance_core::{
+    emergency_upgrade as ug_emergency_upgrade, execute_upgrade as ug_execute_upgrade,
+    propose_upgrade as ug_propose_upgrade, set_guardian as ug_set_guardian,
+    set_upgrade_delay as ug_set_upgrade_delay, UpgradeGovernanceError, UpgradeGovernanceKey,
+};
 
 mod formal_properties;
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    Admin,
     Paused,
     Token,
     BondCollateral(BytesN<32>),
@@ -20,7 +24,6 @@ pub enum DataKey {
     WarningThreshold,
     LiquidationThreshold,
     KeeperRewardCap,
-    ContractVersion,
 
     // ── Inspector bond layer (Issue #925) ────────────────────────────────
     /// Address of the linked slashing_module contract.
@@ -78,6 +81,12 @@ pub enum ContractError {
     SlashingModuleNotSet = 17,
     /// Issue #1136: oracle price is stale (exceeds configured staleness limit).
     OracleStale = 18,
+    // ── Upgrade governance errors (#392) ─────────────────────────────────────────
+    UpgradeAlreadyPending = 19,
+    NoUpgradePending = 20,
+    UpgradeDelayNotMet = 21,
+    IncompatibleStateSchema = 22,
+    InvalidUpgradeVersion = 23,
 }
 
 /// Price scale: oracle price of 10_000_000 means 1 collateral unit = 1 bond unit.
@@ -99,7 +108,7 @@ pub struct BondCollateral;
 fn get_admin(env: &Env) -> Address {
     env.storage()
         .instance()
-        .get(&DataKey::Admin)
+        .get(&UpgradeGovernanceKey::Admin)
         .expect("admin not set")
 }
 
@@ -113,7 +122,14 @@ fn get_token(env: &Env) -> Address {
 fn get_contract_version(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&DataKey::ContractVersion)
+        .get(&UpgradeGovernanceKey::ContractVersion)
+        .unwrap_or(1u32)
+}
+
+fn get_storage_schema_version(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&UpgradeGovernanceKey::StorageSchemaVersion)
         .unwrap_or(1u32)
 }
 
@@ -214,17 +230,22 @@ impl BondCollateral {
     pub fn init(env: Env, admin: Address, token: Address) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&UpgradeGovernanceKey::Admin) {
             return Err(ContractError::AlreadyInitialized);
         }
 
         admin.require_auth();
 
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&UpgradeGovernanceKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage()
             .instance()
-            .set(&DataKey::ContractVersion, &1u32);
+            .set(&UpgradeGovernanceKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
+            .set(&UpgradeGovernanceKey::StorageSchemaVersion, &1u32);
         env.storage()
             .instance()
             .set(&DataKey::TotalCollateral, &0i128);
@@ -268,7 +289,9 @@ impl BondCollateral {
             ContractError::NotAuthorized,
         )?;
 
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&UpgradeGovernanceKey::Admin, &new_admin);
 
         env.events().publish(
             (
@@ -405,6 +428,167 @@ impl BondCollateral {
             ),
             ratio,
         );
+        Ok(())
+    }
+
+    // ── Upgrade governance (#392) ─────────────────────────────────────────────
+
+    pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        ug_set_guardian(
+            &env,
+            &admin,
+            Some(guardian),
+            Symbol::new(&env, "bond_collateral"),
+        )
+        .map_err(|_| ContractError::NotAuthorized)
+    }
+
+    pub fn set_upgrade_delay(
+        env: Env,
+        admin: Address,
+        delay_seconds: u64,
+    ) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        ug_set_upgrade_delay(
+            &env,
+            &admin,
+            delay_seconds,
+            Symbol::new(&env, "bond_collateral"),
+        )
+        .map_err(|_| ContractError::NotAuthorized)
+    }
+
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+        new_version: u32,
+    ) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        // Custom schema validation for bond_collateral
+        let current_version = get_contract_version(&env);
+        let schema_version = get_storage_schema_version(&env);
+
+        if schema_version != current_version {
+            return Err(ContractError::IncompatibleStateSchema);
+        }
+
+        ug_propose_upgrade(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            new_version,
+            Some(schema_version),
+            Symbol::new(&env, "bond_collateral"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::UpgradeAlreadyPending => ContractError::UpgradeAlreadyPending,
+            UpgradeGovernanceError::InvalidUpgradeVersion => ContractError::InvalidUpgradeVersion,
+            UpgradeGovernanceError::IncompatibleSchemaVersion => {
+                ContractError::IncompatibleStateSchema
+            }
+            _ => ContractError::NotAuthorized,
+        })
+    }
+
+    pub fn execute_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        ug_execute_upgrade(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            Symbol::new(&env, "bond_collateral"),
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::NoPendingUpgrade => ContractError::NoUpgradePending,
+            UpgradeGovernanceError::UpgradeDelayNotElapsed => ContractError::UpgradeDelayNotMet,
+            _ => ContractError::NotAuthorized,
+        })
+    }
+
+    pub fn emergency_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+        new_version: u32,
+    ) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        // Custom schema validation for bond_collateral
+        let current_version = get_contract_version(&env);
+        let schema_version = get_storage_schema_version(&env);
+
+        if schema_version != current_version {
+            return Err(ContractError::IncompatibleStateSchema);
+        }
+
+        // Mandatory guardian for fund contracts (require_guardian = true)
+        ug_emergency_upgrade(
+            &env,
+            &admin,
+            &new_wasm_hash,
+            new_version,
+            Some(schema_version),
+            Symbol::new(&env, "bond_collateral"),
+            true, // Mandatory guardian for fund contracts
+        )
+        .map_err(|e| match e {
+            UpgradeGovernanceError::NotAuthorized => ContractError::NotAuthorized,
+            UpgradeGovernanceError::GuardianNotConfigured => ContractError::NotAuthorized,
+            _ => ContractError::NotAuthorized,
+        })
+    }
+
+    pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), ContractError> {
+        env.extend_instance_ttl();
+
+        require_not_paused(&env)?;
+        let current_admin = get_admin(&env);
+        soroban_access_control_core::require_admin_permission(
+            &env,
+            &current_admin,
+            &admin,
+            "cancel_upgrade",
+            ContractError::NotAuthorized,
+        )?;
+
+        if !env
+            .storage()
+            .instance()
+            .has(&UpgradeGovernanceKey::PendingUpgradeHash)
+        {
+            return Err(ContractError::NoUpgradePending);
+        }
+
+        env.storage()
+            .instance()
+            .remove(&UpgradeGovernanceKey::PendingUpgradeHash);
+        env.storage()
+            .instance()
+            .remove(&UpgradeGovernanceKey::PendingUpgradeAt);
+        env.storage()
+            .instance()
+            .remove(&UpgradeGovernanceKey::PendingUpgradeVersion);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "bond_collateral"),
+                Symbol::new(&env, "cancel_upgrade"),
+            ),
+            admin,
+        );
+
         Ok(())
     }
 

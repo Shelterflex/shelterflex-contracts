@@ -95,7 +95,7 @@ fn non_admin_rejected_on_every_admin_gated_entry_point() {
 
     assert_eq!(
         s.client
-            .try_execute_upgrade(&s.attacker)
+            .try_execute_upgrade(&s.attacker, &wasm_hash)
             .unwrap_err()
             .unwrap(),
         ContractError::NotAuthorized,

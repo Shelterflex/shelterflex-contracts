@@ -12,6 +12,7 @@ soroban-sdk = "22.0.7"
 soroban_access_control_core = { path = "../soroban_access_control_core" }
 soroban_reentrancy_guard = { version = "0.1.0", path = "../soroban_reentrancy_guard" }
 soroban_storage_ttl = { path = "../soroban_storage_ttl" }
+soroban_upgrade_governance_core = { path = "../soroban_upgrade_governance_core" }
 
 [dev-dependencies]
 soroban_storage_ttl = { path = "../soroban_storage_ttl", features = ["testutils"] }
