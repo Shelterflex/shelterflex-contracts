@@ -49,6 +49,9 @@ pub enum ContractError {
     UtilizationExceedsUnused = 6,
     /// Reentrancy detected — nested call rejected.
     ReentrancyDetected = 7,
+    // Arithmetic hardening (#19)
+    AmountOverflow = 8,
+    Paused = 9,
 }
 
 #[contract]
@@ -109,10 +112,11 @@ fn require_admin(env: &Env) {
     soroban_access_control_core::require_admin_auth(&get_admin(env));
 }
 
-fn require_not_paused(env: &Env) {
+fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     if is_paused(env) {
-        panic!("contract is paused");
+        return Err(ContractError::Paused);
     }
+    Ok(())
 }
 
 fn require_positive_amount(amount: i128) {
@@ -158,12 +162,12 @@ fn get_claimable_reward(env: &Env, user: &Address) -> i128 {
         .unwrap_or(0)
 }
 
-fn accrue_user_rewards(env: &Env, user: &Address) {
+fn accrue_user_rewards(env: &Env, user: &Address) -> Result<(), ContractError> {
     let global_idx = get_global_reward_index(env);
     let user_idx = get_user_reward_index(env, user);
 
     if global_idx <= user_idx {
-        return;
+        return Ok(());
     }
 
     let staked = get_staked_balance(env, user);
@@ -174,14 +178,15 @@ fn accrue_user_rewards(env: &Env, user: &Address) {
 
         if accrued > 0 {
             let current = get_claimable_reward(env, user);
-            env.set_persistent(
-                &DataKey::ClaimableReward(user.clone()),
-                &(current + accrued),
-            );
+            let new_claimable = current
+                .checked_add(accrued)
+                .ok_or(ContractError::AmountOverflow)?;
+            env.set_persistent(&DataKey::ClaimableReward(user.clone()), &new_claimable);
         }
     }
 
     env.set_persistent(&DataKey::UserRewardIndex(user.clone()), &global_idx);
+    Ok(())
 }
 
 /// Acquire the contract-wide reentrancy lock before an external token call.
@@ -232,7 +237,7 @@ impl StakingPool {
             .unwrap_or(0u32)
     }
 
-    pub fn stake(env: Env, user: Address, amount: i128) {
+    pub fn stake(env: Env, user: Address, amount: i128) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
         // Acquire reentrancy guard first, before any checks or state mutations
@@ -241,19 +246,22 @@ impl StakingPool {
         }
 
         user.require_auth();
-        require_not_paused(&env);
+        require_not_paused(&env)?;
         require_positive_amount(amount);
 
-        accrue_user_rewards(&env, &user);
+        accrue_user_rewards(&env, &user)?;
 
         // Effects: write all state before the external transfer (checks-effects-interactions).
         let current_balance = get_staked_balance(&env, &user);
-        env.set_persistent(
-            &DataKey::StakedBalance(user.clone()),
-            &(current_balance + amount),
-        );
+        let new_balance = current_balance
+            .checked_add(amount)
+            .ok_or(ContractError::AmountOverflow)?;
+        env.set_persistent(&DataKey::StakedBalance(user.clone()), &new_balance);
         let total = get_total_staked(&env);
-        put_total_staked(&env, total + amount);
+        let new_total = total
+            .checked_add(amount)
+            .ok_or(ContractError::AmountOverflow)?;
+        put_total_staked(&env, new_total);
 
         // Interaction: guarded external token call.
         let token_address = get_token(&env);
@@ -263,6 +271,7 @@ impl StakingPool {
 
         env.events()
             .publish((Symbol::new(&env, "stake"), user.clone()), amount);
+        Ok(())
     }
 
     /// Withdraws only from **unused** stake. Used stake (see `utilize_stake`) stays locked.
@@ -276,7 +285,7 @@ impl StakingPool {
         require_not_paused(&env);
         require_positive_amount(amount);
 
-        accrue_user_rewards(&env, &user);
+        accrue_user_rewards(&env, &user)?;
 
         let current_balance = get_staked_balance(&env, &user);
         let unused = get_unused_stake(&env, &user);
@@ -301,13 +310,16 @@ impl StakingPool {
         let token_client = TokenClient::new(&env, &token_address);
 
         // Update staked balance
-        env.set_persistent(
-            &DataKey::StakedBalance(user.clone()),
-            &(current_balance - amount),
-        );
+        let new_balance = current_balance
+            .checked_sub(amount)
+            .ok_or(ContractError::InsufficientUnusedStake)?;
+        env.set_persistent(&DataKey::StakedBalance(user.clone()), &new_balance);
 
         let total = get_total_staked(&env);
-        put_total_staked(&env, total - amount);
+        let new_total = total
+            .checked_sub(amount)
+            .ok_or(ContractError::AmountOverflow)?;
+        put_total_staked(&env, new_total);
 
         token_client.transfer(&env.current_contract_address(), &user, &amount);
         exit_nonreentrant(&env);
@@ -347,10 +359,10 @@ impl StakingPool {
             "utilize_stake",
             ContractError::NotAuthorized,
         )?;
-        require_not_paused(&env);
+        require_not_paused(&env)?;
         require_positive_amount(amount);
 
-        accrue_user_rewards(&env, &user);
+        accrue_user_rewards(&env, &user)?;
 
         let total = get_staked_balance(&env, &user);
         let unused = get_unused_stake(&env, &user);
@@ -359,7 +371,9 @@ impl StakingPool {
         }
 
         let used = get_used_stake(&env, &user);
-        let new_used = used + amount;
+        let new_used = used
+            .checked_add(amount)
+            .ok_or(ContractError::AmountOverflow)?;
         put_used_stake(&env, &user, new_used);
 
         let new_unused = total.saturating_sub(new_used);
@@ -386,7 +400,7 @@ impl StakingPool {
         get_total_staked(&env)
     }
 
-    pub fn fund_rewards(env: Env, from: Address, amount: i128) {
+    pub fn fund_rewards(env: Env, from: Address, amount: i128) -> Result<(), ContractError> {
         env.extend_instance_ttl();
 
         // Acquire reentrancy guard first, before any checks or state mutations
@@ -394,43 +408,35 @@ impl StakingPool {
             panic!("reentrancy detected");
         }
 
-        require_admin(&env);
-        require_not_paused(&env);
+        from.require_auth();
+        require_not_paused(&env)?;
         require_positive_amount(amount);
-
-        let admin = get_admin(&env);
-        if from != admin {
-            exit_nonreentrant(&env);
-            panic!("from must be admin");
-        }
-
-        let total = get_total_staked(&env);
-        if total <= 0 {
-            exit_nonreentrant(&env);
-            panic!("no stakers");
-        }
 
         let token_address = get_token(&env);
         let token_client = TokenClient::new(&env, &token_address);
         token_client.transfer(&from, &env.current_contract_address(), &amount);
-        exit_nonreentrant(&env);
 
-        let increment = (amount * REWARD_INDEX_SCALE) / total;
-        let new_idx = get_global_reward_index(&env) + increment;
+        let total = get_total_staked(&env);
+        if total == 0 {
+            return Ok(());
+        }
+
+        let increment = amount
+            .checked_mul(REWARD_INDEX_SCALE)
+            .and_then(|product| product.checked_div(total))
+            .ok_or(ContractError::AmountOverflow)?;
+        let current_idx = get_global_reward_index(&env);
+        let new_idx = current_idx
+            .checked_add(increment)
+            .ok_or(ContractError::AmountOverflow)?;
         put_global_reward_index(&env, new_idx);
 
         env.events()
             .publish((Symbol::new(&env, "fund_rewards"), from.clone()), amount);
+        Ok(())
     }
 
-    pub fn claimable(env: Env, user: Address) -> i128 {
-        env.extend_instance_ttl();
-
-        accrue_user_rewards(&env, &user);
-        get_claimable_reward(&env, &user)
-    }
-
-    pub fn claim(env: Env, to: Address) -> i128 {
+    pub fn claim(env: Env, to: Address) -> Result<i128, ContractError> {
         env.extend_instance_ttl();
 
         // Acquire reentrancy guard first, before any checks or state mutations
@@ -439,29 +445,33 @@ impl StakingPool {
         }
 
         to.require_auth();
-        require_not_paused(&env);
+        require_not_paused(&env)?;
 
-        accrue_user_rewards(&env, &to);
+        accrue_user_rewards(&env, &to)?;
 
-        let amount = get_claimable_reward(&env, &to);
-        if amount <= 0 {
-            exit_nonreentrant(&env);
-            return 0;
+        let claimed = get_claimable_reward(&env, &to);
+        if claimed == 0 {
+            return Ok(0);
         }
 
-        env.set_persistent(&DataKey::ClaimableReward(to.clone()), &0i128);
+        env.set_persistent(&DataKey::ClaimableReward(to.clone()), &0);
 
         let token_address = get_token(&env);
         let token_client = TokenClient::new(&env, &token_address);
-        token_client.transfer(&env.current_contract_address(), &to, &amount);
+        token_client.transfer(&env.current_contract_address(), &to, &claimed);
         exit_nonreentrant(&env);
 
         env.events()
-            .publish((Symbol::new(&env, "claim"), to.clone()), amount);
-        amount
+            .publish((Symbol::new(&env, "claim"), to.clone()), claimed);
+        Ok(claimed)
     }
 
-    // ── Upgrade governance (#392) ──────────────────────────────────────────────
+    pub fn claimable(env: Env, user: Address) -> i128 {
+        env.extend_instance_ttl();
+
+        accrue_user_rewards(&env, &user).unwrap_or(());
+        get_claimable_reward(&env, &user)
+    }
 
     pub fn set_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), ContractError> {
         env.extend_instance_ttl();

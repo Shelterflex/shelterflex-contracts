@@ -70,6 +70,8 @@ pub enum ContractError {
     InvalidLimit = 3,
     Paused = 4,
     DuplicateReference = 5,
+    // Arithmetic hardening (#19)
+    ReceiptCountOverflow = 6,
 }
 
 #[contract]
@@ -121,11 +123,13 @@ fn get_receipt_count(env: &Env, deal_id: DealId) -> ReceiptId {
         .unwrap_or(0)
 }
 
-fn increment_receipt_count(env: &Env, deal_id: DealId) -> ReceiptId {
+fn increment_receipt_count(env: &Env, deal_id: DealId) -> Result<ReceiptId, ContractError> {
     let count = get_receipt_count(env, deal_id);
-    let new_count = count + 1;
+    let new_count = count
+        .checked_add(1)
+        .ok_or(ContractError::ReceiptCountOverflow)?;
     env.set_persistent(&DataKey::ReceiptCount(deal_id), &new_count);
-    new_count
+    Ok(new_count)
 }
 
 fn is_reference_used(env: &Env, deal_id: DealId, reference: &BytesN<32>) -> bool {
@@ -239,7 +243,7 @@ impl RentPayments {
             return Err(ContractError::DuplicateReference);
         }
 
-        let receipt_id = increment_receipt_count(&env, deal_id);
+        let receipt_id = increment_receipt_count(&env, deal_id)?;
         let timestamp = env.ledger().timestamp();
         let tx_id = get_tx_id(&env);
         let payer_clone = payer.clone();

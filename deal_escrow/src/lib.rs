@@ -85,6 +85,8 @@ pub enum ContractError {
     MigrationInvariantViolation = 22,
     // Deal lifecycle (#974)
     InvalidDealTransition = 23,
+    // Arithmetic hardening (#19)
+    AmountOverflow = 24,
 }
 
 #[contracttype]
@@ -437,10 +439,13 @@ impl DealEscrow {
 
         // #386: per-key persistent storage
         let cur = get_deal_balance(&env, &deal_id);
-        put_deal_balance(&env, &deal_id, cur + amount);
+        let new_balance = cur
+            .checked_add(amount)
+            .ok_or(ContractError::AmountOverflow)?;
+        put_deal_balance(&env, &deal_id, new_balance);
         set_deal_depositor_if_missing(&env, &deal_id, &from);
         let mut state = get_deal_state(&env, &deal_id);
-        state.total_balance = cur + amount;
+        state.total_balance = new_balance;
         assert_deal_invariants(&state)?;
         set_deal_state(&env, &deal_id, &state);
 
@@ -494,7 +499,12 @@ impl DealEscrow {
             return Err(ContractError::InsufficientBalance);
         }
 
-        if principal_amount + platform_amount + reporter_amount != cur {
+        // Checked arithmetic for split validation (#19)
+        let split_sum = principal_amount
+            .checked_add(platform_amount)
+            .and_then(|sum| sum.checked_add(reporter_amount))
+            .ok_or(ContractError::AmountOverflow)?;
+        if split_sum != cur {
             return Err(ContractError::InvalidSplit);
         }
 
@@ -881,7 +891,10 @@ impl DealEscrow {
         token_client.transfer(&env.current_contract_address(), &recipient, &pending.amount);
         exit_nonreentrant(env);
 
-        state.total_balance -= pending.amount;
+        state.total_balance = state
+            .total_balance
+            .checked_sub(pending.amount)
+            .ok_or(ContractError::InsufficientBalance)?;
         state.locked_amount = 0;
         state.pending_payout = 0;
         assert_deal_invariants(&state)?;
@@ -3282,5 +3295,137 @@ mod test {
             .unwrap();
         assert_eq!(client.get_circuit_breaker_state(), 0u32);
         assert!(!client.is_frozen());
+    }
+
+    // ── Arithmetic hardening tests (#19) ─────────────────────────────────────
+
+    #[test]
+    fn deposit_overflow_returns_typed_error() {
+        let env = Env::default();
+        let (contract_id, client, _admin, _operator, token, token_admin, _rcpt) = setup(&env);
+        let from = Address::generate(&env);
+        let token_sac = StellarAssetClient::new(&env, &token);
+        let deal_id = String::from_str(&env, "overflow-deal");
+
+        // Set balance to near max
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::DealBalance(deal_id.clone()), &(i128::MAX - 100));
+        });
+
+        env.mock_auths(&[MockAuth {
+            address: &token_admin,
+            invoke: &MockAuthInvoke {
+                contract: &token,
+                fn_name: "mint",
+                args: (from.clone(), 200i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        token_sac.mint(&from, &200i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &from,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (from.clone(), deal_id.clone(), 200i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (from.clone(), contract_id.clone(), 200i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+
+        let err = client
+            .try_deposit(&from, &deal_id, &200i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::AmountOverflow);
+    }
+
+    #[test]
+    fn release_split_overflow_returns_typed_error() {
+        let env = Env::default();
+        let (contract_id, client, _admin, operator, token, token_admin, _rcpt) = setup(&env);
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        let platform_addr = Address::generate(&env);
+        let reporter_addr = Address::generate(&env);
+        let token_sac = StellarAssetClient::new(&env, &token);
+        let deal_id = String::from_str(&env, "split-overflow");
+
+        env.mock_auths(&[MockAuth {
+            address: &token_admin,
+            invoke: &MockAuthInvoke {
+                contract: &token,
+                fn_name: "mint",
+                args: (from.clone(), 100i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        token_sac.mint(&from, &100i128);
+
+        env.mock_auths(&[MockAuth {
+            address: &from,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (from.clone(), deal_id.clone(), 100i128).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token,
+                    fn_name: "transfer",
+                    args: (from.clone(), contract_id.clone(), 100i128).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }]);
+        client
+            .try_deposit(&from, &deal_id, &100i128)
+            .unwrap()
+            .unwrap();
+
+        // Try to release with amounts that would overflow in unchecked arithmetic
+        env.mock_auths(&[MockAuth {
+            address: &operator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "release",
+                args: (
+                    operator.clone(),
+                    deal_id.clone(),
+                    to.clone(),
+                    i128::MAX,
+                    platform_addr.clone(),
+                    1i128,
+                    reporter_addr.clone(),
+                    1i128,
+                    Symbol::new(&env, "manual_admin"),
+                    String::from_str(&env, "ext1"),
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let err = client
+            .try_release(
+                &operator,
+                &deal_id,
+                &to,
+                &i128::MAX,
+                &platform_addr,
+                &1i128,
+                &reporter_addr,
+                &1i128,
+                &Symbol::new(&env, "manual_admin"),
+                &String::from_str(&env, "ext1"),
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ContractError::AmountOverflow);
     }
 }
