@@ -1,5 +1,6 @@
 target
 .soroban
 .DS_Store
-.env
 test_snapshots
+config.bat
+node_modules

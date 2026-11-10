@@ -10,8 +10,8 @@
     "rollback-test": "tsx test-cli.ts rollback-test",
     "backup": "tsx test-cli.ts backup",
     "restore": "tsx test-cli.ts restore",
-    "build": "tsc",
-    "dev": "tsx cli.ts"
+    "build": "node init && tsc",
+    "dev": "node init && tsx cli.ts"
   },
   "keywords": [],
   "author": "",
